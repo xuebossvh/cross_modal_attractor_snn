@@ -1,6 +1,6 @@
 """配对 (图像, 音频, 标签) 数据集 —— MNIST + FSDD 真实语音（log-mel）。
 
-音频特征：2D log-mel [n_mels, n_frames]，逐样本 min-max 归一化到 ~[0,1]。
+音频特征：2D log-mel [n_mels, n_frames]，归一化到 ~[0,1]（global 或 per_sample）。
 Audio Encoder 输入、Audio Decoder 输出、audio recovery loss 均使用此格式。
 """
 
@@ -11,7 +11,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from data.audio_features import log_mel_from_wav, audio_feature_shape
+from data.audio_features import (
+    log_mel_from_wav, audio_feature_shape, ensure_audio_norm_stats,
+)
 from data.fsdd import ensure_fsdd, fsdd_recordings_dir
 
 
@@ -82,6 +84,8 @@ def _load_fsdd_by_digit(cfg, train):
         )
 
     n_mels, n_frames = audio_feature_shape(cfg)
+    norm_mode = ac.get("norm_mode", "global")
+    norm_stats = cfg.get("_audio_norm_stats")
     by_digit = {d: [] for d in range(cfg["dims"]["num_classes"])}
     n_parse_skip = 0
     n_split_skip = 0
@@ -104,6 +108,7 @@ def _load_fsdd_by_digit(cfg, train):
         try:
             feat = log_mel_from_wav(
                 f, ac["sample_rate"], n_mels, n_frames, ac["duration_sec"],
+                norm_mode=norm_mode, norm_stats=norm_stats,
             )
             by_digit[digit].append(feat)
         except Exception as e:
@@ -264,6 +269,10 @@ class PairedAudioVisualDataset(Dataset):
 
 def build_loaders(cfg):
     from torch.utils.data import DataLoader
+    if cfg["audio"].get("use_real_audio", True):
+        cfg["_audio_norm_stats"] = ensure_audio_norm_stats(cfg)
+    else:
+        cfg["_audio_norm_stats"] = None
     train_set = PairedAudioVisualDataset(cfg, train=True)
     test_set = PairedAudioVisualDataset(cfg, train=False)
 

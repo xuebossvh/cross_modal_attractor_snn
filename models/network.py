@@ -38,8 +38,10 @@ class CrossModalSNN(nn.Module):
 
         self.classifier = ClassifierHead(d["N_index"], d["num_classes"])
         self.image_decoder = ImageDecoder(d["N_value_img"])
+        aud_dec_ch = s.get("aud_decoder_base_ch", 128)
         self.audio_decoder = AudioDecoder(
-            d["N_value_aud"], ac["n_mels"], ac["n_frames"])
+            d["N_value_aud"], ac["n_mels"], ac["n_frames"],
+            base_ch=aud_dec_ch)
 
         self.use_audio_aux = ab.get("use_audio_aux_cls", True)
         if self.use_audio_aux:

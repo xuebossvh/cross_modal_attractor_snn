@@ -67,7 +67,7 @@ cross_modal_attractor_snn/
 ## 3. 训练
 
 ```bash
-python -u scripts/train.py --config configs/v4.yaml
+python -u scripts/train.py --config configs/v5.yaml
 python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
 ```
 
@@ -84,13 +84,13 @@ python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
 > 注意：若你曾用旧架构训练过，旧 checkpoint 结构不兼容，evaluate/demo 会自动
 > 检测并回退到随机权重并给出警告——重新训练即可。
 
-快速冒烟（小子集、1 epoch）：编辑 `configs/v4.yaml` 设 `data.train_subset: 512`、
+快速冒烟（小子集、1 epoch）：编辑 `configs/v5.yaml` 设 `data.train_subset: 512`、
 `train.epochs: 1`，再运行 `python -u scripts/train.py`。
 
 ## 4. 评估与 Demo
 
 ```bash
-python -u scripts/evaluate.py --config configs/v4.yaml
+python -u scripts/evaluate.py --config configs/v5.yaml
 python -u scripts/demo_inference.py --num 10 --severity 0.5
 python -u scripts/smoke_test.py
 ```
@@ -156,13 +156,13 @@ I_A = alpha_img * W_img_to_A(K_img) + alpha_aud * W_aud_to_A(K_aud)
 
 6 种 cue 模式（`common.py :: CUE_MODES`）：`corrupt_img_only` / `corrupt_aud_only` /
 `corrupt_both` / `clean_img_only` / `clean_aud_only` / `clean_both`，采样概率见
-`configs/v4.yaml :: cue_modes`。
+`configs/v5.yaml :: cue_modes`。
 
 损坏函数（`data/corruption.py`，`severity∈[0,1]`）：
 - 图像：`occlusion` / `pixel_delete` / `gaussian` / `mask_left|right|top|bottom`
 - 音频：`gaussian` / `time_mask` / `freq_mask` / `feature_dropout` / `partial_temporal`
 
-## 8. 消融开关（`configs/v4.yaml :: ablation`）
+## 8. 消融开关（`configs/v5.yaml :: ablation`）
 
 | 开关 | 作用 |
 |------|------|

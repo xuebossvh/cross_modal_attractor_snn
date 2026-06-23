@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v4.yaml
+    python -u scripts/train.py --config configs/v5.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -148,7 +148,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v4.yaml")
+    ap.add_argument("--config", default="configs/v5.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)

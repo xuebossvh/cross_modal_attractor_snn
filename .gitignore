@@ -23,7 +23,10 @@ logs/
 *.log
 loss_curve*.csv
 
+outputs/
 outputs_v3/
 outputs_v4/
+
+_data/audio_norm_stats.pt
 .vscode/
 .idea/

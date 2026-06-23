@@ -15,7 +15,7 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 DATA_ROOT = PROJECT_ROOT / "_data"
 
 DEFAULT_CKPT = CHECKPOINTS_DIR / "cross_modal_snn.pt"
-DEFAULT_CONFIG = CONFIGS_DIR / "v4.yaml"
+DEFAULT_CONFIG = CONFIGS_DIR / "v5.yaml"
 
 
 def ensure_output_dirs():
