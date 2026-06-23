@@ -54,10 +54,11 @@ cross_modal_attractor_snn/
 ├── common.py          # cue 采样、target 选择、指标
 ├── paths.py           # 项目根目录与 outputs 路径
 ├── outputs/           # 运行产物（不入 git，见 .gitignore）
-│   ├── checkpoints/   # *.pt 权重
-│   ├── logs/          # 训练日志
-│   ├── figures/       # demo PNG
-│   └── tables/        # 评估表、loss 曲线 csv
+│   ├── checkpoints/   # 各版本 *.pt 权重（共用）
+│   └── outputs_v5/    # 版本专属产物（v3/v4 同理）
+│       ├── logs/
+│       ├── figures/
+│       └── tables/
 ├── docs/              # 文档（如 GPT_HANDOFF.md）
 ├── _data/             # MNIST、FSDD 原始数据
 ├── requirements.txt
@@ -67,7 +68,7 @@ cross_modal_attractor_snn/
 ## 3. 训练
 
 ```bash
-python -u scripts/train.py --config configs/v5.yaml
+python -u scripts/train.py --config configs/v5.yaml 2>&1 | tee outputs/outputs_v5/logs/train_v5_50ep.log
 python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
 ```
 
@@ -79,7 +80,8 @@ python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
 - **readout 阶段**：关闭 target，decoder **只读 `v_*_from_A`**（A 驱动的 Value），
   计算分类 / 图像恢复 / 音频恢复 / 脉冲正则损失。
 
-每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn.pt`。
+每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v5.pt`（由 yaml 指定）。
+日志 / 图表 / 表格写入 `outputs/outputs_v5/{logs,figures,tables}/`。
 
 > 注意：若你曾用旧架构训练过，旧 checkpoint 结构不兼容，evaluate/demo 会自动
 > 检测并回退到随机权重并给出警告——重新训练即可。
@@ -90,7 +92,7 @@ python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
 ## 4. 评估与 Demo
 
 ```bash
-python -u scripts/evaluate.py --config configs/v5.yaml
+python -u scripts/evaluate.py --config configs/v5.yaml | tee outputs/outputs_v5/tables/full_eval_v5.txt
 python -u scripts/demo_inference.py --num 10 --severity 0.5
 python -u scripts/smoke_test.py
 ```
@@ -100,10 +102,10 @@ python -u scripts/smoke_test.py
   `smp`=样本级 / `cat`=类别代表原型）。快速试跑：`python -u evaluate.py --max_batches 5`。
 - `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注
   cue type / target type / true label / pred label / confidence：
-  - `outputs/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
-  - `outputs/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
-  - `outputs/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
-  - 评估表：`outputs/tables/demo_eval_table.txt`
+  - `outputs/outputs_v5/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
+  - `outputs/outputs_v5/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
+  - `outputs/outputs_v5/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
+  - 评估表：`outputs/outputs_v5/tables/demo_eval_table.txt`
 
 ---
 

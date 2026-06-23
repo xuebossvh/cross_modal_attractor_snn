@@ -154,8 +154,9 @@ def main():
     ap.add_argument("--start_epoch", type=int, default=None)
     args = ap.parse_args()
 
-    ensure_output_dirs()
     cfg = load_config(args.config)
+    cfg["_config_path"] = args.config
+    ensure_output_dirs(cfg)
     set_seed(cfg["seed"])
     device = torch.device(cfg["device"] if torch.cuda.is_available()
                           or cfg["device"] == "cpu" else "cpu")

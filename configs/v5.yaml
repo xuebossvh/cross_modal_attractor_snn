@@ -1,7 +1,8 @@
 # ============================================================
 # 跨模态循环吸引子 SNN — v5 冻结配置（50 epoch）
 # v5a: 全局固定 log-mel 归一化 | v5b: 64×64 mel | v5c: 更大 audio Value/Decoder
-# 对应 checkpoint: outputs/checkpoints/cross_modal_snn_v5.pt
+# checkpoint: outputs/checkpoints/cross_modal_snn_v5.pt
+# 日志/图表/表格: outputs/outputs_v5/{logs,figures,tables}/
 # ============================================================
 
 seed: 1234
@@ -114,6 +115,7 @@ data:
   train_subset: 0
 
 train:
+  output_version: v5
   epochs: 50
   lr: 0.001
   weight_decay: 0.0

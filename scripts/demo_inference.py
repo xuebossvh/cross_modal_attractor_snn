@@ -1,9 +1,9 @@
 """跨模态 SNN 联想记忆推理 demo。
 
-输出三张图（外行可读）：
-  outputs/figures/demo_aud_only.png  — 只输入残缺语音
-  outputs/figures/demo_img_only.png  — 只输入残缺图像
-  outputs/figures/demo_both.png      — 双模态残缺输入
+输出三张图（外行可读，默认写入 outputs/outputs_v5/figures/）：
+  demo_aud_only.png  — 只输入残缺语音
+  demo_img_only.png  — 只输入残缺图像
+  demo_both.png      — 双模态残缺输入
 
 用法：
     python -u scripts/demo_inference.py --num 8 --severity 0.5
@@ -17,7 +17,7 @@ import torch
 import torch.nn.functional as F
 
 from paths import (ensure_output_dirs, resolve_from_root,
-                   FIGURES_DIR, TABLES_DIR)
+                   figures_dir, tables_dir)
 from common import (fix_console_encoding, log, load_config, select_targets,
                     setup_matplotlib_chinese, batch_ssim, format_table_row)
 from data.corruption import corrupt_audio, corrupt_image, AUD_MODES, IMG_MODES
@@ -370,7 +370,6 @@ def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
 
 
 def main():
-    ensure_output_dirs()
     fix_console_encoding()
     setup_matplotlib_chinese()
 
@@ -381,14 +380,21 @@ def main():
     ap.add_argument("--severity", type=float, default=0.5)
     ap.add_argument("--aud_corrupt_mode", default="time_mask")
     ap.add_argument("--img_corrupt_mode", default="occlusion")
-    ap.add_argument("--out_aud", default=str(FIGURES_DIR / "demo_aud_only.png"))
-    ap.add_argument("--out_img", default=str(FIGURES_DIR / "demo_img_only.png"))
-    ap.add_argument("--out_both", default=str(FIGURES_DIR / "demo_both.png"))
-    ap.add_argument("--eval_table", default=str(TABLES_DIR / "demo_eval_table.txt"),
-                    help="评估表输出路径")
+    ap.add_argument("--out_aud", default=None)
+    ap.add_argument("--out_img", default=None)
+    ap.add_argument("--out_both", default=None)
+    ap.add_argument("--eval_table", default=None, help="评估表输出路径")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    cfg["_config_path"] = args.config
+    ensure_output_dirs(cfg)
+    fig_dir = figures_dir(cfg)
+    tbl_dir = tables_dir(cfg)
+    args.out_aud = args.out_aud or str(fig_dir / "demo_aud_only.png")
+    args.out_img = args.out_img or str(fig_dir / "demo_img_only.png")
+    args.out_both = args.out_both or str(fig_dir / "demo_both.png")
+    args.eval_table = args.eval_table or str(tbl_dir / "demo_eval_table.txt")
     device = torch.device("cuda" if (cfg["device"] == "cuda"
                           and torch.cuda.is_available()) else "cpu")
     ckpt_path = str(resolve_from_root(args.ckpt or cfg["train"]["ckpt_path"]))
