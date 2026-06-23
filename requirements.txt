@@ -1,0 +1,13 @@
+# 核心依赖
+torch>=1.13.0
+torchvision>=0.14.0
+numpy>=1.21
+PyYAML>=6.0
+
+# Demo / 可视化
+matplotlib>=3.5
+tqdm>=4.60
+
+# FSDD 真实语音 log-mel 特征提取（必需）
+torchaudio>=0.13.0
+soundfile>=0.12.0
