@@ -68,6 +68,8 @@ cross_modal_attractor_snn/
 ## 3. 训练
 
 ```bash
+pip install -r requirements.txt
+python scripts/mkdir_outputs.py --config configs/v5.yaml
 python -u scripts/train.py --config configs/v5.yaml 2>&1 | tee outputs/outputs_v5/logs/train_v5_50ep.log
 python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
 ```

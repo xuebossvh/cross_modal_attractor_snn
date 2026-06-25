@@ -148,7 +148,7 @@ def main():
     for mode in EVAL_MODES:
         r = eval_mode(model, test_loader, cfg, mode, device,
                       args.severity, proto_img, proto_aud, args.max_batches)
-        tgt = f"{r['img_kind'][:3]}/{r['aud_kind'][:3]}"
+        tgt = f"{r['img_kind']}/{r['aud_kind']}"
         log(format_table_row([
             mode, f"{r['acc']*100:.1f}%",
             f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['ssim']:.3f}",
