@@ -28,3 +28,5 @@ outputs/
 _data/audio_norm_stats.pt
 .vscode/
 .idea/
+
+configs/default.yaml
