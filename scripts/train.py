@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v6a.yaml
+    python -u scripts/train.py --config configs/v6c.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -102,6 +102,82 @@ def _aud_recon_loss(rec, target, lc):
     return loss
 
 
+def _mode_enabled(cue_mode, modes):
+    return cue_mode in set(modes or [])
+
+
+def _soft_cls_loss(student_logits, teacher_logits, temperature=2.0):
+    t = max(float(temperature), 1e-6)
+    log_p = F.log_softmax(student_logits / t, dim=1)
+    q = F.softmax(teacher_logits.detach() / t, dim=1)
+    return F.kl_div(log_p, q, reduction="batchmean") * (t * t)
+
+
+def _class_key_alignment_loss(key_img, key_aud, labels, temperature=0.1):
+    if key_img is None or key_aud is None:
+        return None
+    img = key_img.mean(dim=0)
+    aud = key_aud.mean(dim=0)
+    if img.size(1) != aud.size(1):
+        return None
+
+    img = F.normalize(img, dim=1)
+    aud = F.normalize(aud, dim=1)
+    temp = max(float(temperature), 1e-6)
+    sim_i2a = img @ aud.t() / temp
+    sim_a2i = aud @ img.t() / temp
+    pos = (labels.view(-1, 1) == labels.view(1, -1)).to(img.dtype)
+
+    def sup_ce(sim):
+        log_prob = F.log_softmax(sim, dim=1)
+        denom = pos.sum(dim=1).clamp_min(1.0)
+        return -((pos * log_prob).sum(dim=1) / denom).mean()
+
+    return 0.5 * (sup_ce(sim_i2a) + sup_ce(sim_a2i))
+
+
+def _alignment_losses(model, out_r, clean_img, clean_aud, labels, cue_mode, cfg):
+    lc = cfg["loss"]
+    total = out_r["index_state"].new_tensor(0.0)
+    logs = {}
+
+    teacher_modes = lc.get("align_teacher_modes", [])
+    need_teacher = (
+        (lc.get("lambda_index_cons", 0.0) > 0
+         or lc.get("lambda_soft_cls", 0.0) > 0)
+        and _mode_enabled(cue_mode, teacher_modes)
+    )
+    if need_teacher:
+        with torch.no_grad():
+            out_clean = model(x_img_cue=clean_img, x_aud_cue=clean_aud,
+                              training_mode=False, phase="readout")
+        lam_idx = lc.get("lambda_index_cons", 0.0)
+        if lam_idx > 0:
+            loss_idx = F.mse_loss(out_r["index_state"],
+                                  out_clean["index_state"].detach())
+            total = total + lam_idx * loss_idx
+            logs["idx_cons"] = loss_idx.item()
+
+        lam_soft = lc.get("lambda_soft_cls", 0.0)
+        if lam_soft > 0:
+            loss_soft = _soft_cls_loss(
+                out_r["logits"], out_clean["logits"],
+                lc.get("soft_cls_temperature", 2.0))
+            total = total + lam_soft * loss_soft
+            logs["soft_cls"] = loss_soft.item()
+
+    lam_key = lc.get("lambda_key_align", 0.0)
+    if lam_key > 0 and _mode_enabled(cue_mode, lc.get("key_align_modes", [])):
+        loss_key = _class_key_alignment_loss(
+            out_r.get("key_img"), out_r.get("key_aud"), labels,
+            lc.get("key_align_temperature", 0.1))
+        if loss_key is not None:
+            total = total + lam_key * loss_key
+            logs["key_align"] = loss_key.item()
+
+    return total, logs
+
+
 def _apply_audio_target_curriculum(tgt_aud, labels, cue_mode, aud_kind,
                                    cfg, proto_aud, epoch):
     cur = cfg["loss"].get("aud_sample_curriculum", {})
@@ -118,6 +194,7 @@ def _apply_audio_target_curriculum(tgt_aud, labels, cue_mode, aud_kind,
         sample_w = 1.0
     else:
         sample_w = float(epoch - start) / max(float(end - start), 1.0)
+    sample_w = min(sample_w, float(cur.get("max_sample_mix", 1.0)))
 
     cat_aud = proto_aud[labels]
     mixed = sample_w * tgt_aud + (1.0 - sample_w) * cat_aud
@@ -162,6 +239,11 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     out_r = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
                   training_mode=True, phase="readout")
 
+    loss_align, align_logs = _alignment_losses(
+        model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
+    total = total + loss_align
+    logs.update(align_logs)
+
     loss_cls = F.cross_entropy(out_r["logits"], labels)
     cls_w = lc["lambda_cls"]
     if is_aud_only_mode(cue_mode):
@@ -200,7 +282,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v6a.yaml")
+    ap.add_argument("--config", default="configs/v6c.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)

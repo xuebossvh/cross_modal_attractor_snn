@@ -106,7 +106,7 @@ class CrossModalSNN(nn.Module):
             "index_spikes": mem["index_spikes"],
             "index_state": mem["index_state"],
             "spike_img_cue": spike_img_cue, "spike_aud_cue": spike_aud_cue,
-            "key_aud": mem.get("key_aud"),
+            "key_img": mem.get("key_img"), "key_aud": mem.get("key_aud"),
             "v_img_from_A": mem["v_img_from_A"], "v_aud_from_A": mem["v_aud_from_A"],
             "v_img_target": mem["v_img_target"], "v_aud_target": mem["v_aud_target"],
         }
