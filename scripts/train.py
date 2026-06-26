@@ -150,7 +150,8 @@ def _alignment_losses(model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
     if need_teacher:
         with torch.no_grad():
             out_clean = model(x_img_cue=clean_img, x_aud_cue=clean_aud,
-                              training_mode=False, phase="readout")
+                              training_mode=False, phase="readout",
+                              decode=False)
         lam_idx = lc.get("lambda_index_cons", 0.0)
         if lam_idx > 0:
             loss_idx = F.mse_loss(out_r["index_state"],
