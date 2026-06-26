@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v5.yaml
+    python -u scripts/train.py --config configs/v6a.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -62,6 +62,25 @@ def _aud_active_loss(rec, target):
     return F.relu(tgt_std - rec_std).mean()
 
 
+def _aud_foreground_loss(rec, target, top_fraction=0.15):
+    frac = max(0.0, min(1.0, float(top_fraction)))
+    if frac <= 0:
+        return rec.new_tensor(0.0)
+    flat = target.flatten(1)
+    k = max(1, int(round(frac * flat.size(1))))
+    thresh = torch.topk(flat, k, dim=1).values[:, -1].view(-1, 1, 1)
+    mask = (target >= thresh).to(target.dtype)
+    denom = mask.sum().clamp_min(1.0)
+    diff = rec - target
+    return ((diff.abs() + diff.pow(2)) * mask).sum() / denom
+
+
+def _aud_marginal_loss(rec, target):
+    loss_t = F.l1_loss(rec.mean(dim=1), target.mean(dim=1))
+    loss_f = F.l1_loss(rec.mean(dim=2), target.mean(dim=2))
+    return loss_t + loss_f
+
+
 def _aud_recon_loss(rec, target, lc):
     """L1 + MSE + weighted_MSE + 时频梯度 loss。"""
     gamma = lc.get("aud_weight_gamma", 3.0)
@@ -73,7 +92,36 @@ def _aud_recon_loss(rec, target, lc):
     lam_g = lc.get("lambda_aud_grad", 0.0)
     if lam_g > 0:
         loss = loss + lam_g * _aud_tf_grad_loss(rec, target)
+    lam_fg = lc.get("lambda_aud_foreground", 0.0)
+    if lam_fg > 0:
+        loss = loss + lam_fg * _aud_foreground_loss(
+            rec, target, lc.get("aud_foreground_top_fraction", 0.15))
+    lam_m = lc.get("lambda_aud_marginal", 0.0)
+    if lam_m > 0:
+        loss = loss + lam_m * _aud_marginal_loss(rec, target)
     return loss
+
+
+def _apply_audio_target_curriculum(tgt_aud, labels, cue_mode, aud_kind,
+                                   cfg, proto_aud, epoch):
+    cur = cfg["loss"].get("aud_sample_curriculum", {})
+    if not isinstance(cur, dict) or not cur.get("enabled", False):
+        return tgt_aud, None
+    if aud_kind != "sample" or cue_mode not in cur.get("modes", ["corrupt_both"]):
+        return tgt_aud, None
+
+    start = int(cur.get("start_epoch", 0))
+    end = int(cur.get("end_epoch", 35))
+    if epoch <= start:
+        sample_w = 0.0
+    elif epoch >= end:
+        sample_w = 1.0
+    else:
+        sample_w = float(epoch - start) / max(float(end - start), 1.0)
+
+    cat_aud = proto_aud[labels]
+    mixed = sample_w * tgt_aud + (1.0 - sample_w) * cat_aud
+    return mixed.clamp(0.0, 1.0), sample_w
 
 
 def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
@@ -88,9 +136,13 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
                                  severity=severity)
     tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
         cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
+    tgt_aud, aud_mix = _apply_audio_target_curriculum(
+        tgt_aud, labels, cue_mode, aud_kind, cfg, proto_aud, epoch)
 
     total = 0.0
     logs = {"sev": severity}
+    if aud_mix is not None:
+        logs["aud_mix"] = aud_mix
 
     if use_binding:
         out_b = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
@@ -148,7 +200,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v5.yaml")
+    ap.add_argument("--config", default="configs/v6a.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)

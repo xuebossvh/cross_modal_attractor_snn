@@ -13,7 +13,7 @@
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v5.yaml
+    python -u scripts/evaluate.py --config configs/v6a.yaml
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -110,7 +110,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v5.yaml")
+    ap.add_argument("--config", default="configs/v6a.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--severity", type=float, default=0.5)

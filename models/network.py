@@ -18,6 +18,8 @@ class CrossModalSNN(nn.Module):
         ab = cfg.get("ablation", {})
         self.T = s["T"]
         ac = cfg["audio"]
+        self.audio_encoder_norm_mode = ac.get("encoder_norm_mode", "global")
+        self.audio_encoder_local_mix = float(ac.get("encoder_local_mix", 0.5))
 
         self.img_encoder = ImageSNNEncoder(
             d["img_in"], d["img_hidden"], d["D_img"], self.T,
@@ -41,7 +43,9 @@ class CrossModalSNN(nn.Module):
         aud_dec_ch = s.get("aud_decoder_base_ch", 128)
         self.audio_decoder = AudioDecoder(
             d["N_value_aud"], ac["n_mels"], ac["n_frames"],
-            base_ch=aud_dec_ch)
+            base_ch=aud_dec_ch,
+            start_hw=s.get("aud_decoder_start_hw", 4),
+            refine_blocks=s.get("aud_decoder_refine_blocks", 0))
 
         self.use_audio_aux = ab.get("use_audio_aux_cls", True)
         if self.use_audio_aux:
@@ -49,6 +53,25 @@ class CrossModalSNN(nn.Module):
                 d["N_key_aud"], d["num_classes"])
         else:
             self.aux_aud_classifier = None
+
+    def _normalize_audio_for_encoder(self, x_aud):
+        if x_aud is None:
+            return None
+        mode = self.audio_encoder_norm_mode
+        if mode in ("global", "dataset", "none", None):
+            return x_aud
+
+        flat = x_aud.flatten(1)
+        lo = flat.min(dim=1).values.view(-1, 1, 1)
+        hi = flat.max(dim=1).values.view(-1, 1, 1)
+        per_sample = ((x_aud - lo) / (hi - lo).clamp_min(1e-6)).clamp(0.0, 1.0)
+
+        if mode == "per_sample":
+            return per_sample
+        if mode == "hybrid":
+            mix = max(0.0, min(1.0, self.audio_encoder_local_mix))
+            return ((1.0 - mix) * x_aud + mix * per_sample).clamp(0.0, 1.0)
+        raise ValueError(f"Unknown audio.encoder_norm_mode: {mode}")
 
     def forward(self, x_img_cue=None, x_aud_cue=None,
                 x_img_target=None, x_aud_target=None,
@@ -62,7 +85,8 @@ class CrossModalSNN(nn.Module):
             x_aud_target = None
 
         spike_img_cue = self.img_encoder(x_img_cue) if x_img_cue is not None else None
-        spike_aud_cue = self.aud_encoder(x_aud_cue) if x_aud_cue is not None else None
+        spike_aud_cue = (self.aud_encoder(self._normalize_audio_for_encoder(x_aud_cue))
+                         if x_aud_cue is not None else None)
 
         spike_img_tgt = None
         spike_aud_tgt = None
@@ -70,7 +94,8 @@ class CrossModalSNN(nn.Module):
             if x_img_target is not None:
                 spike_img_tgt = self.img_encoder(x_img_target)
             if x_aud_target is not None:
-                spike_aud_tgt = self.aud_encoder(x_aud_target)
+                spike_aud_tgt = self.aud_encoder(
+                    self._normalize_audio_for_encoder(x_aud_target))
 
         mem = self.memory(
             spike_img_cue=spike_img_cue, spike_aud_cue=spike_aud_cue,

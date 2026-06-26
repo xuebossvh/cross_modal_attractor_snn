@@ -12,7 +12,7 @@ from data.corruption import corrupt_image, corrupt_audio
 from models.network import CrossModalSNN
 from train import compute_losses
 
-cfg = load_config("configs/v5.yaml")
+cfg = load_config("configs/v6a.yaml")
 cfg["device"] = "cpu"
 model = CrossModalSNN(cfg)
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
