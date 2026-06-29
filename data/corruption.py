@@ -13,7 +13,11 @@ import torch
 IMG_MODES = ["occlusion", "pixel_delete", "gaussian",
              "mask_left", "mask_right", "mask_top", "mask_bottom"]
 AUD_MODES = ["gaussian", "time_mask", "freq_mask",
-             "feature_dropout", "partial_temporal"]
+             "feature_dropout", "partial_temporal", "time_freq_block"]
+
+# v7：受控训练残缺池（避免 full-random 让模型放弃样本级恢复）。
+# 仅保留结构化遮挡 + 少量噪声，不与 block 过度叠加。
+AUD_TRAIN_MODES = ["time_mask", "freq_mask", "time_freq_block", "gaussian"]
 
 
 def _resolve(mode, pool):
@@ -100,6 +104,14 @@ def corrupt_audio(x_aud, mode="random", severity=0.5):
         w = int(round(s * Tf))
         if w > 0:
             x[:, :, Tf - w:] = 0.0
+    elif m == "time_freq_block":
+        # 同时遮挡一段连续帧 × 一段连续频带（二维块遮挡）
+        wt = max(1, int(round(s * Tf)))
+        wf = max(1, int(round(s * M)))
+        for i in range(B):
+            t0 = random.randint(0, max(0, Tf - wt))
+            f0 = random.randint(0, max(0, M - wf))
+            x[i, f0:f0 + wf, t0:t0 + wt] = 0.0
     return x
 
 

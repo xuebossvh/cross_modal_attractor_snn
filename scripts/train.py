@@ -15,7 +15,8 @@ import torch.nn.functional as F
 
 from common import (fix_console_encoding, log, load_config, set_seed,
                     sample_cue_mode, sample_train_severity, build_cue,
-                    select_targets, is_aud_only_mode, spike_reg)
+                    select_targets, is_aud_only_mode, spike_reg,
+                    resolve_train_corrupt_modes)
 from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
@@ -209,8 +210,10 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     use_binding = ab.get("use_binding_phase", True)
 
     severity = sample_train_severity(cfg, epoch)
+    img_mode, aud_mode = resolve_train_corrupt_modes(cfg, epoch)
     img_cue, aud_cue = build_cue(clean_img, clean_aud, cue_mode, cfg,
-                                 severity=severity)
+                                 severity=severity,
+                                 img_mode=img_mode, aud_mode=aud_mode)
     tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
         cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
     tgt_aud, aud_mix = _apply_audio_target_curriculum(

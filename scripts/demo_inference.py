@@ -19,7 +19,8 @@ import torch.nn.functional as F
 from paths import (ensure_output_dirs, resolve_from_root,
                    figures_dir, tables_dir)
 from common import (fix_console_encoding, log, load_config, select_targets,
-                    setup_matplotlib_chinese, batch_ssim, format_table_row)
+                    setup_matplotlib_chinese, batch_ssim, format_table_row,
+                    aud_collapse_stats)
 from data.corruption import corrupt_audio, corrupt_image, AUD_MODES, IMG_MODES
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
@@ -325,6 +326,26 @@ def _format_eval_table(rows, k):
     return "\n".join(lines)
 
 
+def _log_demo_audio_diag(rows):
+    """音频塌缩诊断：rec/target mean/std/max + top15% 能量召回（近黑图一眼可辨）。"""
+    dw = [14, 9, 9, 9, 9, 9, 9, 10]
+    da = ["l", "r", "r", "r", "r", "r", "r", "r"]
+    hdr = ["模式", "rec均值", "rec标准差", "rec最大",
+           "tgt均值", "tgt标准差", "tgt最大", "top15%召回"]
+    log("")
+    log("【音频塌缩诊断】recovered_aud vs target_aud")
+    log(format_table_row(hdr, dw, da))
+    log("-" * sum(dw))
+    for name, rec, tgt in rows:
+        d = aud_collapse_stats(rec, tgt)
+        log(format_table_row([
+            name,
+            f"{d['rec_mean']:.4f}", f"{d['rec_std']:.4f}", f"{d['rec_max']:.4f}",
+            f"{d['tgt_mean']:.4f}", f"{d['tgt_std']:.4f}", f"{d['tgt_max']:.4f}",
+            f"{d['topk_recall']*100:.1f}%",
+        ], dw, da))
+
+
 def _save_eval_table(text, path):
     with open(path, "w", encoding="utf-8") as f:
         f.write(text + "\n")
@@ -468,6 +489,12 @@ def main():
     table_text = _format_eval_table(eval_rows, k)
     log(table_text)
     _save_eval_table(table_text, args.eval_table)
+
+    _log_demo_audio_diag([
+        ("audio-only", rec_aud_a, tgt_aud_a.cpu()),
+        ("image-only", rec_aud_i, tgt_aud_i.cpu()),
+        ("image+audio", rec_aud_b, tgt_aud_b.cpu()),
+    ])
 
     img_cue_np = img_cue.cpu()
     aud_cue_np = aud_cue.cpu()

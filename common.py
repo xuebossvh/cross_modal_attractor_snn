@@ -119,21 +119,58 @@ def sample_train_severity(cfg, epoch):
     return cc.get("train_severity", 0.5)
 
 
-def build_cue(clean_img, clean_aud, mode, cfg, severity=None):
+def resolve_train_corrupt_modes(cfg, epoch):
+    """v7：训练用残缺 family 选择（受控池 + 可选课程式分阶段）。
+
+    返回 (img_mode, aud_mode)。图像沿用 corruption.img_mode；音频优先按
+    aud_family_curriculum（early/mid/late）分阶段，否则从 aud_train_modes 采样。
+    """
+    import random as _r
+    from data.corruption import AUD_TRAIN_MODES
+    cc = cfg["corruption"]
+    img_mode = cc.get("img_mode", "random")
+
+    sched = cc.get("aud_family_curriculum") or {}
+    if sched.get("enabled", False):
+        e1 = cc.get("stage1_end", 20)
+        e2 = cc.get("stage2_end", 35)
+        if epoch < e1:
+            pool = sched.get("early")
+        elif epoch < e2:
+            pool = sched.get("mid")
+        else:
+            pool = sched.get("late")
+    else:
+        pool = cc.get("aud_train_modes", AUD_TRAIN_MODES)
+
+    if pool:
+        aud_mode = _r.choice(pool)
+    else:
+        aud_mode = cc.get("aud_mode", "random")
+    return img_mode, aud_mode
+
+
+def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
+              img_mode=None, aud_mode=None):
     """根据 cue 模式构造 (img_cue, aud_cue)。clean_* 为干净输入。
 
     返回的 cue 可能是残缺的、干净的，或某一模态为 None（单模态）。
     target 永远是 clean_img / clean_aud（在训练循环里单独传）。
+
+    img_mode / aud_mode：残缺 family 覆盖；为 None 时回退到 corruption.* 配置。
+    （训练用课程式 family、评估 fixed_mask 用固定 family 时显式传入。）
     """
     from data.corruption import corrupt_image, corrupt_audio
     cc = cfg["corruption"]
     s = cc["train_severity"] if severity is None else severity
+    im = cc["img_mode"] if img_mode is None else img_mode
+    am = cc["aud_mode"] if aud_mode is None else aud_mode
 
     def ci(x):
-        return corrupt_image(x, cc["img_mode"], s)
+        return corrupt_image(x, im, s)
 
     def ca(x):
-        return corrupt_audio(x, cc["aud_mode"], s)
+        return corrupt_audio(x, am, s)
 
     if mode == "corrupt_img_only":
         return ci(clean_img), None
@@ -181,6 +218,37 @@ def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
         return proto_img[labels], clean_aud, "category", "sample"
     # image-only
     return clean_img, proto_aud[labels], "sample", "category"
+
+
+def aud_collapse_stats(rec, target, top_fraction=0.15):
+    """音频塌缩诊断：输出/目标的能量统计 + top-k 能量召回。
+
+    rec / target: log-mel [B, n_mels, n_frames]，值域 ~[0,1]。
+    近黑图（能量塌缩）时 rec_std / rec_max 会显著低于 target，topk_recall 也会很低。
+
+    topk_recall：target 能量前 top_fraction 的位置，有多少同时落在 rec 的
+    前 top_fraction 内（逐样本取交集 / k 后平均），衡量"能量是否放对地方"。
+    """
+    rec = rec.float()
+    target = target.float()
+    flat_t = target.flatten(1)
+    flat_r = rec.flatten(1)
+    k = max(1, int(round(float(top_fraction) * flat_t.size(1))))
+    t_idx = flat_t.topk(k, dim=1).indices
+    r_idx = flat_r.topk(k, dim=1).indices
+    t_mask = torch.zeros_like(flat_t, dtype=torch.bool).scatter(1, t_idx, True)
+    r_mask = torch.zeros_like(flat_r, dtype=torch.bool).scatter(1, r_idx, True)
+    inter = (t_mask & r_mask).sum(dim=1).float()
+    recall = (inter / k).mean().item()
+    return {
+        "rec_mean": rec.mean().item(),
+        "rec_std": rec.std().item(),
+        "rec_max": rec.max().item(),
+        "tgt_mean": target.mean().item(),
+        "tgt_std": target.std().item(),
+        "tgt_max": target.max().item(),
+        "topk_recall": recall,
+    }
 
 
 def spike_reg(out):
