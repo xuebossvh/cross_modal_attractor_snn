@@ -75,7 +75,7 @@ class CrossModalSNN(nn.Module):
 
     def forward(self, x_img_cue=None, x_aud_cue=None,
                 x_img_target=None, x_aud_target=None,
-                training_mode=False, phase="readout", decode=True):
+                training_mode=False, phase="readout"):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
@@ -117,12 +117,8 @@ class CrossModalSNN(nn.Module):
                 and mem.get("key_aud") is not None):
             out["aux_aud_logits"] = self.aux_aud_classifier(rate(mem["key_aud"]))
 
-        if decode:
-            out["recovered_img"] = self.image_decoder(mem["v_img_from_A"])
-            out["recovered_aud"] = self.audio_decoder(mem["v_aud_from_A"])
-        else:
-            out["recovered_img"] = None
-            out["recovered_aud"] = None
+        out["recovered_img"] = self.image_decoder(mem["v_img_from_A"])
+        out["recovered_aud"] = self.audio_decoder(mem["v_aud_from_A"])
         return out
 
     @torch.no_grad()
