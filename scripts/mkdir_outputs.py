@@ -1,4 +1,4 @@
-"""创建 outputs/checkpoints 与 outputs/outputs_vN/{figures,logs,tables}。
+﻿"""创建 outputs/checkpoints 与 outputs/outputs_v6a/{figures,logs,tables}。
 
 在 `tee outputs/.../logs/xxx.log` 之前运行，避免目录不存在。
 仅依赖标准库，无需 PyYAML。

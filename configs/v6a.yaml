@@ -1,4 +1,4 @@
-# v6a: audio-branch repair experiment.
+﻿# v6a: audio-branch repair experiment.
 # Keep the Key -> Index -> Value architecture unchanged.
 # Main changes from v5:
 # - larger audio encoder
