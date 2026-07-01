@@ -5,7 +5,8 @@ import torch.nn as nn
 
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
-from .decoders import ClassifierHead, ImageDecoder, AudioDecoder
+from .decoders import (ClassifierHead, ImageDecoder, AudioDecoder,
+                       AudioResidualDecoder)
 from .lif import rate
 
 
@@ -46,6 +47,17 @@ class CrossModalSNN(nn.Module):
             base_ch=aud_dec_ch,
             start_hw=s.get("aud_decoder_start_hw", 4),
             refine_blocks=s.get("aud_decoder_refine_blocks", 0))
+
+        detail_cfg = cfg.get("audio_detail", {})
+        self.use_audio_detail_residual = detail_cfg.get("enabled", False)
+        if self.use_audio_detail_residual:
+            self.audio_residual_decoder = AudioResidualDecoder(
+                d["D_aud"], ac["n_mels"], ac["n_frames"],
+                hidden=detail_cfg.get("hidden", 256),
+                scale=detail_cfg.get("scale", 0.35),
+                zero_init=detail_cfg.get("zero_init", True))
+        else:
+            self.audio_residual_decoder = None
 
         self.use_audio_aux = ab.get("use_audio_aux_cls", True)
         if self.use_audio_aux:
@@ -118,7 +130,17 @@ class CrossModalSNN(nn.Module):
             out["aux_aud_logits"] = self.aux_aud_classifier(rate(mem["key_aud"]))
 
         out["recovered_img"] = self.image_decoder(mem["v_img_from_A"])
-        out["recovered_aud"] = self.audio_decoder(mem["v_aud_from_A"])
+
+        aud_base = self.audio_decoder(mem["v_aud_from_A"])
+        aud_residual = None
+        if self.audio_residual_decoder is not None and spike_aud_cue is not None:
+            aud_detail = rate(spike_aud_cue)
+            aud_residual = self.audio_residual_decoder(aud_detail)
+            out["recovered_aud"] = (aud_base + aud_residual).clamp(0.0, 1.0)
+        else:
+            out["recovered_aud"] = aud_base
+        out["recovered_aud_base"] = aud_base
+        out["audio_residual"] = aud_residual
         return out
 
     @torch.no_grad()

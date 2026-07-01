@@ -395,7 +395,7 @@ def main():
     setup_matplotlib_chinese()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v6c.yaml")
+    ap.add_argument("--config", default="configs/v8.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--num", type=int, default=8, help="可视化样本数（默认 8）")
     ap.add_argument("--severity", type=float, default=0.5)

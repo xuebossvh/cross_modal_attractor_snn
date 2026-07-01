@@ -13,14 +13,14 @@
 
 评估协议（--protocol）：
     fixed_mask     论文主对照：固定 seed + 固定 corruption family + 同一套 mask，
-                   保证 v5/v6a/v6c/v7 在完全相同的残缺输入上可比。
+                   保证 v5/v6a/v6c/v7/v8 在完全相同的残缺输入上可比。
     legacy_random  旧随机协议：family 随机、不固定 seed，用于鲁棒性抽查。
 
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v7.yaml --protocol fixed_mask
-    python -u scripts/evaluate.py --config configs/v7.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v8.yaml --protocol fixed_mask
+    python -u scripts/evaluate.py --config configs/v8.yaml --protocol legacy_random
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -179,7 +179,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v7.yaml")
+    ap.add_argument("--config", default="configs/v8.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--severity", type=float, default=0.5)

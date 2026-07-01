@@ -269,6 +269,12 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     total = total + lc["lambda_aud"] * loss_aud
     logs[f"aud({aud_kind[:3]})"] = loss_aud.item()
 
+    lam_res = lc.get("lambda_aud_residual_l2", 0.0)
+    if lam_res > 0 and out_r.get("audio_residual") is not None:
+        loss_res = out_r["audio_residual"].pow(2).mean()
+        total = total + lam_res * loss_res
+        logs["aud_res"] = loss_res.item()
+
     if aud_kind == "sample":
         lam_act = lc.get("lambda_aud_active", 0.0)
         if lam_act > 0:
@@ -285,7 +291,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v6c.yaml")
+    ap.add_argument("--config", default="configs/v8.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -317,6 +323,21 @@ def main():
         f"binding={cfg['ablation']['use_binding_phase']}")
 
     model = CrossModalSNN(cfg).to(device)
+    init_ckpt = cfg["train"].get("init_ckpt_path", "")
+    if init_ckpt and not args.resume:
+        init_ckpt = str(resolve_from_root(init_ckpt))
+        if os.path.isfile(init_ckpt):
+            state = torch.load(init_ckpt, map_location=device)
+            state_dict = state.get("model", state)
+            strict = cfg["train"].get("init_strict", False)
+            incompatible = model.load_state_dict(state_dict, strict=strict)
+            missing = getattr(incompatible, "missing_keys", [])
+            unexpected = getattr(incompatible, "unexpected_keys", [])
+            log(f"[init] loaded weights from {init_ckpt} strict={strict} "
+                f"missing={len(missing)} unexpected={len(unexpected)}")
+        else:
+            log(f"[init] init_ckpt_path not found: {init_ckpt}; training from scratch.")
+
     opt = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"],
                            weight_decay=cfg["train"]["weight_decay"])
 
