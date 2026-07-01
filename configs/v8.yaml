@@ -52,6 +52,10 @@ dims:
 index:
   alpha_img: 1.0
   alpha_aud: 1.0
+  input_schedule: "phased_img_first"
+  phase_split: 0.5
+  phase_current_scale: 1.0
+  phase_on_bimodal_only: true
   recurrent_scale: 0.2
   wta_mode: "kwta"
   k_wta: 96

@@ -56,7 +56,9 @@ class RecurrentIndexLayer(nn.Module):
                  beta=0.9, v_threshold=1.0, surrogate_alpha=2.0,
                  alpha_img=1.0, alpha_aud=1.0, recurrent_scale=0.2,
                  wta_mode="kwta", k_wta=32, inhibition_strength=1.0,
-                 use_recurrent=True, use_kwta=True):
+                 use_recurrent=True, use_kwta=True,
+                 input_schedule="simultaneous", phase_split=0.5,
+                 phase_current_scale=1.0, phase_on_bimodal_only=True):
         super().__init__()
         self.n_index = n_index
         self.alpha_img = alpha_img
@@ -66,6 +68,10 @@ class RecurrentIndexLayer(nn.Module):
         self.inhibition_strength = inhibition_strength
         self.use_recurrent = use_recurrent
         self.use_kwta = use_kwta
+        self.input_schedule = input_schedule
+        self.phase_split = phase_split
+        self.phase_current_scale = float(phase_current_scale)
+        self.phase_on_bimodal_only = phase_on_bimodal_only
 
         self.W_img_to_A = nn.Linear(n_key_img, n_index, bias=True)
         self.W_aud_to_A = nn.Linear(n_key_aud, n_index, bias=True)
@@ -95,26 +101,52 @@ class RecurrentIndexLayer(nn.Module):
         mask.scatter_(-1, topk_idx, 1.0)
         return raw_spikes * mask
 
+    def _input_gates(self, t, T, has_img, has_aud):
+        mode = self.input_schedule
+        if mode in ("simultaneous", "both", None):
+            return 1.0, 1.0
+
+        both_present = has_img and has_aud
+        if self.phase_on_bimodal_only and not both_present:
+            return 1.0, 1.0
+
+        split = int(round(T * float(self.phase_split)))
+        split = max(1, min(T - 1, split))
+        scale = self.phase_current_scale
+
+        if mode in ("phased_img_first", "img_first"):
+            return (scale, 0.0) if t < split else (0.0, scale)
+        if mode in ("phased_aud_first", "aud_first"):
+            return (0.0, scale) if t < split else (scale, 0.0)
+        if mode == "interleave_img_first":
+            return (scale, 0.0) if (t % 2 == 0) else (0.0, scale)
+        if mode == "interleave_aud_first":
+            return (0.0, scale) if (t % 2 == 0) else (scale, 0.0)
+        raise ValueError(f"Unknown index.input_schedule: {mode}")
+
     def forward(self, key_img_spikes=None, key_aud_spikes=None):
         assert (key_img_spikes is not None) or (key_aud_spikes is not None), \
             "Index 层至少需要一种模态输入。"
         ref = key_img_spikes if key_img_spikes is not None else key_aud_spikes
         T, B, _ = ref.shape
         device, dtype = ref.device, ref.dtype
+        has_img = key_img_spikes is not None
+        has_aud = key_aud_spikes is not None
 
         v = self.neuron.init_state((B, self.n_index), device, dtype)
         prev_spikes = torch.zeros((B, self.n_index), device=device, dtype=dtype)
 
         spikes_out = []
         for t in range(T):
+            img_gate, aud_gate = self._input_gates(t, T, has_img, has_aud)
             if self.use_recurrent:
                 current = self.W_rec(prev_spikes)
             else:
                 current = torch.zeros((B, self.n_index), device=device, dtype=dtype)
-            if key_img_spikes is not None:
-                current = current + self.alpha_img * self.W_img_to_A(key_img_spikes[t])
-            if key_aud_spikes is not None:
-                current = current + self.alpha_aud * self.W_aud_to_A(key_aud_spikes[t])
+            if has_img and img_gate != 0.0:
+                current = current + img_gate * self.alpha_img * self.W_img_to_A(key_img_spikes[t])
+            if has_aud and aud_gate != 0.0:
+                current = current + aud_gate * self.alpha_aud * self.W_aud_to_A(key_aud_spikes[t])
 
             v = self.neuron.beta * v + current
             raw_spikes = spike_fn(v - self.neuron.v_threshold,
@@ -216,6 +248,10 @@ class CrossModalAttractorMemory(nn.Module):
             k_wta=ix["k_wta"], inhibition_strength=ix["inhibition_strength"],
             use_recurrent=ab.get("use_recurrent", True),
             use_kwta=ab.get("use_kwta", True),
+            input_schedule=ix.get("input_schedule", "simultaneous"),
+            phase_split=ix.get("phase_split", 0.5),
+            phase_current_scale=ix.get("phase_current_scale", 1.0),
+            phase_on_bimodal_only=ix.get("phase_on_bimodal_only", True),
         )
 
         self.V_img = ValueLayer(d["N_index"], d["D_img"], d["N_value_img"],

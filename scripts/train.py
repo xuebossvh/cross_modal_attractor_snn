@@ -319,6 +319,7 @@ def main():
     log(f"[启动] 音频: {'FSDD+log-mel' if real else 'toy'}  "
         f"enc={cfg['snn'].get('aud_encoder', 'conv')}  "
         f"N_index={cfg['dims']['N_index']} k_wta={cfg['index']['k_wta']}  "
+        f"index_schedule={cfg['index'].get('input_schedule', 'simultaneous')}  "
         f"curriculum={cc.get('curriculum_mode', 'fixed')}  "
         f"binding={cfg['ablation']['use_binding_phase']}")
 
