@@ -21,7 +21,7 @@ class ClassifierHead(nn.Module):
 
 
 class ImageDecoder(nn.Module):
-    """V_img state -> image logits [B, 1, 28, 28]."""
+    """Image decoder input state -> image logits [B, 1, 28, 28]."""
 
     def __init__(self, n_value_img, out_hw=28, base_ch=128):
         super().__init__()
@@ -58,7 +58,7 @@ def _audio_decoder_stages(out_hw, start_hw=4):
 
 
 class AudioDecoder(nn.Module):
-    """V_aud state -> log-mel reconstruction [B, n_mels, n_frames]."""
+    """Audio decoder input state -> log-mel reconstruction [B, n_mels, n_frames]."""
 
     def __init__(self, n_value_aud, n_mels, n_frames, base_ch=128, start_hw=4,
                  refine_blocks=0):
@@ -98,34 +98,3 @@ class AudioDecoder(nn.Module):
         x = self.cnn(x)
         x = x[..., :self.n_mels, :self.n_frames]
         return F.softplus(x.squeeze(1)).clamp(0.0, 1.0)
-
-
-class AudioResidualDecoder(nn.Module):
-    """Audio cue detail state -> signed log-mel residual [B, n_mels, n_frames].
-
-    This head is intentionally small and zero-initialized at the final layer so
-    the model starts from the Index->Value audio base and learns only a bounded
-    sample-level correction when an audio cue is present.
-    """
-
-    def __init__(self, detail_dim, n_mels, n_frames, hidden=256, scale=0.35,
-                 zero_init=True):
-        super().__init__()
-        self.n_mels = n_mels
-        self.n_frames = n_frames
-        self.scale = float(scale)
-        self.net = nn.Sequential(
-            nn.Linear(detail_dim, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, n_mels * n_frames),
-        )
-        if zero_init:
-            nn.init.zeros_(self.net[-1].weight)
-            nn.init.zeros_(self.net[-1].bias)
-
-    def forward(self, detail_state):
-        x = self.net(detail_state)
-        x = x.view(-1, self.n_mels, self.n_frames)
-        return self.scale * x.tanh()

@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v8.yaml
+    python -u scripts/train.py --config configs/v9.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -269,12 +269,6 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     total = total + lc["lambda_aud"] * loss_aud
     logs[f"aud({aud_kind[:3]})"] = loss_aud.item()
 
-    lam_res = lc.get("lambda_aud_residual_l2", 0.0)
-    if lam_res > 0 and out_r.get("audio_residual") is not None:
-        loss_res = out_r["audio_residual"].pow(2).mean()
-        total = total + lam_res * loss_res
-        logs["aud_res"] = loss_res.item()
-
     if aud_kind == "sample":
         lam_act = lc.get("lambda_aud_active", 0.0)
         if lam_act > 0:
@@ -291,7 +285,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v8.yaml")
+    ap.add_argument("--config", default="configs/v9.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -314,12 +308,15 @@ def main():
     total_epochs = args.epochs if args.epochs is not None else cfg["train"]["epochs"]
     real = train_loader.dataset.use_real_audio
     cc = cfg["corruption"]
+    dc = cfg.get("detail_conditioning", {})
     log(f"[启动] 训练集 {len(train_loader.dataset)} 样本，"
         f"每 epoch {steps_per_epoch} step，共 {total_epochs} epoch")
     log(f"[启动] 音频: {'FSDD+log-mel' if real else 'toy'}  "
         f"enc={cfg['snn'].get('aud_encoder', 'conv')}  "
         f"N_index={cfg['dims']['N_index']} k_wta={cfg['index']['k_wta']}  "
         f"index_schedule={cfg['index'].get('input_schedule', 'simultaneous')}  "
+        f"detail_cond={dc.get('enabled', False)}  "
+        f"detail_detach={dc.get('detach', True)}  "
         f"curriculum={cc.get('curriculum_mode', 'fixed')}  "
         f"binding={cfg['ablation']['use_binding_phase']}")
 

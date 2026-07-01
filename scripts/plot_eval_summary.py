@@ -3,11 +3,13 @@
 支持两种输入（自动识别）：
   1. demo_eval_table.txt  — 【汇总】段（8 列）
   2. eval_*.log           — evaluate.py 全量评估日志（9 列）
+  3. 上述日志若含 [音频塌缩诊断] 段，自动生成 aud_diag 表格（PNG+CSV）
 
 用法：
-    python scripts/plot_eval_summary.py outputs/outputs_v8/tables/demo_eval_table.txt
-    python scripts/plot_eval_summary.py outputs/outputs_v8/logs/eval_v8_full.log
-    python scripts/plot_eval_summary.py eval_v8_full.log --title "v8 full eval"
+    python scripts/plot_eval_summary.py outputs/outputs_v9/tables/demo_eval_table.txt
+    python scripts/plot_eval_summary.py outputs/outputs_v9/logs/eval_v9_fixed_mask.log
+    python scripts/plot_eval_summary.py eval_v9_full.log --title "v9 full eval"
+    python scripts/plot_eval_summary.py eval_v9_fixed_mask.log --diag-only
 """
 
 import argparse
@@ -32,6 +34,12 @@ _FULL_ROW_RE = re.compile(
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
     r"(\S+)",
+)
+_AUD_DIAG_ROW_RE = re.compile(
+    r"^(\S+)\s+"
+    r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
+    r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
+    r"([\d.]+)%\s*$",
 )
 
 
@@ -105,6 +113,44 @@ def parse_eval_full_log(path):
         raise ValueError(f"未在 {path} 中找到 evaluate.py 结果行。")
     meta = {"severity": severity, "n_test": n_test}
     return rows, "full", meta
+
+
+def parse_aud_collapse_diag(path):
+    """解析 evaluate.py / demo 日志末尾的 [音频塌缩诊断] 段。"""
+    rows = []
+    in_block = False
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "音频塌缩诊断" in line:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            if rows:
+                break
+            continue
+        if stripped.startswith("[") or stripped.startswith("【"):
+            if rows:
+                break
+            continue
+        if stripped.startswith("-") or "rec均值" in stripped or "rec_std" in stripped:
+            continue
+        m = _AUD_DIAG_ROW_RE.match(stripped)
+        if m:
+            rows.append({
+                "mode": m.group(1),
+                "rec_mean": float(m.group(2)),
+                "rec_std": float(m.group(3)),
+                "rec_max": float(m.group(4)),
+                "tgt_mean": float(m.group(5)),
+                "tgt_std": float(m.group(6)),
+                "tgt_max": float(m.group(7)),
+                "topk_recall": float(m.group(8)) / 100.0,
+            })
+    if not rows:
+        raise ValueError(f"未在 {path} 中找到 [音频塌缩诊断] 数据行。")
+    return rows
 
 
 def detect_input(path):
@@ -201,6 +247,27 @@ def _expand_target(tgt):
     return "/".join(_KIND_ABBR.get(p.strip(), p.strip()) for p in tgt.split("/"))
 
 
+def render_aud_diag_table(rows, title, path):
+    headers = ["", "rec mean", "rec std", "rec max",
+               "tgt mean", "tgt std", "tgt max", "top15% recall"]
+    cell = [[
+        r["mode"],
+        f"{r['rec_mean']:.4f}", f"{r['rec_std']:.4f}", f"{r['rec_max']:.4f}",
+        f"{r['tgt_mean']:.4f}", f"{r['tgt_std']:.4f}", f"{r['tgt_max']:.4f}",
+        f"{r['topk_recall']:.3f}",
+    ] for r in rows]
+    col_w = [0.15, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.12]
+    return _render_table(headers, cell, col_w, title, path, font_size=8.5)
+
+
+def _default_aud_diag_out(path, main_out=None):
+    if main_out is not None:
+        p = Path(main_out)
+        return p.with_name(f"{p.stem}_aud_diag{p.suffix}")
+    p = Path(path)
+    return p.parent.parent / "tables" / "aud_collapse_table.png"
+
+
 def render_full_eval_table(rows, title, path):
     headers = ["", "acc", "img MSE", "PSNR", "img SSIM", "aud MSE",
                "target(image/audio)"]
@@ -234,30 +301,56 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("input", nargs="?",
-                    default="outputs/outputs_v8/tables/demo_eval_table.txt")
+                    default="outputs/outputs_v9/tables/demo_eval_table.txt")
     ap.add_argument("--out", default=None)
     ap.add_argument("--title", default=None)
+    ap.add_argument("--diag-out", default=None, help="音频塌缩诊断表输出路径")
+    ap.add_argument("--diag-title", default=None, help="音频塌缩诊断表标题")
+    ap.add_argument("--diag-only", action="store_true",
+                    help="仅生成音频塌缩诊断表（跳过主表）")
     args = ap.parse_args()
 
     src = Path(args.input)
-    result = detect_input(src)
-    if len(result) == 2:
-        rows, kind = result
-        meta = None
-    else:
-        rows, kind, meta = result
+    out = Path(args.out) if args.out else None
 
-    out = Path(args.out) if args.out else _default_out(src, kind)
+    if not args.diag_only:
+        result = detect_input(src)
+        if len(result) == 2:
+            rows, kind = result
+            meta = None
+        else:
+            rows, kind, meta = result
 
-    if kind == "full":
-        title = args.title or "Full Test Evaluation(n=1000)"
-        png, csv = render_full_eval_table(rows, title, out)
-    else:
-        title = args.title or "Demo Evaluation(n=8)"
-        png, csv = render_demo_table(rows, title, out)
+        if out is None:
+            out = _default_out(src, kind)
 
-    log(f"[plot] 表格图 -> {png}")
-    log(f"[plot] CSV -> {csv}")
+        if kind == "full":
+            title = args.title or "Full Test Evaluation(n=1000)"
+            png, csv = render_full_eval_table(rows, title, out)
+        else:
+            title = args.title or "Demo Evaluation(n=8)"
+            png, csv = render_demo_table(rows, title, out)
+
+        log(f"[plot] 表格图 -> {png}")
+        log(f"[plot] CSV -> {csv}")
+
+    diag_out = Path(args.diag_out) if args.diag_out else _default_aud_diag_out(
+        src, out)
+    try:
+        diag_rows = parse_aud_collapse_diag(src)
+        if args.diag_title:
+            diag_title = args.diag_title
+        elif args.diag_only and args.title:
+            diag_title = args.title
+        else:
+            diag_title = "Audio Collapse Diagnostics"
+        d_png, d_csv = render_aud_diag_table(diag_rows, diag_title, diag_out)
+        log(f"[plot] 音频塌缩诊断表 -> {d_png}")
+        log(f"[plot] 音频塌缩诊断 CSV -> {d_csv}")
+    except ValueError as e:
+        if args.diag_only:
+            raise
+        log(f"[plot] 跳过音频塌缩诊断表：{e}")
 
 
 if __name__ == "__main__":

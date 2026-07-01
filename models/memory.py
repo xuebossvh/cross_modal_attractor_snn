@@ -11,9 +11,10 @@
         - binding 阶段：cue -> Index A 收敛；clean target -> Encoder -> target Value
           神经元群（可延迟）。A 与 target Value 共同放电，用于学习 A->V（bind loss）。
           这一阶段不把混合 Value 送 decoder 计算重建损失。
-        - readout 阶段：关闭 target Encoder->Value，decoder 只读 A 驱动的 Value
-          (v_*_from_A)，计算 cls / image / audio 恢复损失。
-    * decoder 永远只读 v_*_from_A，绝不读「A + Encoder」混合 Value。
+        - readout 阶段：关闭 target Encoder->Value，返回 A 驱动的 Value
+          (v_*_from_A)，供 network 层 decoder 使用。
+    * decoder 的 Value 主输入永远来自 v_*_from_A，绝不读「A + Encoder」
+      混合 Value；v9 的 cue detail 条件拼接发生在 network 层。
     * 推理阶段 == readout 阶段，禁止 target。
     * 消融开关：use_recurrent / use_kwta / use_delayed_value_target。
 
@@ -166,13 +167,13 @@ class RecurrentIndexLayer(nn.Module):
 class ValueLayer(nn.Module):
     """单模态 spiking Value 层，分离两路：
 
-        * A 路（始终）   : Index A -> Value      (W_A_to_V)，decoder 只读它
+        * A 路（始终）   : Index A -> Value      (W_A_to_V)，decoder 的 Value 主输入读它
         * target 路（仅 binding）: clean target Encoder -> Value (W_enc_to_V)，
                                    可延迟 delay 步，仅用于 bind loss 的 teacher
 
     forward 返回：
         a_spikes      [T,B,N]   A 驱动的 value 脉冲
-        a_state       [B,N]     A 驱动的 value rate（=v_*_from_A，decoder 读它）
+        a_state       [B,N]     A 驱动的 value rate（=v_*_from_A）
         target_state  [B,N]或None  target 驱动的 value rate（仅 binding）
     """
 

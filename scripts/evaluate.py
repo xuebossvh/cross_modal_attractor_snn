@@ -1,6 +1,7 @@
 """评估跨模态 SNN 联想记忆网络。
 
-对 6 种 cue 模式分别评估（推理时禁用 target，decoder 只读 v_*_from_A）：
+对 6 种 cue 模式分别评估（推理时禁用 target，decoder 的 Value 主输入来自
+v_*_from_A；v9 可额外拼接当前 cue 的 detached detail state）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
     clean_img_only   / clean_aud_only   / clean_both
 
@@ -19,8 +20,8 @@
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v8.yaml --protocol fixed_mask
-    python -u scripts/evaluate.py --config configs/v8.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v9.yaml --protocol fixed_mask
+    python -u scripts/evaluate.py --config configs/v9.yaml --protocol legacy_random
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -179,7 +180,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v8.yaml")
+    ap.add_argument("--config", default="configs/v9.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--severity", type=float, default=0.5)

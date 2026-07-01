@@ -55,7 +55,7 @@ cross_modal_attractor_snn/
 ├── paths.py           # 项目根目录与 outputs 路径
 ├── outputs/           # 运行产物（不入 git，见 .gitignore）
 │   ├── checkpoints/   # 各版本 *.pt 权重（共用）
-│   └── outputs_v8/    # 版本专属产物（旧版本同理）
+│   └── outputs_v9/    # 版本专属产物（旧版本同理）
 │       ├── logs/
 │       ├── figures/
 │       └── tables/
@@ -69,9 +69,10 @@ cross_modal_attractor_snn/
 
 ```bash
 pip install -r requirements.txt
-python scripts/mkdir_outputs.py --config configs/v8.yaml
-python -u scripts/train.py --config configs/v8.yaml 2>&1 | tee outputs/outputs_v8/logs/train_v8_50ep.log
-python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
+python scripts/mkdir_outputs.py --config configs/v9.yaml
+nohup python -u scripts/train.py --config configs/v9.yaml > outputs/outputs_v9/logs/train_v9_50ep.log 2>&1 &
+tail -f outputs/outputs_v9/logs/train_v9_50ep.log
+nohup python -u scripts/train.py --config configs/v9.yaml --epochs 30 > outputs/outputs_v9/logs/train_v9_30ep.log 2>&1 &
 ```
 
 每个 batch 采样一种 cue 模式，并分两阶段计算损失：
@@ -79,22 +80,23 @@ python -u scripts/train.py --epochs 30          # 覆盖 yaml 中的 epochs
 - **binding 阶段**（可关）：cue 驱动 Index A 收敛；干净 target 经 Encoder 写入
   target Value（可延迟若干步）。`bind loss` 让 **A 驱动的 Value** 对齐
   **target Value（stop-grad）**，从而学习 `A→V` 绑定。此阶段不走 decoder。
-- **readout 阶段**：关闭 target，decoder **只读 `v_*_from_A`**（A 驱动的 Value），
+- **readout 阶段**：关闭 target，decoder 的 Value 主输入只来自
+  `v_*_from_A`（A 驱动的 Value）；v9 额外拼接对应 cue 的 detached detail state，
   计算分类 / 图像恢复 / 音频恢复 / 脉冲正则损失。
 
-每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v8.pt`（由 yaml 指定）。
-日志 / 图表 / 表格写入 `outputs/outputs_v8/{logs,figures,tables}/`。
+每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v9.pt`（由 yaml 指定）。
+日志 / 图表 / 表格写入 `outputs/outputs_v9/{logs,figures,tables}/`。
 
 > 注意：若你曾用旧架构训练过，旧 checkpoint 结构不兼容，evaluate/demo 会自动
 > 检测并回退到随机权重并给出警告——重新训练即可。
 
-快速冒烟（小子集、1 epoch）：编辑 `configs/v8.yaml` 设 `data.train_subset: 512`、
+快速冒烟（小子集、1 epoch）：编辑 `configs/v9.yaml` 设 `data.train_subset: 512`、
 `train.epochs: 1`，再运行 `python -u scripts/train.py`。
 
 ## 4. 评估与 Demo
 
 ```bash
-python -u scripts/evaluate.py --config configs/v8.yaml | tee outputs/outputs_v8/tables/full_eval_v8.txt
+python -u scripts/evaluate.py --config configs/v9.yaml | tee outputs/outputs_v9/tables/full_eval_v9.txt
 python -u scripts/demo_inference.py --num 10 --severity 0.5
 python -u scripts/smoke_test.py
 ```
@@ -104,10 +106,10 @@ python -u scripts/smoke_test.py
   `smp`=样本级 / `cat`=类别代表原型）。快速试跑：`python -u evaluate.py --max_batches 5`。
 - `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注
   cue type / target type / true label / pred label / confidence：
-  - `outputs/outputs_v8/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
-  - `outputs/outputs_v8/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
-  - `outputs/outputs_v8/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
-  - 评估表：`outputs/outputs_v8/tables/demo_eval_table.txt`
+  - `outputs/outputs_v9/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
+  - `outputs/outputs_v9/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
+  - `outputs/outputs_v9/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
+  - 评估表：`outputs/outputs_v9/tables/demo_eval_table.txt`
 
 ---
 
@@ -134,8 +136,9 @@ I_A = alpha_img * W_img_to_A(K_img) + alpha_aud * W_aud_to_A(K_aud)
 ```
 
 ### 关键设计：杜绝答案泄漏
-- decoder **永远只读 `v_*_from_A`**（Index 驱动的 Value），从不读
-  「A + Encoder 混合」Value。
+- decoder 的 **Value 主输入永远来自 `v_*_from_A`**（Index 驱动的 Value），
+  从不读「A + Encoder 混合」Value。v9 可额外拼接 cue detail，但该 detail
+  只来自当前 cue，缺失模态用 0，默认 `detach=true`。
 - target（干净输入）**只在训练 binding 阶段**经 `W_enc_to_V` 进入 *target Value*，
   仅用于 `bind loss` 的 teacher，且与 `v_*_from_A` 在 `ValueLayer` 中走**两条独立路径**。
 - `network.forward` 中 `training_mode=False` 时**强制** `phase="readout"` 并丢弃 target。
@@ -160,13 +163,13 @@ I_A = alpha_img * W_img_to_A(K_img) + alpha_aud * W_aud_to_A(K_aud)
 
 6 种 cue 模式（`common.py :: CUE_MODES`）：`corrupt_img_only` / `corrupt_aud_only` /
 `corrupt_both` / `clean_img_only` / `clean_aud_only` / `clean_both`，采样概率见
-`configs/v8.yaml :: cue_modes`。
+`configs/v9.yaml :: cue_modes`。
 
 损坏函数（`data/corruption.py`，`severity∈[0,1]`）：
 - 图像：`occlusion` / `pixel_delete` / `gaussian` / `mask_left|right|top|bottom`
 - 音频：`gaussian` / `time_mask` / `freq_mask` / `feature_dropout` / `partial_temporal`
 
-## 8. 消融开关（`configs/v8.yaml :: ablation`）
+## 8. 消融开关（`configs/v9.yaml :: ablation`）
 
 | 开关 | 作用 |
 |------|------|
