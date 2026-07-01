@@ -1,13 +1,13 @@
-"""将评估结果转为表格图 + CSV。
+﻿"""将评估结果转为表格图 + CSV。
 
 支持两种输入（自动识别）：
   1. demo_eval_table.txt  — 【汇总】段（8 列）
   2. eval_*.log           — evaluate.py 全量评估日志（9 列）
 
 用法：
-    python scripts/plot_eval_summary.py outputs/outputs_v4/tables/demo_eval_table.txt
-    python scripts/plot_eval_summary.py outputs/outputs_v4/logs/eval_v4_full.log
-    python scripts/plot_eval_summary.py eval_v4_full.log --title "v4 full eval"
+    python scripts/plot_eval_summary.py outputs/outputs_v7/tables/demo_eval_table.txt
+    python scripts/plot_eval_summary.py outputs/outputs_v7/logs/eval_v7_full.log
+    python scripts/plot_eval_summary.py eval_v7_full.log --title "v4 full eval"
 """
 
 import argparse
@@ -234,7 +234,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("input", nargs="?",
-                    default="outputs/outputs_v4/tables/demo_eval_table.txt")
+                    default="outputs/outputs_v7/tables/demo_eval_table.txt")
     ap.add_argument("--out", default=None)
     ap.add_argument("--title", default=None)
     args = ap.parse_args()

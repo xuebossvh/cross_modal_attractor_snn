@@ -1,6 +1,6 @@
-"""跨模态 SNN 联想记忆推理 demo。
+﻿"""跨模态 SNN 联想记忆推理 demo。
 
-输出三张图（外行可读，默认写入 outputs/outputs_v5/figures/）：
+输出三张图（外行可读，默认写入 outputs/outputs_v7/figures/）：
   demo_aud_only.png  — 只输入残缺语音
   demo_img_only.png  — 只输入残缺图像
   demo_both.png      — 双模态残缺输入
@@ -395,7 +395,7 @@ def main():
     setup_matplotlib_chinese()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v6c.yaml")
+    ap.add_argument("--config", default="configs/v7.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--num", type=int, default=8, help="可视化样本数（默认 8）")
     ap.add_argument("--severity", type=float, default=0.5)

@@ -1,4 +1,4 @@
-"""随机张量上的快速端到端检查（无需下载数据）。
+﻿"""随机张量上的快速端到端检查（无需下载数据）。
 
 用法：python -u scripts/smoke_test.py
 """
@@ -12,7 +12,7 @@ from data.corruption import corrupt_image, corrupt_audio
 from models.network import CrossModalSNN
 from train import compute_losses
 
-cfg = load_config("configs/v6c.yaml")
+cfg = load_config("configs/v7.yaml")
 cfg["device"] = "cpu"
 model = CrossModalSNN(cfg)
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)

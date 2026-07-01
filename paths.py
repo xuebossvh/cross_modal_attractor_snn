@@ -1,10 +1,10 @@
-"""项目根目录与输出路径（训练权重、日志、图表等）。
+﻿"""项目根目录与输出路径（训练权重、日志、图表等）。
 
 目录约定：
   outputs/checkpoints/          各版本 checkpoint（跨版本共用）
-  outputs/outputs_v5/figures/   版本专属图表
-  outputs/outputs_v5/logs/
-  outputs/outputs_v5/tables/
+  outputs/outputs_v7/figures/   版本专属图表
+  outputs/outputs_v7/logs/
+  outputs/outputs_v7/tables/
 """
 
 import re
@@ -20,11 +20,11 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 DATA_ROOT = PROJECT_ROOT / "_data"
 
 DEFAULT_CKPT = CHECKPOINTS_DIR / "cross_modal_snn.pt"
-DEFAULT_CONFIG = CONFIGS_DIR / "v6c.yaml"
+DEFAULT_CONFIG = CONFIGS_DIR / "v7.yaml"
 
 
 def _normalize_version_folder(tag):
-    """'v5' / '5' / 'outputs_v5' -> 'outputs_v5'。"""
+    """'v5' / '5' / 'outputs_v7' -> 'outputs_v7'。"""
     tag = str(tag).strip()
     if tag.startswith("outputs_"):
         return tag
@@ -36,7 +36,7 @@ def _normalize_version_folder(tag):
 
 
 def infer_output_version(cfg):
-    """从 train.output_version 或 configs/v5.yaml 推断版本目录名。"""
+    """从 train.output_version 或 configs/v7.yaml 推断版本目录名。"""
     train = cfg.get("train", {})
     if train.get("output_version"):
         return _normalize_version_folder(train["output_version"])
@@ -48,7 +48,7 @@ def infer_output_version(cfg):
 
 
 def version_bundle_dir(cfg):
-    """outputs/outputs_v5 等版本根目录。"""
+    """outputs/outputs_v7 等版本根目录。"""
     return OUTPUTS_DIR / infer_output_version(cfg)
 
 

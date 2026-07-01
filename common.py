@@ -1,4 +1,4 @@
-"""公共工具：配置加载、随机种子、模态 dropout、评估指标、matplotlib 中文。"""
+﻿"""公共工具：配置加载、随机种子、模态 dropout、评估指标、matplotlib 中文。"""
 
 import random
 import sys
@@ -59,7 +59,7 @@ def format_table_row(values, widths, aligns):
     )
 
 
-def load_config(path="configs/v6c.yaml"):
+def load_config(path="configs/v7.yaml"):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 

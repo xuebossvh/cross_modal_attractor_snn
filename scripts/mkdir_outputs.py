@@ -1,10 +1,10 @@
-"""创建 outputs/checkpoints 与 outputs/outputs_vN/{figures,logs,tables}。
+﻿"""创建 outputs/checkpoints 与 outputs/outputs_v7/{figures,logs,tables}。
 
 在 `tee outputs/.../logs/xxx.log` 之前运行，避免目录不存在。
 仅依赖标准库，无需 PyYAML。
 
 用法：
-    python scripts/mkdir_outputs.py --config configs/v6c.yaml
+    python scripts/mkdir_outputs.py --config configs/v7.yaml
 """
 
 import argparse
@@ -49,7 +49,7 @@ def _load_output_cfg(config_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v6c.yaml")
+    ap.add_argument("--config", default="configs/v7.yaml")
     args = ap.parse_args()
 
     cfg = _load_output_cfg(args.config)

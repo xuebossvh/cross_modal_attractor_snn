@@ -1,4 +1,4 @@
-# v7: audio quality repair（在 v6c 基础上）。
+﻿# v7: audio quality repair（在 v6c 基础上）。
 # 目标：修复 v6c 音频 recovered 近黑图（能量塌缩），同时保留分类增益。
 # 主要改动（相对 v6c）：
 #   P0 课程：aud_sample_curriculum max_sample_mix 0.7->1.0, end_epoch 50->30
