@@ -15,7 +15,7 @@ IMG_MODES = ["occlusion", "pixel_delete", "gaussian",
 AUD_MODES = ["gaussian", "time_mask", "freq_mask",
              "feature_dropout", "partial_temporal", "time_freq_block"]
 
-# v7：受控训练残缺池（避免 full-random 让模型放弃样本级恢复）。
+# 受控训练残缺池（避免 full-random 让模型放弃样本级恢复）。
 # 仅保留结构化遮挡 + 少量噪声，不与 block 过度叠加。
 AUD_TRAIN_MODES = ["time_mask", "freq_mask", "time_freq_block", "gaussian"]
 

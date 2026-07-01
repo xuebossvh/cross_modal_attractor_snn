@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v6c.yaml
+    python -u scripts/train.py --config configs/v8.yaml
     python -u scripts/train.py --epochs 30
 """
 

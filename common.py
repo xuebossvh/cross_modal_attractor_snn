@@ -120,7 +120,7 @@ def sample_train_severity(cfg, epoch):
 
 
 def resolve_train_corrupt_modes(cfg, epoch):
-    """v7：训练用残缺 family 选择（受控池 + 可选课程式分阶段）。
+    """训练用残缺 family 选择（受控池 + 可选课程式分阶段）。
 
     返回 (img_mode, aud_mode)。图像沿用 corruption.img_mode；音频优先按
     aud_family_curriculum（early/mid/late）分阶段，否则从 aud_train_modes 采样。

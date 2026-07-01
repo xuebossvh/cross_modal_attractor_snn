@@ -13,7 +13,7 @@
 
 评估协议（--protocol）：
     fixed_mask     论文主对照：固定 seed + 固定 corruption family + 同一套 mask，
-                   保证 v5/v6a/v6c/v7/v8 在完全相同的残缺输入上可比。
+                    保证不同版本在完全相同的残缺输入上可比。
     legacy_random  旧随机协议：family 随机、不固定 seed，用于鲁棒性抽查。
 
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
