@@ -1,4 +1,4 @@
-# v6c: v6a audio repair + v6b cross-modal alignment.
+﻿# v6c: v6a audio repair + v6b cross-modal alignment.
 # Key -> Index -> Value architecture is unchanged.
 # Compared with v6a, defaults are slightly conservative because v6a improved
 # audio MSE but hurt image SSIM and clean/both stability.
