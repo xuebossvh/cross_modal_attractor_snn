@@ -1,4 +1,4 @@
-"""评估跨模态 SNN 联想记忆网络。
+﻿"""评估跨模态 SNN 联想记忆网络。
 
 对 6 种 cue 模式分别评估（推理时禁用 target，decoder 只读 v_*_from_A）：
     corrupt_img_only / corrupt_aud_only / corrupt_both

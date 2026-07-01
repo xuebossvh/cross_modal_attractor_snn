@@ -1,4 +1,4 @@
-# v6b: cross-modal alignment repair experiment.
+﻿# v6b: cross-modal alignment repair experiment.
 # Keep v5 model capacity and audio reconstruction settings unchanged.
 # Main changes from v5:
 # - clean-both teacher consistency for noisy corrupt_both Index state

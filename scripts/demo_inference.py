@@ -1,6 +1,6 @@
-"""跨模态 SNN 联想记忆推理 demo。
+﻿"""跨模态 SNN 联想记忆推理 demo。
 
-输出三张图（外行可读，默认写入 outputs/outputs_v5/figures/）：
+输出三张图（外行可读，默认写入 outputs/outputs_v6b/figures/）：
   demo_aud_only.png  — 只输入残缺语音
   demo_img_only.png  — 只输入残缺图像
   demo_both.png      — 双模态残缺输入
