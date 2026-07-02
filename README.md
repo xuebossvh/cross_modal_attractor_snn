@@ -75,6 +75,20 @@ tail -f outputs/outputs_v9b/logs/train_v9b_50ep.log
 nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v9b.yaml --epochs 30 > outputs/outputs_v9b/logs/train_v9b_30ep.log 2>&1 < /dev/null &
 ```
 
+可选：一条后台命令跑主训练，主训练结束后自动顺序跑 3 个 v9b 消融：
+
+```bash
+nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v9b_suite.py --config configs/v9b.yaml --with_ablations > outputs/outputs_v9b/logs/suite_v9b_with_ablations.log 2>&1 < /dev/null &
+tail -f outputs/outputs_v9b/logs/suite_v9b_with_ablations.log
+```
+
+如果主训练已经跑完，只想补跑三个消融：
+
+```bash
+nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v9b_suite.py --config configs/v9b.yaml --ablations_only > outputs/outputs_v9b/logs/suite_v9b_ablations_only.log 2>&1 < /dev/null &
+tail -f outputs/outputs_v9b/logs/suite_v9b_ablations_only.log
+```
+
 每个 batch 采样一种 cue 模式，并分两阶段计算损失：
 
 - **binding 阶段**（可关）：cue 驱动 Index A 收敛；干净 target 经 Encoder 写入

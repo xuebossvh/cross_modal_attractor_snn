@@ -90,16 +90,21 @@ def build_variants(base):
     })
 
 
-def main():
-    base = load_config("configs/v9b.yaml")
-    ABLATION_ROOT.mkdir(parents=True, exist_ok=True)
-
+def write_variants(config="configs/v9b.yaml", out_dir=ABLATION_ROOT):
+    base = load_config(config)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for tag, cfg in build_variants(base):
-        path = ABLATION_ROOT / f"{tag}.yaml"
+        path = out_dir / f"{tag}.yaml"
         path.write_text(yaml.safe_dump(cfg, sort_keys=False,
                                        allow_unicode=True), encoding="utf-8")
         written.append((tag, path))
+    return written
+
+
+def main():
+    written = write_variants()
 
     print("Generated v9b ablation configs:")
     for tag, path in written:
