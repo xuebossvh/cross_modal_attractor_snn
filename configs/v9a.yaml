@@ -33,8 +33,9 @@ detail_conditioning:
 decoder_pretrain:
   enabled: true
   epochs: 8
-  lr: 0.001
+  lr: 0.0002
   weight_decay: 0.0
+  grad_clip: 1.0
   log_every: 50
   freeze_non_decoders: true
   resume: true
@@ -180,6 +181,7 @@ train:
   epochs: 50
   lr: 0.001
   weight_decay: 0.0
+  grad_clip: 1.0
   log_every: 50
   lr_scheduler: "cosine"
   lr_min: 0.00005

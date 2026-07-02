@@ -180,6 +180,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
     lam_aud = pc.get("lambda_aud", lc.get("lambda_aud", 1.0))
     lam_act = pc.get("lambda_aud_active", lc.get("lambda_aud_active", 0.0))
     detail_dropout = pc.get("detail_dropout", 0.0)
+    grad_clip = float(pc.get("grad_clip", 0.0))
     log_every = int(pc.get("log_every", cfg["train"].get("log_every", 50)))
     pre_ckpt = str(resolve_from_root(pc.get(
         "ckpt_path", "outputs/checkpoints/decoder_pretrain.pt")))
@@ -200,6 +201,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
     log("[decoder-pretrain] start "
         f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
         f"detail_dropout={float(detail_dropout):.2f} "
+        f"grad_clip={grad_clip:.2f} "
         f"freeze_non_decoders={pc.get('freeze_non_decoders', True)}")
 
     try:
@@ -230,8 +232,16 @@ def pretrain_decoders(model, train_loader, cfg, device):
                     loss = loss + lam_act * loss_act
                     logs["aud_act"] = loss_act.item()
 
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        "[decoder-pretrain] non-finite loss at "
+                        f"epoch={epoch} step={step}: {logs}")
+
                 opt.zero_grad()
                 loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        params, grad_clip, error_if_nonfinite=True)
                 opt.step()
                 epoch_loss += loss.item()
 
@@ -510,6 +520,7 @@ def main():
     else:
         scheduler = None
     log(f"[启动] LR 调度: {sched_name}  初始 lr={cfg['train']['lr']}")
+    log(f"[启动] grad_clip={cfg['train'].get('grad_clip', 0.0)}")
 
     start_epoch = 0
     ckpt = str(resolve_from_root(cfg["train"]["ckpt_path"]))
@@ -531,6 +542,7 @@ def main():
         log(f"[警告] --resume 指定但 checkpoint 不存在: {ckpt}，从头训练。")
 
     log_every = cfg["train"]["log_every"]
+    grad_clip = float(cfg["train"].get("grad_clip", 0.0))
     for epoch in range(start_epoch, total_epochs):
         model.train()
         epoch_loss = 0.0
@@ -546,7 +558,14 @@ def main():
                 proto_img, proto_aud, epoch=epoch)
 
             opt.zero_grad()
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"[train] non-finite loss at epoch={epoch} "
+                    f"step={step} cue={cue_mode}: {logs}")
             loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), grad_clip, error_if_nonfinite=True)
             opt.step()
 
             epoch_loss += loss.item()
