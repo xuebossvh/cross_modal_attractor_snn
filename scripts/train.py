@@ -116,49 +116,19 @@ def _drop_detail_state(detail, drop_prob):
     return detail * keep.to(detail.dtype)
 
 
-def _safe_target_value_state(value_layer, enc_spikes, delay=2, clamp=20.0):
-    """Pretrain-only target Value rate without surrogate autograd kernels."""
-    T, B, _ = enc_spikes.shape
-    device, dtype = enc_spikes.device, enc_spikes.dtype
-    v = torch.zeros((B, value_layer.n_value), device=device, dtype=dtype)
-    out = []
-    use_clamp = clamp is not None and float(clamp) > 0
-    clamp = float(clamp) if use_clamp else 0.0
-    for t in range(T):
-        ts = t - delay
-        if ts < 0:
-            cur = torch.zeros((B, value_layer.n_value), device=device, dtype=dtype)
-        else:
-            cur = value_layer.W_enc_to_V(enc_spikes[ts])
-        if use_clamp:
-            cur = torch.nan_to_num(cur, nan=0.0, posinf=clamp, neginf=-clamp)
-            cur = cur.clamp(-clamp, clamp)
-        v = value_layer.neuron.beta * v + cur
-        if use_clamp:
-            v = torch.nan_to_num(v, nan=0.0, posinf=clamp, neginf=-clamp)
-            v = v.clamp(-clamp, clamp)
-        spikes = (v - value_layer.neuron.v_threshold >= 0).to(dtype)
-        v = v * (1.0 - spikes)
-        out.append(spikes)
-    return rate(torch.stack(out, dim=0))
+def _target_value_state(value_layer, enc_spikes, delay):
+    _, target_state = value_layer._run_target(enc_spikes, delay)
+    return target_state.detach()
 
 
-def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout, target_mode,
-                             value_clamp):
+def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout):
+    """Build decoder pretrain inputs from clean target Value, without Key/Index."""
     spike_img = model.img_encoder(x_img)
     spike_aud = model.aud_encoder(model._normalize_audio_for_encoder(x_aud))
 
     delay = model.memory.binding_delay if model.memory.use_delayed_target else 0
-    if target_mode == "safe_lif":
-        img_state = _safe_target_value_state(
-            model.memory.V_img, spike_img, delay=delay, clamp=value_clamp)
-        aud_state = _safe_target_value_state(
-            model.memory.V_aud, spike_aud, delay=delay, clamp=value_clamp)
-    elif target_mode == "linear_sigmoid":
-        img_state = torch.sigmoid(model.memory.V_img.W_enc_to_V(rate(spike_img)))
-        aud_state = torch.sigmoid(model.memory.V_aud.W_enc_to_V(rate(spike_aud)))
-    else:
-        raise ValueError(f"Unknown decoder_pretrain.target_value_mode: {target_mode}")
+    img_state = _target_value_state(model.memory.V_img, spike_img, delay)
+    aud_state = _target_value_state(model.memory.V_aud, spike_aud, delay)
 
     if model.use_detail_conditioning:
         img_detail = _drop_detail_state(rate(spike_img).detach(), detail_dropout)
@@ -210,8 +180,6 @@ def pretrain_decoders(model, train_loader, cfg, device):
     lam_aud = pc.get("lambda_aud", lc.get("lambda_aud", 1.0))
     lam_act = pc.get("lambda_aud_active", lc.get("lambda_aud_active", 0.0))
     detail_dropout = pc.get("detail_dropout", 0.0)
-    target_mode = pc.get("target_value_mode", "safe_lif")
-    value_clamp = pc.get("value_clamp", 20.0)
     log_every = int(pc.get("log_every", cfg["train"].get("log_every", 50)))
     pre_ckpt = str(resolve_from_root(pc.get(
         "ckpt_path", "outputs/checkpoints/decoder_pretrain.pt")))
@@ -231,7 +199,6 @@ def pretrain_decoders(model, train_loader, cfg, device):
     steps_per_epoch = len(train_loader)
     log("[decoder-pretrain] start "
         f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
-        f"target_value_mode={target_mode} "
         f"detail_dropout={float(detail_dropout):.2f} "
         f"freeze_non_decoders={pc.get('freeze_non_decoders', True)}")
 
@@ -246,8 +213,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
 
                 with torch.no_grad():
                     img_state, aud_state = _pretrain_decoder_states(
-                        model, x_img, x_aud, detail_dropout,
-                        target_mode=target_mode, value_clamp=value_clamp)
+                        model, x_img, x_aud, detail_dropout)
 
                 rec_img = model.image_decoder(img_state)
                 rec_aud = model.audio_decoder(aud_state)

@@ -5,7 +5,7 @@
 #   * ImageDecoder 输入 [V_img_from_A, image cue detail]。
 #   * AudioDecoder 输入 [V_aud_from_A, audio cue detail]。
 #   * 缺失 cue 的 detail 用 0 填充，因此 image-only 不偷看 audio，audio-only 不偷看 image。
-#   * 默认 detail.detach=true；下次可消融 detach=false。
+#   * v9a 使用 detail.detach=false，加强恢复质量；若 ACC 漂移，后续可消融 detach=true。
 
 seed: 1234
 device: "cuda"
@@ -39,8 +39,6 @@ decoder_pretrain:
   freeze_non_decoders: true
   resume: true
   save_every_epoch: true
-  target_value_mode: "safe_lif"
-  value_clamp: 20.0
   detail_dropout: 0.25
   lambda_img: 1.0
   lambda_aud: 4.0
