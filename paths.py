@@ -2,9 +2,9 @@
 
 目录约定：
   outputs/checkpoints/          各版本 checkpoint（跨版本共用）
-  outputs/outputs_v9/figures/   当前版本专属图表
-  outputs/outputs_v9/logs/
-  outputs/outputs_v9/tables/
+  outputs/outputs_v9a/figures/  当前版本专属图表
+  outputs/outputs_v9a/logs/
+  outputs/outputs_v9a/tables/
 """
 
 import re
@@ -20,11 +20,11 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 DATA_ROOT = PROJECT_ROOT / "_data"
 
 DEFAULT_CKPT = CHECKPOINTS_DIR / "cross_modal_snn.pt"
-DEFAULT_CONFIG = CONFIGS_DIR / "v9.yaml"
+DEFAULT_CONFIG = CONFIGS_DIR / "v9a.yaml"
 
 
 def _normalize_version_folder(tag):
-    """'v9' / '9' / 'outputs_v9' -> 'outputs_v9'。"""
+    """'v9a' / '9' / 'outputs_v9a' -> 'outputs_v9a'。"""
     tag = str(tag).strip()
     if tag.startswith("outputs_"):
         return tag
@@ -48,7 +48,7 @@ def infer_output_version(cfg):
 
 
 def version_bundle_dir(cfg):
-    """outputs/outputs_v9 等版本根目录。"""
+    """outputs/outputs_v9a 等版本根目录。"""
     return OUTPUTS_DIR / infer_output_version(cfg)
 
 

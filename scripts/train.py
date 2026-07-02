@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v9.yaml
+    python -u scripts/train.py --config configs/v9a.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -101,6 +101,139 @@ def _aud_recon_loss(rec, target, lc):
     if lam_m > 0:
         loss = loss + lam_m * _aud_marginal_loss(rec, target)
     return loss
+
+
+def _drop_detail_state(detail, drop_prob):
+    if detail is None:
+        return None
+    p = max(0.0, min(1.0, float(drop_prob)))
+    if p <= 0.0:
+        return detail
+    if p >= 1.0:
+        return torch.zeros_like(detail)
+    keep = (torch.rand(detail.size(0), 1, device=detail.device) >= p)
+    return detail * keep.to(detail.dtype)
+
+
+def _target_decoder_state(model, out_b, modality, detail_dropout):
+    if modality == "img":
+        state = out_b["v_img_target"]
+        detail = out_b.get("img_detail_state")
+    elif modality == "aud":
+        state = out_b["v_aud_target"]
+        detail = out_b.get("aud_detail_state")
+    else:
+        raise ValueError(f"Unknown decoder pretrain modality: {modality}")
+
+    state = state.detach()
+    if not model.use_detail_conditioning:
+        return state
+    detail = _drop_detail_state(detail.detach(), detail_dropout)
+    return torch.cat([state, detail], dim=1)
+
+
+def _set_decoder_pretrain_requires_grad(model, freeze_non_decoders=True):
+    previous = []
+    decoder_prefixes = ("image_decoder.", "audio_decoder.")
+    for name, param in model.named_parameters():
+        previous.append((param, param.requires_grad))
+        if freeze_non_decoders:
+            param.requires_grad_(name.startswith(decoder_prefixes))
+    return previous
+
+
+def _restore_requires_grad(previous):
+    for param, requires_grad in previous:
+        param.requires_grad_(requires_grad)
+
+
+def pretrain_decoders(model, train_loader, cfg, device):
+    pc = cfg.get("decoder_pretrain", {})
+    epochs = int(pc.get("epochs", 0))
+    if not pc.get("enabled", False) or epochs <= 0:
+        return
+
+    params = list(model.image_decoder.parameters()) + list(model.audio_decoder.parameters())
+    opt = torch.optim.Adam(
+        params,
+        lr=pc.get("lr", cfg["train"]["lr"]),
+        weight_decay=pc.get("weight_decay", 0.0),
+    )
+    lc = cfg["loss"]
+    lam_img = pc.get("lambda_img", lc.get("lambda_img", 1.0))
+    lam_aud = pc.get("lambda_aud", lc.get("lambda_aud", 1.0))
+    lam_act = pc.get("lambda_aud_active", lc.get("lambda_aud_active", 0.0))
+    detail_dropout = pc.get("detail_dropout", 0.0)
+    log_every = int(pc.get("log_every", cfg["train"].get("log_every", 50)))
+
+    previous_requires_grad = _set_decoder_pretrain_requires_grad(
+        model, pc.get("freeze_non_decoders", True))
+    steps_per_epoch = len(train_loader)
+    log("[decoder-pretrain] start "
+        f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
+        f"detail_dropout={float(detail_dropout):.2f} "
+        f"freeze_non_decoders={pc.get('freeze_non_decoders', True)}")
+
+    try:
+        for epoch in range(epochs):
+            model.train()
+            epoch_loss = 0.0
+            for step, (x_img, x_aud, labels) in enumerate(train_loader):
+                del labels
+                x_img = x_img.to(device)
+                x_aud = x_aud.to(device)
+
+                with torch.no_grad():
+                    out_b = model(
+                        x_img_cue=x_img, x_aud_cue=x_aud,
+                        x_img_target=x_img, x_aud_target=x_aud,
+                        training_mode=True, phase="binding")
+                    img_state = _target_decoder_state(
+                        model, out_b, "img", detail_dropout)
+                    aud_state = _target_decoder_state(
+                        model, out_b, "aud", detail_dropout)
+
+                rec_img = model.image_decoder(img_state)
+                rec_aud = model.audio_decoder(aud_state)
+
+                loss_img = _img_recon_loss(rec_img, x_img, lc)
+                loss_aud = _aud_recon_loss(rec_aud, x_aud, lc)
+                loss = lam_img * loss_img + lam_aud * loss_aud
+                logs = {
+                    "img": loss_img.item(),
+                    "aud": loss_aud.item(),
+                }
+                if lam_act > 0:
+                    loss_act = _aud_active_loss(rec_aud, x_aud)
+                    loss = loss + lam_act * loss_act
+                    logs["aud_act"] = loss_act.item()
+
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                epoch_loss += loss.item()
+
+                if step % log_every == 0 or step == steps_per_epoch - 1:
+                    parts = " ".join(f"{k}={v:.4f}" for k, v in logs.items())
+                    log(f"[decoder-pretrain] epoch {epoch}/{epochs - 1} "
+                        f"step {step}/{steps_per_epoch - 1} "
+                        f"loss={loss.item():.4f} | {parts}")
+
+            avg_loss = epoch_loss / max(steps_per_epoch, 1)
+            log(f"[decoder-pretrain] epoch {epoch} avg_loss={avg_loss:.4f}")
+    finally:
+        _restore_requires_grad(previous_requires_grad)
+
+    if pc.get("save_ckpt", True):
+        pre_ckpt = str(resolve_from_root(pc.get(
+            "ckpt_path", "outputs/checkpoints/decoder_pretrain.pt")))
+        os.makedirs(os.path.dirname(pre_ckpt), exist_ok=True)
+        torch.save({
+            "model": model.state_dict(),
+            "cfg": cfg,
+            "decoder_pretrain_epochs": epochs,
+        }, pre_ckpt)
+        log(f"[decoder-pretrain] checkpoint saved -> {pre_ckpt}")
 
 
 def _mode_enabled(cue_mode, modes):
@@ -285,10 +418,11 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9.yaml")
+    ap.add_argument("--config", default="configs/v9a.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
+    ap.add_argument("--skip_decoder_pretrain", action="store_true")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -335,6 +469,13 @@ def main():
                 f"missing={len(missing)} unexpected={len(unexpected)}")
         else:
             log(f"[init] init_ckpt_path not found: {init_ckpt}; training from scratch.")
+
+    if args.skip_decoder_pretrain:
+        log("[decoder-pretrain] skipped by --skip_decoder_pretrain")
+    elif args.resume:
+        log("[decoder-pretrain] skipped because --resume was specified")
+    else:
+        pretrain_decoders(model, train_loader, cfg, device)
 
     opt = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"],
                            weight_decay=cfg["train"]["weight_decay"])

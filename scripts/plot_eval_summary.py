@@ -6,10 +6,10 @@
   3. 上述日志若含 [音频塌缩诊断] 段，自动生成 aud_diag 表格（PNG+CSV）
 
 用法：
-    python scripts/plot_eval_summary.py outputs/outputs_v9/tables/demo_eval_table.txt
-    python scripts/plot_eval_summary.py outputs/outputs_v9/logs/eval_v9_fixed_mask.log
-    python scripts/plot_eval_summary.py eval_v9_full.log --title "v9 full eval"
-    python scripts/plot_eval_summary.py eval_v9_fixed_mask.log --diag-only
+    python scripts/plot_eval_summary.py outputs/outputs_v9a/tables/demo_eval_table.txt
+    python scripts/plot_eval_summary.py outputs/outputs_v9a/logs/eval_v9a_fixed_mask.log
+    python scripts/plot_eval_summary.py eval_v9a_full.log --title "v9a full eval"
+    python scripts/plot_eval_summary.py eval_v9a_fixed_mask.log --diag-only
 """
 
 import argparse
@@ -301,7 +301,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("input", nargs="?",
-                    default="outputs/outputs_v9/tables/demo_eval_table.txt")
+                    default="outputs/outputs_v9a/tables/demo_eval_table.txt")
     ap.add_argument("--out", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--diag-out", default=None, help="音频塌缩诊断表输出路径")

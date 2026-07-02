@@ -29,23 +29,23 @@
 ```bash
 cd /root/projects/cross_modal_attractor_snn_v9
 source ~/snn-env/bin/activate
-python scripts/mkdir_outputs.py --config configs/v9.yaml
-nohup python -u scripts/train.py --config configs/v9.yaml > outputs/outputs_v9/logs/train_v9_50ep.log 2>&1 &
-tail -f outputs/outputs_v9/logs/train_v9_50ep.log
+python scripts/mkdir_outputs.py --config configs/v9a.yaml
+nohup python -u scripts/train.py --config configs/v9a.yaml > outputs/outputs_v9a/logs/train_v9a_50ep.log 2>&1 &
+tail -f outputs/outputs_v9a/logs/train_v9a_50ep.log
 ```
 
 ## 4. 输出位置
 
-- checkpoint: `outputs/checkpoints/cross_modal_snn_v9.pt`
-- 日志: `outputs/outputs_v9/logs/`
-- 图像: `outputs/outputs_v9/figures/`
-- 表格: `outputs/outputs_v9/tables/`
+- checkpoint: `outputs/checkpoints/cross_modal_snn_v9a.pt`
+- 日志: `outputs/outputs_v9a/logs/`
+- 图像: `outputs/outputs_v9a/figures/`
+- 表格: `outputs/outputs_v9a/tables/`
 
 ## 5. 源码文件清单
 
 | 文件 | 说明 |
 |---|---|
-| `configs/v9.yaml` | 当前版本唯一配置 |
+| `configs/v9a.yaml` | 当前版本唯一配置 |
 | `models/network.py` | Key/Index/Value 主干和 detail-conditioned decoder 接线 |
 | `models/decoders.py` | 分类头、图像 decoder、音频 decoder |
 | `scripts/train.py` | 训练 |

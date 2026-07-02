@@ -1,4 +1,4 @@
-# v9: detail-conditioned decoders.
+# v9a: detail-conditioned decoders + target-Value decoder pretraining.
 # 目标：保留 Index/Value 作为稳定联想记忆主干，同时把 cue detail 作为
 #      detach 条件拼接进同一个 decoder，避免恢复 loss 反向拉歪 Encoder/Key/Index。
 # 主要改动：
@@ -27,8 +27,22 @@ snn:
 
 detail_conditioning:
   enabled: true
-  detach: true     # Future ablation: try detach=false after the first v9 run.
+  detach: false    # Let reconstruction loss shape cue-detail encoders; watch ACC for drift.
   zero_missing: true
+
+decoder_pretrain:
+  enabled: true
+  epochs: 8
+  lr: 0.001
+  weight_decay: 0.0
+  log_every: 50
+  freeze_non_decoders: true
+  detail_dropout: 0.25
+  lambda_img: 1.0
+  lambda_aud: 4.0
+  lambda_aud_active: 1.0
+  save_ckpt: true
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v9a_decoder_pretrain.pt"
 
 dims:
   img_in: 784
@@ -160,7 +174,7 @@ data:
   train_subset: 0
 
 train:
-  output_version: v9
+  output_version: v9a
   epochs: 50
   lr: 0.001
   weight_decay: 0.0
@@ -171,4 +185,4 @@ train:
   lr_gamma: 0.5
   init_ckpt_path: ""
   init_strict: false
-  ckpt_path: "outputs/checkpoints/cross_modal_snn_v9.pt"
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v9a.pt"
