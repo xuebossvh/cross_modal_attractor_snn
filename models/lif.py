@@ -33,7 +33,11 @@ class SurrogateSpike(torch.autograd.Function):
 
 
 def spike_fn(v_minus_thresh, alpha=2.0):
-    return SurrogateSpike.apply(v_minus_thresh, alpha)
+    """Hard spikes in forward, PyTorch-only surrogate in backward."""
+    hard = (v_minus_thresh >= 0).to(v_minus_thresh.dtype)
+    scale = max(float(alpha) * 2.0, 1e-6)
+    soft = torch.sigmoid(scale * v_minus_thresh)
+    return hard.detach() - soft.detach() + soft
 
 
 class LIFNeuron(nn.Module):
