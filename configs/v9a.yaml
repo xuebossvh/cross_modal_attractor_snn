@@ -15,7 +15,6 @@ snn:
   beta: 0.9
   v_threshold: 1.0
   surrogate_alpha: 2.0
-  surrogate_impl: "custom"    # 3080/sm86 默认用原版 atan surrogate；4090 若遇 CUDA 问题可改 "torch"
   encoding: "current"
   img_encoding: "first_spike_trace"
   trace_decay: 0.9
@@ -173,7 +172,7 @@ loss:
 data:
   root: "_data"
   use_mnist: true
-  batch_size: 64
+  batch_size: 128
   num_workers: 4
   train_subset: 0
 

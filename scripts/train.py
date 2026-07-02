@@ -20,7 +20,7 @@ from common import (fix_console_encoding, log, load_config, set_seed,
 from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
-from models.lif import rate, set_surrogate_impl, get_surrogate_impl
+from models.lif import rate
 
 
 def _img_edge_loss(prob, target):
@@ -456,13 +456,11 @@ def main():
     cfg = load_config(args.config)
     cfg["_config_path"] = args.config
     ensure_output_dirs(cfg)
-    set_surrogate_impl(cfg.get("snn", {}).get("surrogate_impl", "custom"))
     set_seed(cfg["seed"])
     device = torch.device(cfg["device"] if torch.cuda.is_available()
                           or cfg["device"] == "cpu" else "cpu")
 
     log(f"[启动] 设备: {device}")
-    log(f"[启动] surrogate_impl={get_surrogate_impl()}")
     log("[启动] 加载训练集…")
     train_loader, _ = build_loaders(cfg)
     steps_per_epoch = len(train_loader)
