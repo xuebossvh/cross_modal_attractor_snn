@@ -20,6 +20,7 @@ from common import (fix_console_encoding, log, load_config, set_seed,
 from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
+from models.lif import rate
 
 
 def _img_edge_loss(prob, target):
@@ -115,21 +116,56 @@ def _drop_detail_state(detail, drop_prob):
     return detail * keep.to(detail.dtype)
 
 
-def _target_decoder_state(model, out_b, modality, detail_dropout):
-    if modality == "img":
-        state = out_b["v_img_target"]
-        detail = out_b.get("img_detail_state")
-    elif modality == "aud":
-        state = out_b["v_aud_target"]
-        detail = out_b.get("aud_detail_state")
-    else:
-        raise ValueError(f"Unknown decoder pretrain modality: {modality}")
+def _safe_target_value_state(value_layer, enc_spikes, delay=2, clamp=20.0):
+    """Pretrain-only target Value rate without surrogate autograd kernels."""
+    T, B, _ = enc_spikes.shape
+    device, dtype = enc_spikes.device, enc_spikes.dtype
+    v = torch.zeros((B, value_layer.n_value), device=device, dtype=dtype)
+    out = []
+    use_clamp = clamp is not None and float(clamp) > 0
+    clamp = float(clamp) if use_clamp else 0.0
+    for t in range(T):
+        ts = t - delay
+        if ts < 0:
+            cur = torch.zeros((B, value_layer.n_value), device=device, dtype=dtype)
+        else:
+            cur = value_layer.W_enc_to_V(enc_spikes[ts])
+        if use_clamp:
+            cur = torch.nan_to_num(cur, nan=0.0, posinf=clamp, neginf=-clamp)
+            cur = cur.clamp(-clamp, clamp)
+        v = value_layer.neuron.beta * v + cur
+        if use_clamp:
+            v = torch.nan_to_num(v, nan=0.0, posinf=clamp, neginf=-clamp)
+            v = v.clamp(-clamp, clamp)
+        spikes = (v - value_layer.neuron.v_threshold >= 0).to(dtype)
+        v = v * (1.0 - spikes)
+        out.append(spikes)
+    return rate(torch.stack(out, dim=0))
 
-    state = state.detach()
-    if not model.use_detail_conditioning:
-        return state
-    detail = _drop_detail_state(detail.detach(), detail_dropout)
-    return torch.cat([state, detail], dim=1)
+
+def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout, target_mode,
+                             value_clamp):
+    spike_img = model.img_encoder(x_img)
+    spike_aud = model.aud_encoder(model._normalize_audio_for_encoder(x_aud))
+
+    delay = model.memory.binding_delay if model.memory.use_delayed_target else 0
+    if target_mode == "safe_lif":
+        img_state = _safe_target_value_state(
+            model.memory.V_img, spike_img, delay=delay, clamp=value_clamp)
+        aud_state = _safe_target_value_state(
+            model.memory.V_aud, spike_aud, delay=delay, clamp=value_clamp)
+    elif target_mode == "linear_sigmoid":
+        img_state = torch.sigmoid(model.memory.V_img.W_enc_to_V(rate(spike_img)))
+        aud_state = torch.sigmoid(model.memory.V_aud.W_enc_to_V(rate(spike_aud)))
+    else:
+        raise ValueError(f"Unknown decoder_pretrain.target_value_mode: {target_mode}")
+
+    if model.use_detail_conditioning:
+        img_detail = _drop_detail_state(rate(spike_img).detach(), detail_dropout)
+        aud_detail = _drop_detail_state(rate(spike_aud).detach(), detail_dropout)
+        img_state = torch.cat([img_state.detach(), img_detail], dim=1)
+        aud_state = torch.cat([aud_state.detach(), aud_detail], dim=1)
+    return img_state.detach(), aud_state.detach()
 
 
 def _set_decoder_pretrain_requires_grad(model, freeze_non_decoders=True):
@@ -145,6 +181,16 @@ def _set_decoder_pretrain_requires_grad(model, freeze_non_decoders=True):
 def _restore_requires_grad(previous):
     for param, requires_grad in previous:
         param.requires_grad_(requires_grad)
+
+
+def _save_decoder_pretrain_ckpt(model, cfg, pre_ckpt, epoch, epochs):
+    os.makedirs(os.path.dirname(pre_ckpt), exist_ok=True)
+    torch.save({
+        "model": model.state_dict(),
+        "cfg": cfg,
+        "decoder_pretrain_epoch": epoch,
+        "decoder_pretrain_epochs": epochs,
+    }, pre_ckpt)
 
 
 def pretrain_decoders(model, train_loader, cfg, device):
@@ -164,18 +210,33 @@ def pretrain_decoders(model, train_loader, cfg, device):
     lam_aud = pc.get("lambda_aud", lc.get("lambda_aud", 1.0))
     lam_act = pc.get("lambda_aud_active", lc.get("lambda_aud_active", 0.0))
     detail_dropout = pc.get("detail_dropout", 0.0)
+    target_mode = pc.get("target_value_mode", "safe_lif")
+    value_clamp = pc.get("value_clamp", 20.0)
     log_every = int(pc.get("log_every", cfg["train"].get("log_every", 50)))
+    pre_ckpt = str(resolve_from_root(pc.get(
+        "ckpt_path", "outputs/checkpoints/decoder_pretrain.pt")))
+    start_epoch = 0
+    if pc.get("resume", True) and os.path.isfile(pre_ckpt):
+        state = torch.load(pre_ckpt, map_location=device)
+        model.load_state_dict(state["model"], strict=False)
+        start_epoch = int(state.get("decoder_pretrain_epoch", -1)) + 1
+        log(f"[decoder-pretrain] resume from {pre_ckpt} "
+            f"start_epoch={start_epoch}/{epochs - 1}")
+        if start_epoch >= epochs:
+            log("[decoder-pretrain] already complete; skipping.")
+            return
 
     previous_requires_grad = _set_decoder_pretrain_requires_grad(
         model, pc.get("freeze_non_decoders", True))
     steps_per_epoch = len(train_loader)
     log("[decoder-pretrain] start "
         f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
+        f"target_value_mode={target_mode} "
         f"detail_dropout={float(detail_dropout):.2f} "
         f"freeze_non_decoders={pc.get('freeze_non_decoders', True)}")
 
     try:
-        for epoch in range(epochs):
+        for epoch in range(start_epoch, epochs):
             model.train()
             epoch_loss = 0.0
             for step, (x_img, x_aud, labels) in enumerate(train_loader):
@@ -184,14 +245,9 @@ def pretrain_decoders(model, train_loader, cfg, device):
                 x_aud = x_aud.to(device)
 
                 with torch.no_grad():
-                    out_b = model(
-                        x_img_cue=x_img, x_aud_cue=x_aud,
-                        x_img_target=x_img, x_aud_target=x_aud,
-                        training_mode=True, phase="binding")
-                    img_state = _target_decoder_state(
-                        model, out_b, "img", detail_dropout)
-                    aud_state = _target_decoder_state(
-                        model, out_b, "aud", detail_dropout)
+                    img_state, aud_state = _pretrain_decoder_states(
+                        model, x_img, x_aud, detail_dropout,
+                        target_mode=target_mode, value_clamp=value_clamp)
 
                 rec_img = model.image_decoder(img_state)
                 rec_aud = model.audio_decoder(aud_state)
@@ -221,18 +277,14 @@ def pretrain_decoders(model, train_loader, cfg, device):
 
             avg_loss = epoch_loss / max(steps_per_epoch, 1)
             log(f"[decoder-pretrain] epoch {epoch} avg_loss={avg_loss:.4f}")
+            if pc.get("save_every_epoch", True):
+                _save_decoder_pretrain_ckpt(model, cfg, pre_ckpt, epoch, epochs)
+                log(f"[decoder-pretrain] checkpoint saved -> {pre_ckpt}")
     finally:
         _restore_requires_grad(previous_requires_grad)
 
     if pc.get("save_ckpt", True):
-        pre_ckpt = str(resolve_from_root(pc.get(
-            "ckpt_path", "outputs/checkpoints/decoder_pretrain.pt")))
-        os.makedirs(os.path.dirname(pre_ckpt), exist_ok=True)
-        torch.save({
-            "model": model.state_dict(),
-            "cfg": cfg,
-            "decoder_pretrain_epochs": epochs,
-        }, pre_ckpt)
+        _save_decoder_pretrain_ckpt(model, cfg, pre_ckpt, epochs - 1, epochs)
         log(f"[decoder-pretrain] checkpoint saved -> {pre_ckpt}")
 
 

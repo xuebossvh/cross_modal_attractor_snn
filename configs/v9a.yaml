@@ -37,6 +37,10 @@ decoder_pretrain:
   weight_decay: 0.0
   log_every: 50
   freeze_non_decoders: true
+  resume: true
+  save_every_epoch: true
+  target_value_mode: "safe_lif"
+  value_clamp: 20.0
   detail_dropout: 0.25
   lambda_img: 1.0
   lambda_aud: 4.0
