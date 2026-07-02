@@ -1,11 +1,7 @@
-# v9a: detail-conditioned decoders + target-Value decoder pretraining.
-# 目标：保留 Index/Value 作为稳定联想记忆主干，同时把 cue detail 作为
-#      detach 条件拼接进同一个 decoder，避免恢复 loss 反向拉歪 Encoder/Key/Index。
-# 主要改动：
-#   * ImageDecoder 输入 [V_img_from_A, image cue detail]。
-#   * AudioDecoder 输入 [V_aud_from_A, audio cue detail]。
-#   * 缺失 cue 的 detail 用 0 填充，因此 image-only 不偷看 audio，audio-only 不偷看 image。
-#   * v9a 使用 detail.detach=false，加强恢复质量；若 ACC 漂移，后续可消融 detach=true。
+# v9b: gated detail-conditioned decoders.
+# Decoder still receives Value state + cue detail. Reconstruction loss uses
+# V_from_A in the forward pass but does not backpropagate through it into
+# Value/Index. Audio detail is widened from 128 to 256 before gated fusion.
 
 seed: 1234
 device: "cuda"
@@ -27,8 +23,12 @@ snn:
 
 detail_conditioning:
   enabled: true
-  detach: false    # Let reconstruction loss shape cue-detail encoders; watch ACC for drift.
+  detach: false
+  detach_value_for_recon: true
   zero_missing: true
+  fusion: "gated_concat"
+  img_detail_dim: 128
+  aud_detail_dim: 256
 
 decoder_pretrain:
   enabled: true
@@ -45,7 +45,7 @@ decoder_pretrain:
   lambda_aud: 4.0
   lambda_aud_active: 1.0
   save_ckpt: true
-  ckpt_path: "outputs/checkpoints/cross_modal_snn_v9a_decoder_pretrain.pt"
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v9b_decoder_pretrain.pt"
 
 dims:
   img_in: 784
@@ -67,7 +67,7 @@ dims:
 index:
   alpha_img: 1.0
   alpha_aud: 1.0
-  input_schedule: "phased_img_first"
+  input_schedule: "simultaneous"
   phase_split: 0.5
   phase_current_scale: 1.0
   phase_on_bimodal_only: true
@@ -116,21 +116,18 @@ cue_modes:
 corruption:
   train_severity: 0.5
   img_mode: "random"
-  aud_mode: "random"            # legacy 回退；训练实际优先用 aud_train_modes/课程
+  aud_mode: "random"
   curriculum_mode: "staged"
   severity_min: 0.1
   severity_max: 0.5
   stage1_end: 20
   stage2_end: 35
-  # 受控训练残缺池（避免 full-random 让模型放弃样本级音频恢复）
   aud_train_modes: ["time_mask", "freq_mask", "time_freq_block", "gaussian"]
-  # 课程式音频残缺（前期轻 time/freq mask -> 中期 block -> 后期混合）
   aud_family_curriculum:
     enabled: true
     early: ["time_mask", "freq_mask"]
     mid: ["time_freq_block"]
     late: ["time_mask", "freq_mask", "time_freq_block", "gaussian"]
-  # fixed_mask 评估协议固定 family（论文主对照，跨版本同一套 mask）
   eval_fixed:
     img_mode: "occlusion"
     aud_mode: "time_freq_block"
@@ -142,7 +139,7 @@ loss:
   lambda_aud: 4.0
   aud_weight_gamma: 5.0
   lambda_aud_grad: 1.0
-  lambda_aud_foreground: 0.5       # v9: detail conditioning 分担样本细节，避免音频 loss 压垮 Index
+  lambda_aud_foreground: 0.5
   aud_foreground_top_fraction: 0.15
   lambda_aud_marginal: 0.15
   lambda_aud_active: 1.0
@@ -154,7 +151,7 @@ loss:
   lambda_img_l1: 0.5
   lambda_img_edge: 0.5
 
-  lambda_index_cons: 0.5           # 让 Index 重新稳住类别 basin
+  lambda_index_cons: 0.5
   lambda_soft_cls: 0.5
   soft_cls_temperature: 2.0
   align_teacher_modes: ["corrupt_both"]
@@ -167,7 +164,7 @@ loss:
     modes: ["corrupt_both"]
     start_epoch: 0
     end_epoch: 35
-    max_sample_mix: 1.0            # detail conditioning 负责后期样本级修正
+    max_sample_mix: 1.0
 
 data:
   root: "_data"
@@ -177,7 +174,7 @@ data:
   train_subset: 0
 
 train:
-  output_version: v9a
+  output_version: v9b
   epochs: 50
   lr: 0.001
   weight_decay: 0.0
@@ -189,4 +186,4 @@ train:
   lr_gamma: 0.5
   init_ckpt_path: ""
   init_strict: false
-  ckpt_path: "outputs/checkpoints/cross_modal_snn_v9a.pt"
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v9b.pt"

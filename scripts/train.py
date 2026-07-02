@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v9a.yaml
+    python -u scripts/train.py --config configs/v9b.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -123,24 +123,36 @@ def _target_value_state(value_layer, enc_spikes, delay):
 
 def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout):
     """Build decoder pretrain inputs from clean target Value, without Key/Index."""
-    spike_img = model.img_encoder(x_img)
-    spike_aud = model.aud_encoder(model._normalize_audio_for_encoder(x_aud))
+    with torch.no_grad():
+        spike_img = model.img_encoder(x_img)
+        spike_aud = model.aud_encoder(model._normalize_audio_for_encoder(x_aud))
 
-    delay = model.memory.binding_delay if model.memory.use_delayed_target else 0
-    img_state = _target_value_state(model.memory.V_img, spike_img, delay)
-    aud_state = _target_value_state(model.memory.V_aud, spike_aud, delay)
+        delay = model.memory.binding_delay if model.memory.use_delayed_target else 0
+        img_state = _target_value_state(model.memory.V_img, spike_img, delay)
+        aud_state = _target_value_state(model.memory.V_aud, spike_aud, delay)
+
+        if model.use_detail_conditioning:
+            img_detail = _drop_detail_state(rate(spike_img).detach(), detail_dropout)
+            aud_detail = _drop_detail_state(rate(spike_aud).detach(), detail_dropout)
+        else:
+            img_detail = aud_detail = None
 
     if model.use_detail_conditioning:
-        img_detail = _drop_detail_state(rate(spike_img).detach(), detail_dropout)
-        aud_detail = _drop_detail_state(rate(spike_aud).detach(), detail_dropout)
-        img_state = torch.cat([img_state.detach(), img_detail], dim=1)
-        aud_state = torch.cat([aud_state.detach(), aud_detail], dim=1)
-    return img_state.detach(), aud_state.detach()
+        img_state = model._fuse_decoder_state(img_state, img_detail, "img")
+        aud_state = model._fuse_decoder_state(aud_state, aud_detail, "aud")
+    elif model.detach_value_for_recon:
+        img_state = img_state.detach()
+        aud_state = aud_state.detach()
+    return img_state, aud_state
 
 
 def _set_decoder_pretrain_requires_grad(model, freeze_non_decoders=True):
     previous = []
-    decoder_prefixes = ("image_decoder.", "audio_decoder.")
+    decoder_prefixes = (
+        "image_decoder.", "audio_decoder.",
+        "img_detail_projector.", "aud_detail_projector.",
+        "img_detail_gate.", "aud_detail_gate.",
+    )
     for name, param in model.named_parameters():
         previous.append((param, param.requires_grad))
         if freeze_non_decoders:
@@ -169,12 +181,6 @@ def pretrain_decoders(model, train_loader, cfg, device):
     if not pc.get("enabled", False) or epochs <= 0:
         return
 
-    params = list(model.image_decoder.parameters()) + list(model.audio_decoder.parameters())
-    opt = torch.optim.Adam(
-        params,
-        lr=pc.get("lr", cfg["train"]["lr"]),
-        weight_decay=pc.get("weight_decay", 0.0),
-    )
     lc = cfg["loss"]
     lam_img = pc.get("lambda_img", lc.get("lambda_img", 1.0))
     lam_aud = pc.get("lambda_aud", lc.get("lambda_aud", 1.0))
@@ -197,6 +203,16 @@ def pretrain_decoders(model, train_loader, cfg, device):
 
     previous_requires_grad = _set_decoder_pretrain_requires_grad(
         model, pc.get("freeze_non_decoders", True))
+    params = [p for p in model.parameters() if p.requires_grad]
+    if not params:
+        _restore_requires_grad(previous_requires_grad)
+        raise RuntimeError("[decoder-pretrain] no trainable decoder parameters")
+    opt = torch.optim.Adam(
+        params,
+        lr=pc.get("lr", cfg["train"]["lr"]),
+        weight_decay=pc.get("weight_decay", 0.0),
+    )
+
     steps_per_epoch = len(train_loader)
     log("[decoder-pretrain] start "
         f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
@@ -213,9 +229,8 @@ def pretrain_decoders(model, train_loader, cfg, device):
                 x_img = x_img.to(device)
                 x_aud = x_aud.to(device)
 
-                with torch.no_grad():
-                    img_state, aud_state = _pretrain_decoder_states(
-                        model, x_img, x_aud, detail_dropout)
+                img_state, aud_state = _pretrain_decoder_states(
+                    model, x_img, x_aud, detail_dropout)
 
                 rec_img = model.image_decoder(img_state)
                 rec_aud = model.audio_decoder(aud_state)
@@ -446,7 +461,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9a.yaml")
+    ap.add_argument("--config", default="configs/v9b.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
