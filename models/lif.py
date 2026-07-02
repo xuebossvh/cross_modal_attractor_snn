@@ -10,6 +10,29 @@ import torch
 import torch.nn as nn
 
 
+_SURROGATE_IMPL = "custom"
+
+
+def set_surrogate_impl(name):
+    global _SURROGATE_IMPL
+    name = str(name or "custom").strip().lower()
+    aliases = {
+        "atan": "custom",
+        "surrogate": "custom",
+        "sigmoid": "torch",
+        "sigmoid_st": "torch",
+        "straight_through": "torch",
+    }
+    name = aliases.get(name, name)
+    if name not in ("custom", "torch"):
+        raise ValueError(f"Unknown surrogate_impl: {name}")
+    _SURROGATE_IMPL = name
+
+
+def get_surrogate_impl():
+    return _SURROGATE_IMPL
+
+
 class SurrogateSpike(torch.autograd.Function):
     """前向：Heaviside 阶跃发放；反向：atan surrogate gradient。
 
@@ -33,7 +56,10 @@ class SurrogateSpike(torch.autograd.Function):
 
 
 def spike_fn(v_minus_thresh, alpha=2.0):
-    """Hard spikes in forward, PyTorch-only surrogate in backward."""
+    """Hard spikes in forward with selectable surrogate gradient."""
+    if _SURROGATE_IMPL == "custom":
+        return SurrogateSpike.apply(v_minus_thresh, alpha)
+
     hard = (v_minus_thresh >= 0).to(v_minus_thresh.dtype)
     scale = max(float(alpha) * 2.0, 1e-6)
     soft = torch.sigmoid(scale * v_minus_thresh)
