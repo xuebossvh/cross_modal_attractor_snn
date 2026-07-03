@@ -59,7 +59,7 @@ def format_table_row(values, widths, aligns):
     )
 
 
-def load_config(path="configs/v9b.yaml"):
+def load_config(path="configs/v9c.yaml"):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -119,7 +119,7 @@ def sample_train_severity(cfg, epoch):
     return cc.get("train_severity", 0.5)
 
 
-def resolve_train_corrupt_modes(cfg, epoch):
+def resolve_train_corrupt_modes(cfg, epoch, step=None):
     """训练用残缺 family 选择（受控池 + 可选课程式分阶段）。
 
     返回 (img_mode, aud_mode)。图像沿用 corruption.img_mode；音频优先按
@@ -144,7 +144,14 @@ def resolve_train_corrupt_modes(cfg, epoch):
         pool = cc.get("aud_train_modes", AUD_TRAIN_MODES)
 
     if pool:
-        aud_mode = _r.choice(pool)
+        strategy = cc.get("aud_family_sampling", "random")
+        if isinstance(strategy, dict):
+            strategy = strategy.get("mode", "random")
+        if str(strategy).lower() == "balanced":
+            step_idx = 0 if step is None else int(step)
+            aud_mode = pool[step_idx % len(pool)]
+        else:
+            aud_mode = _r.choice(pool)
     else:
         aud_mode = cc.get("aud_mode", "random")
     return img_mode, aud_mode

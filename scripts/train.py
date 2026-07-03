@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v9b.yaml
+    python -u scripts/train.py --config configs/v9c.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -313,6 +313,30 @@ def _class_key_alignment_loss(key_img, key_aud, labels, temperature=0.1):
     return 0.5 * (sup_ce(sim_i2a) + sup_ce(sim_a2i))
 
 
+def _audio_detail_consistency_loss(model, out_r, clean_aud, cue_mode, cfg):
+    lc = cfg["loss"]
+    lam = float(lc.get("lambda_aud_detail_cons", 0.0))
+    if lam <= 0 or not _mode_enabled(cue_mode, lc.get("aud_detail_cons_modes", [])):
+        return out_r["index_state"].new_tensor(0.0), {}
+
+    detail_noisy = out_r.get("aud_detail_state")
+    if detail_noisy is None:
+        return out_r["index_state"].new_tensor(0.0), {}
+
+    with torch.no_grad():
+        clean_spikes = model.aud_encoder(
+            model._normalize_audio_for_encoder(clean_aud))
+        detail_clean = rate(clean_spikes)
+
+    loss = F.mse_loss(detail_noisy, detail_clean.detach())
+    cos = F.cosine_similarity(
+        detail_noisy.detach(), detail_clean.detach(), dim=1).mean()
+    return lam * loss, {
+        "aud_det": loss.item(),
+        "aud_det_cos": cos.item(),
+    }
+
+
 def _alignment_losses(model, out_r, clean_img, clean_aud, labels, cue_mode, cfg):
     lc = cfg["loss"]
     total = out_r["index_state"].new_tensor(0.0)
@@ -379,14 +403,14 @@ def _apply_audio_target_curriculum(tgt_aud, labels, cue_mode, aud_kind,
 
 
 def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
-                   proto_img, proto_aud, epoch=0):
+                   proto_img, proto_aud, epoch=0, step=0):
     """返回 (总损失, 日志字典)。"""
     lc = cfg["loss"]
     ab = cfg.get("ablation", {})
     use_binding = ab.get("use_binding_phase", True)
 
     severity = sample_train_severity(cfg, epoch)
-    img_mode, aud_mode = resolve_train_corrupt_modes(cfg, epoch)
+    img_mode, aud_mode = resolve_train_corrupt_modes(cfg, epoch, step=step)
     img_cue, aud_cue = build_cue(clean_img, clean_aud, cue_mode, cfg,
                                  severity=severity,
                                  img_mode=img_mode, aud_mode=aud_mode)
@@ -422,6 +446,11 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
         model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
     total = total + loss_align
     logs.update(align_logs)
+
+    loss_detail, detail_logs = _audio_detail_consistency_loss(
+        model, out_r, clean_aud, cue_mode, cfg)
+    total = total + loss_detail
+    logs.update(detail_logs)
 
     loss_cls = F.cross_entropy(out_r["logits"], labels)
     cls_w = lc["lambda_cls"]
@@ -461,7 +490,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9b.yaml")
+    ap.add_argument("--config", default="configs/v9c.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -570,7 +599,7 @@ def main():
             cue_mode = sample_cue_mode(cfg)
             loss, logs = compute_losses(
                 model, x_img, x_aud, labels, cue_mode, cfg,
-                proto_img, proto_aud, epoch=epoch)
+                proto_img, proto_aud, epoch=epoch, step=step)
 
             opt.zero_grad()
             if not torch.isfinite(loss):

@@ -55,7 +55,7 @@ cross_modal_attractor_snn/
 ├── paths.py           # 项目根目录与 outputs 路径
 ├── outputs/           # 运行产物（不入 git，见 .gitignore）
 │   ├── checkpoints/   # 各版本 *.pt 权重（共用）
-│   └── outputs_v9b/   # 版本专属产物（旧版本同理）
+│   └── outputs_v9c/   # 版本专属产物（旧版本同理）
 │       ├── logs/
 │       ├── figures/
 │       └── tables/
@@ -69,24 +69,24 @@ cross_modal_attractor_snn/
 
 ```bash
 pip install -r requirements.txt
-python scripts/mkdir_outputs.py --config configs/v9b.yaml
-nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v9b.yaml > outputs/outputs_v9b/logs/train_v9b_50ep.log 2>&1 < /dev/null &
-tail -f outputs/outputs_v9b/logs/train_v9b_50ep.log
-nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v9b.yaml --epochs 30 > outputs/outputs_v9b/logs/train_v9b_30ep.log 2>&1 < /dev/null &
+python scripts/mkdir_outputs.py --config configs/v9c.yaml
+nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v9c.yaml > outputs/outputs_v9c/logs/train_v9c_50ep.log 2>&1 < /dev/null &
+tail -f outputs/outputs_v9c/logs/train_v9c_50ep.log
+nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v9c.yaml --epochs 30 > outputs/outputs_v9c/logs/train_v9c_30ep.log 2>&1 < /dev/null &
 ```
 
-可选：一条后台命令跑主训练，主训练结束后自动顺序跑 3 个 v9b 消融：
+可选：一条后台命令跑主训练，主训练结束后自动顺序跑 3 个 v9c 消融：
 
 ```bash
-nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v9b_suite.py --config configs/v9b.yaml --with_ablations > outputs/outputs_v9b/logs/suite_v9b_with_ablations.log 2>&1 < /dev/null &
-tail -f outputs/outputs_v9b/logs/suite_v9b_with_ablations.log
+nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v9c_suite.py --config configs/v9c.yaml --with_ablations > outputs/outputs_v9c/logs/suite_v9c_with_ablations.log 2>&1 < /dev/null &
+tail -f outputs/outputs_v9c/logs/suite_v9c_with_ablations.log
 ```
 
 如果主训练已经跑完，只想补跑三个消融：
 
 ```bash
-nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v9b_suite.py --config configs/v9b.yaml --ablations_only > outputs/outputs_v9b/logs/suite_v9b_ablations_only.log 2>&1 < /dev/null &
-tail -f outputs/outputs_v9b/logs/suite_v9b_ablations_only.log
+nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v9c_suite.py --config configs/v9c.yaml --ablations_only > outputs/outputs_v9c/logs/suite_v9c_ablations_only.log 2>&1 < /dev/null &
+tail -f outputs/outputs_v9c/logs/suite_v9c_ablations_only.log
 ```
 
 每个 batch 采样一种 cue 模式，并分两阶段计算损失：
@@ -95,22 +95,22 @@ tail -f outputs/outputs_v9b/logs/suite_v9b_ablations_only.log
   target Value（可延迟若干步）。`bind loss` 让 **A 驱动的 Value** 对齐
   **target Value（stop-grad）**，从而学习 `A→V` 绑定。此阶段不走 decoder。
 - **readout 阶段**：关闭 target，decoder 的 Value 主输入只来自
-  `v_*_from_A`（A 驱动的 Value）；v9b 额外融合对应 cue 的 detail state，
+  `v_*_from_A`（A 驱动的 Value）；v9c 额外融合对应 cue 的 detail state，
   计算分类 / 图像恢复 / 音频恢复 / 脉冲正则损失。
 
-每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v9b.pt`（由 yaml 指定）。
-日志 / 图表 / 表格写入 `outputs/outputs_v9b/{logs,figures,tables}/`。
+每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v9c.pt`（由 yaml 指定）。
+日志 / 图表 / 表格写入 `outputs/outputs_v9c/{logs,figures,tables}/`。
 
 > 注意：若你曾用旧架构训练过，旧 checkpoint 结构不兼容，evaluate/demo 会自动
 > 检测并回退到随机权重并给出警告——重新训练即可。
 
-快速冒烟（小子集、1 epoch）：编辑 `configs/v9b.yaml` 设 `data.train_subset: 512`、
+快速冒烟（小子集、1 epoch）：编辑 `configs/v9c.yaml` 设 `data.train_subset: 512`、
 `train.epochs: 1`，再运行 `python -u scripts/train.py`。
 
 ## 4. 评估与 Demo
 
 ```bash
-python -u scripts/evaluate.py --config configs/v9b.yaml | tee outputs/outputs_v9b/tables/full_eval_v9b.txt
+python -u scripts/evaluate.py --config configs/v9c.yaml | tee outputs/outputs_v9c/tables/full_eval_v9c.txt
 python -u scripts/demo_inference.py --num 10 --severity 0.5
 python -u scripts/smoke_test.py
 ```
@@ -120,10 +120,10 @@ python -u scripts/smoke_test.py
   `smp`=样本级 / `cat`=类别代表原型）。快速试跑：`python -u evaluate.py --max_batches 5`。
 - `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注
   cue type / target type / true label / pred label / confidence：
-  - `outputs/outputs_v9b/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
-  - `outputs/outputs_v9b/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
-  - `outputs/outputs_v9b/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
-  - 评估表：`outputs/outputs_v9b/tables/demo_eval_table.txt`
+  - `outputs/outputs_v9c/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
+  - `outputs/outputs_v9c/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
+  - `outputs/outputs_v9c/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
+  - 评估表：`outputs/outputs_v9c/tables/demo_eval_table.txt`
 
 ---
 
@@ -177,13 +177,13 @@ I_A = alpha_img * W_img_to_A(K_img) + alpha_aud * W_aud_to_A(K_aud)
 
 6 种 cue 模式（`common.py :: CUE_MODES`）：`corrupt_img_only` / `corrupt_aud_only` /
 `corrupt_both` / `clean_img_only` / `clean_aud_only` / `clean_both`，采样概率见
-`configs/v9b.yaml :: cue_modes`。
+`configs/v9c.yaml :: cue_modes`。
 
 损坏函数（`data/corruption.py`，`severity∈[0,1]`）：
 - 图像：`occlusion` / `pixel_delete` / `gaussian` / `mask_left|right|top|bottom`
 - 音频：`gaussian` / `time_mask` / `freq_mask` / `feature_dropout` / `partial_temporal`
 
-## 8. 消融开关（`configs/v9b.yaml :: ablation`）
+## 8. 消融开关（`configs/v9c.yaml :: ablation`）
 
 | 开关 | 作用 |
 |------|------|

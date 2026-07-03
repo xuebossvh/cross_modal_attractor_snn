@@ -1,4 +1,4 @@
-"""Run v9b training, optionally followed by the first three ablations.
+"""Run v9c training, optionally followed by the first three ablations.
 
 Use this as the single long-running server command. The suite creates output
 directories, writes one log per experiment, and stops on the first failed run.
@@ -14,7 +14,7 @@ import bootstrap  # noqa: F401
 
 from common import load_config
 from paths import PROJECT_ROOT, logs_dir
-from make_v9b_ablations import write_variants
+from make_v9c_ablations import write_variants
 
 
 def _config_rel(path):
@@ -66,9 +66,9 @@ def _run_train(config, label):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9b.yaml")
+    ap.add_argument("--config", default="configs/v9c.yaml")
     ap.add_argument("--with_ablations", action="store_true",
-                    help="Run the three predefined v9b ablations after main training.")
+                    help="Run the three predefined v9c ablations after main training.")
     ap.add_argument("--ablations_only", action="store_true",
                     help="Skip main training and run only the three ablations.")
     args = ap.parse_args()
