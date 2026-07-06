@@ -14,6 +14,11 @@ IMG_MODES = ["occlusion", "pixel_delete", "gaussian",
              "mask_left", "mask_right", "mask_top", "mask_bottom"]
 AUD_MODES = ["gaussian", "time_mask", "freq_mask",
              "feature_dropout", "partial_temporal", "time_freq_block"]
+AUD_FAMILY_GROUPS = {
+    "paper_aligned_time_gap": ["time_mask", "partial_temporal"],
+    "spectrogram_occlusion": ["time_freq_block", "freq_mask", "feature_dropout"],
+    "noise": ["gaussian"],
+}
 
 # 受控训练残缺池（避免 full-random 让模型放弃样本级恢复）。
 # 仅保留结构化遮挡 + 少量噪声，不与 block 过度叠加。
@@ -69,7 +74,7 @@ def corrupt_image(x_img, mode="random", severity=0.5):
     return x
 
 
-def corrupt_audio(x_aud, mode="random", severity=0.5):
+def corrupt_audio(x_aud, mode="random", severity=0.5, return_mask=False):
     """损坏音频 cue（作用于 2D log-mel 特征 [B, n_mels, n_frames]）。
 
     模式 : gaussian / time_mask / freq_mask /
@@ -77,48 +82,65 @@ def corrupt_audio(x_aud, mode="random", severity=0.5):
     """
     x = x_aud.clone()
     if x.dim() == 2:                       # [B, F] -> 不可做时间/频率 mask，仅噪声/dropout
-        return _corrupt_audio_flat(x, mode, severity)
+        return _corrupt_audio_flat(x, mode, severity, return_mask=return_mask)
     B, M, Tf = x.shape
     m = _resolve(mode, AUD_MODES)
     s = float(max(0.0, min(1.0, severity)))
+    mask = None
 
     if m == "gaussian":
         x = (x + s * torch.randn_like(x)).clamp(0.0, 1.0)
     elif m == "time_mask":
         # 随机遮挡一段连续帧
-        w = max(1, int(round(s * Tf)))
-        for i in range(B):
-            t0 = random.randint(0, max(0, Tf - w))
-            x[i, :, t0:t0 + w] = 0.0
+        w = int(round(s * Tf))
+        mask = torch.zeros_like(x)
+        if w > 0:
+            for i in range(B):
+                t0 = random.randint(0, max(0, Tf - w))
+                x[i, :, t0:t0 + w] = 0.0
+                mask[i, :, t0:t0 + w] = 1.0
     elif m == "freq_mask":
         # 随机遮挡一段连续频带
-        w = max(1, int(round(s * M)))
-        for i in range(B):
-            f0 = random.randint(0, max(0, M - w))
-            x[i, f0:f0 + w, :] = 0.0
+        w = int(round(s * M))
+        mask = torch.zeros_like(x)
+        if w > 0:
+            for i in range(B):
+                f0 = random.randint(0, max(0, M - w))
+                x[i, f0:f0 + w, :] = 0.0
+                mask[i, f0:f0 + w, :] = 1.0
     elif m == "feature_dropout":
         keep = (torch.rand_like(x) > s).float()
         x = x * keep
+        mask = 1.0 - keep
     elif m == "partial_temporal":
         # 只保留前 (1-s) 比例的帧，后段全遮（部分时序 cue）
         w = int(round(s * Tf))
+        mask = torch.zeros_like(x)
         if w > 0:
             x[:, :, Tf - w:] = 0.0
+            mask[:, :, Tf - w:] = 1.0
     elif m == "time_freq_block":
         # 同时遮挡一段连续帧 × 一段连续频带（二维块遮挡）
-        wt = max(1, int(round(s * Tf)))
-        wf = max(1, int(round(s * M)))
-        for i in range(B):
-            t0 = random.randint(0, max(0, Tf - wt))
-            f0 = random.randint(0, max(0, M - wf))
-            x[i, f0:f0 + wf, t0:t0 + wt] = 0.0
+        wt = int(round(s * Tf))
+        wf = int(round(s * M))
+        mask = torch.zeros_like(x)
+        if wt > 0 and wf > 0:
+            for i in range(B):
+                t0 = random.randint(0, max(0, Tf - wt))
+                f0 = random.randint(0, max(0, M - wf))
+                x[i, f0:f0 + wf, t0:t0 + wt] = 0.0
+                mask[i, f0:f0 + wf, t0:t0 + wt] = 1.0
+    if return_mask:
+        return x, mask
     return x
 
 
-def _corrupt_audio_flat(x, mode, severity):
+def _corrupt_audio_flat(x, mode, severity, return_mask=False):
     s = float(max(0.0, min(1.0, severity)))
     m = _resolve(mode, ["gaussian", "feature_dropout"])
     if m == "gaussian":
-        return (x + s * torch.randn_like(x)).clamp(0.0, 1.0)
+        out = (x + s * torch.randn_like(x)).clamp(0.0, 1.0)
+        return (out, None) if return_mask else out
     keep = (torch.rand_like(x) > s).float()
-    return x * keep
+    out = x * keep
+    return (out, None) if return_mask else out

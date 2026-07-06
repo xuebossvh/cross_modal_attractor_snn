@@ -4,7 +4,7 @@
 仅依赖标准库，无需 PyYAML。
 
 用法：
-    python scripts/mkdir_outputs.py --config configs/v9.yaml
+    python scripts/mkdir_outputs.py --config configs/v10a.yaml
 """
 
 import argparse
@@ -49,7 +49,7 @@ def _load_output_cfg(config_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9.yaml")
+    ap.add_argument("--config", default="configs/v10a.yaml")
     args = ap.parse_args()
 
     cfg = _load_output_cfg(args.config)

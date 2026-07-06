@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v9.yaml
+    python -u scripts/train.py --config configs/v10a.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -20,6 +20,7 @@ from common import (fix_console_encoding, log, load_config, set_seed,
 from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
+from models.lif import rate
 
 
 def _img_edge_loss(prob, target):
@@ -82,7 +83,17 @@ def _aud_marginal_loss(rec, target):
     return loss_t + loss_f
 
 
-def _aud_recon_loss(rec, target, lc):
+def _masked_audio_error(rec, target, mask, power=2):
+    mask = mask.to(device=rec.device, dtype=rec.dtype)
+    diff = rec - target
+    err = diff.abs() if power == 1 else diff.pow(2)
+    flat_mask = mask.flatten(1)
+    denom = flat_mask.sum(dim=1).clamp_min(1.0)
+    per_sample = (err * mask).flatten(1).sum(dim=1) / denom
+    return per_sample.mean()
+
+
+def _aud_recon_loss(rec, target, lc, mask=None):
     """L1 + MSE + weighted_MSE + 时频梯度 loss。"""
     gamma = lc.get("aud_weight_gamma", 3.0)
     l1 = F.l1_loss(rec, target)
@@ -100,7 +111,189 @@ def _aud_recon_loss(rec, target, lc):
     lam_m = lc.get("lambda_aud_marginal", 0.0)
     if lam_m > 0:
         loss = loss + lam_m * _aud_marginal_loss(rec, target)
+    lam_masked = lc.get("lambda_aud_masked", 0.0)
+    if lam_masked > 0 and mask is not None:
+        loss_masked = (
+            _masked_audio_error(rec, target, mask, power=1)
+            + _masked_audio_error(rec, target, mask, power=2)
+        )
+        loss = loss + lam_masked * loss_masked
     return loss
+
+
+def _drop_detail_state(detail, drop_prob):
+    if detail is None:
+        return None
+    p = max(0.0, min(1.0, float(drop_prob)))
+    if p <= 0.0:
+        return detail
+    if p >= 1.0:
+        return torch.zeros_like(detail)
+    keep = (torch.rand(detail.size(0), 1, device=detail.device) >= p)
+    return detail * keep.to(detail.dtype)
+
+
+def _target_value_state(value_layer, enc_spikes, delay):
+    _, target_state = value_layer._run_target(enc_spikes, delay)
+    return target_state.detach()
+
+
+def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout):
+    """Build decoder pretrain inputs from clean target Value, without Key/Index."""
+    with torch.no_grad():
+        spike_img = model.img_encoder(x_img)
+        spike_aud = model.aud_encoder(model._normalize_audio_for_encoder(x_aud))
+
+        delay = model.memory.binding_delay if model.memory.use_delayed_target else 0
+        img_state = _target_value_state(model.memory.V_img, spike_img, delay)
+        aud_state = _target_value_state(model.memory.V_aud, spike_aud, delay)
+
+        if model.use_detail_conditioning:
+            img_detail = _drop_detail_state(rate(spike_img).detach(), detail_dropout)
+            aud_detail = _drop_detail_state(rate(spike_aud).detach(), detail_dropout)
+        else:
+            img_detail = aud_detail = None
+
+    if model.use_detail_conditioning:
+        img_state = model._fuse_decoder_state(img_state, img_detail, "img")
+        aud_state = model._fuse_decoder_state(aud_state, aud_detail, "aud")
+    elif model.detach_value_for_recon:
+        img_state = img_state.detach()
+        aud_state = aud_state.detach()
+    return img_state, aud_state
+
+
+def _set_decoder_pretrain_requires_grad(model, freeze_non_decoders=True):
+    previous = []
+    decoder_prefixes = (
+        "image_decoder.", "audio_decoder.",
+        "img_detail_projector.", "aud_detail_projector.",
+        "img_detail_gate.", "aud_detail_gate.",
+    )
+    for name, param in model.named_parameters():
+        previous.append((param, param.requires_grad))
+        if freeze_non_decoders:
+            param.requires_grad_(name.startswith(decoder_prefixes))
+    return previous
+
+
+def _restore_requires_grad(previous):
+    for param, requires_grad in previous:
+        param.requires_grad_(requires_grad)
+
+
+def _save_decoder_pretrain_ckpt(model, cfg, pre_ckpt, epoch, epochs):
+    os.makedirs(os.path.dirname(pre_ckpt), exist_ok=True)
+    torch.save({
+        "model": model.state_dict(),
+        "cfg": cfg,
+        "decoder_pretrain_epoch": epoch,
+        "decoder_pretrain_epochs": epochs,
+    }, pre_ckpt)
+
+
+def pretrain_decoders(model, train_loader, cfg, device):
+    pc = cfg.get("decoder_pretrain", {})
+    epochs = int(pc.get("epochs", 0))
+    if not pc.get("enabled", False) or epochs <= 0:
+        return
+
+    lc = cfg["loss"]
+    lam_img = pc.get("lambda_img", lc.get("lambda_img", 1.0))
+    lam_aud = pc.get("lambda_aud", lc.get("lambda_aud", 1.0))
+    lam_act = pc.get("lambda_aud_active", lc.get("lambda_aud_active", 0.0))
+    detail_dropout = pc.get("detail_dropout", 0.0)
+    grad_clip = float(pc.get("grad_clip", 0.0))
+    log_every = int(pc.get("log_every", cfg["train"].get("log_every", 50)))
+    pre_ckpt = str(resolve_from_root(pc.get(
+        "ckpt_path", "outputs/checkpoints/decoder_pretrain.pt")))
+    start_epoch = 0
+    if pc.get("resume", True) and os.path.isfile(pre_ckpt):
+        state = torch.load(pre_ckpt, map_location=device)
+        model.load_state_dict(state["model"], strict=False)
+        start_epoch = int(state.get("decoder_pretrain_epoch", -1)) + 1
+        log(f"[decoder-pretrain] resume from {pre_ckpt} "
+            f"start_epoch={start_epoch}/{epochs - 1}")
+        if start_epoch >= epochs:
+            log("[decoder-pretrain] already complete; skipping.")
+            return
+
+    previous_requires_grad = _set_decoder_pretrain_requires_grad(
+        model, pc.get("freeze_non_decoders", True))
+    params = [p for p in model.parameters() if p.requires_grad]
+    if not params:
+        _restore_requires_grad(previous_requires_grad)
+        raise RuntimeError("[decoder-pretrain] no trainable decoder parameters")
+    opt = torch.optim.Adam(
+        params,
+        lr=pc.get("lr", cfg["train"]["lr"]),
+        weight_decay=pc.get("weight_decay", 0.0),
+    )
+
+    steps_per_epoch = len(train_loader)
+    log("[decoder-pretrain] start "
+        f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
+        f"detail_dropout={float(detail_dropout):.2f} "
+        f"grad_clip={grad_clip:.2f} "
+        f"freeze_non_decoders={pc.get('freeze_non_decoders', True)}")
+
+    try:
+        for epoch in range(start_epoch, epochs):
+            model.train()
+            epoch_loss = 0.0
+            for step, (x_img, x_aud, labels) in enumerate(train_loader):
+                del labels
+                x_img = x_img.to(device)
+                x_aud = x_aud.to(device)
+
+                img_state, aud_state = _pretrain_decoder_states(
+                    model, x_img, x_aud, detail_dropout)
+
+                rec_img = model.image_decoder(img_state)
+                rec_aud = model.audio_decoder(aud_state)
+
+                loss_img = _img_recon_loss(rec_img, x_img, lc)
+                loss_aud = _aud_recon_loss(rec_aud, x_aud, lc)
+                loss = lam_img * loss_img + lam_aud * loss_aud
+                logs = {
+                    "img": loss_img.item(),
+                    "aud": loss_aud.item(),
+                }
+                if lam_act > 0:
+                    loss_act = _aud_active_loss(rec_aud, x_aud)
+                    loss = loss + lam_act * loss_act
+                    logs["aud_act"] = loss_act.item()
+
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(
+                        "[decoder-pretrain] non-finite loss at "
+                        f"epoch={epoch} step={step}: {logs}")
+
+                opt.zero_grad()
+                loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        params, grad_clip, error_if_nonfinite=True)
+                opt.step()
+                epoch_loss += loss.item()
+
+                if step % log_every == 0 or step == steps_per_epoch - 1:
+                    parts = " ".join(f"{k}={v:.4f}" for k, v in logs.items())
+                    log(f"[decoder-pretrain] epoch {epoch}/{epochs - 1} "
+                        f"step {step}/{steps_per_epoch - 1} "
+                        f"loss={loss.item():.4f} | {parts}")
+
+            avg_loss = epoch_loss / max(steps_per_epoch, 1)
+            log(f"[decoder-pretrain] epoch {epoch} avg_loss={avg_loss:.4f}")
+            if pc.get("save_every_epoch", True):
+                _save_decoder_pretrain_ckpt(model, cfg, pre_ckpt, epoch, epochs)
+                log(f"[decoder-pretrain] checkpoint saved -> {pre_ckpt}")
+    finally:
+        _restore_requires_grad(previous_requires_grad)
+
+    if pc.get("save_ckpt", True):
+        _save_decoder_pretrain_ckpt(model, cfg, pre_ckpt, epochs - 1, epochs)
+        log(f"[decoder-pretrain] checkpoint saved -> {pre_ckpt}")
 
 
 def _mode_enabled(cue_mode, modes):
@@ -112,6 +305,16 @@ def _soft_cls_loss(student_logits, teacher_logits, temperature=2.0):
     log_p = F.log_softmax(student_logits / t, dim=1)
     q = F.softmax(teacher_logits.detach() / t, dim=1)
     return F.kl_div(log_p, q, reduction="batchmean") * (t * t)
+
+
+def _teacher_cues_for_mode(cue_mode, clean_img, clean_aud, match_modality):
+    if not match_modality:
+        return clean_img, clean_aud
+    if cue_mode in ("corrupt_aud_only", "clean_aud_only"):
+        return None, clean_aud
+    if cue_mode in ("corrupt_img_only", "clean_img_only"):
+        return clean_img, None
+    return clean_img, clean_aud
 
 
 def _class_key_alignment_loss(key_img, key_aud, labels, temperature=0.1):
@@ -137,6 +340,30 @@ def _class_key_alignment_loss(key_img, key_aud, labels, temperature=0.1):
     return 0.5 * (sup_ce(sim_i2a) + sup_ce(sim_a2i))
 
 
+def _audio_detail_consistency_loss(model, out_r, clean_aud, cue_mode, cfg):
+    lc = cfg["loss"]
+    lam = float(lc.get("lambda_aud_detail_cons", 0.0))
+    if lam <= 0 or not _mode_enabled(cue_mode, lc.get("aud_detail_cons_modes", [])):
+        return out_r["index_state"].new_tensor(0.0), {}
+
+    detail_noisy = out_r.get("aud_detail_state")
+    if detail_noisy is None:
+        return out_r["index_state"].new_tensor(0.0), {}
+
+    with torch.no_grad():
+        clean_spikes = model.aud_encoder(
+            model._normalize_audio_for_encoder(clean_aud))
+        detail_clean = rate(clean_spikes)
+
+    loss = F.mse_loss(detail_noisy, detail_clean.detach())
+    cos = F.cosine_similarity(
+        detail_noisy.detach(), detail_clean.detach(), dim=1).mean()
+    return lam * loss, {
+        "aud_det": loss.item(),
+        "aud_det_cos": cos.item(),
+    }
+
+
 def _alignment_losses(model, out_r, clean_img, clean_aud, labels, cue_mode, cfg):
     lc = cfg["loss"]
     total = out_r["index_state"].new_tensor(0.0)
@@ -150,7 +377,10 @@ def _alignment_losses(model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
     )
     if need_teacher:
         with torch.no_grad():
-            out_clean = model(x_img_cue=clean_img, x_aud_cue=clean_aud,
+            teacher_img, teacher_aud = _teacher_cues_for_mode(
+                cue_mode, clean_img, clean_aud,
+                lc.get("align_teacher_match_modality", False))
+            out_clean = model(x_img_cue=teacher_img, x_aud_cue=teacher_aud,
                               training_mode=False, phase="readout")
         lam_idx = lc.get("lambda_index_cons", 0.0)
         if lam_idx > 0:
@@ -203,17 +433,18 @@ def _apply_audio_target_curriculum(tgt_aud, labels, cue_mode, aud_kind,
 
 
 def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
-                   proto_img, proto_aud, epoch=0):
+                   proto_img, proto_aud, epoch=0, step=0):
     """返回 (总损失, 日志字典)。"""
     lc = cfg["loss"]
     ab = cfg.get("ablation", {})
     use_binding = ab.get("use_binding_phase", True)
 
     severity = sample_train_severity(cfg, epoch)
-    img_mode, aud_mode = resolve_train_corrupt_modes(cfg, epoch)
-    img_cue, aud_cue = build_cue(clean_img, clean_aud, cue_mode, cfg,
-                                 severity=severity,
-                                 img_mode=img_mode, aud_mode=aud_mode)
+    img_mode, aud_mode = resolve_train_corrupt_modes(cfg, epoch, step=step)
+    img_cue, aud_cue, cue_masks = build_cue(
+        clean_img, clean_aud, cue_mode, cfg, severity=severity,
+        img_mode=img_mode, aud_mode=aud_mode, return_masks=True)
+    aud_mask = cue_masks.get("aud")
     tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
         cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
     tgt_aud, aud_mix = _apply_audio_target_curriculum(
@@ -247,6 +478,11 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     total = total + loss_align
     logs.update(align_logs)
 
+    loss_detail, detail_logs = _audio_detail_consistency_loss(
+        model, out_r, clean_aud, cue_mode, cfg)
+    total = total + loss_detail
+    logs.update(detail_logs)
+
     loss_cls = F.cross_entropy(out_r["logits"], labels)
     cls_w = lc["lambda_cls"]
     if is_aud_only_mode(cue_mode):
@@ -265,9 +501,24 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     total = total + lc["lambda_img"] * loss_img
     logs[f"img({img_kind[:3]})"] = loss_img.item()
 
-    loss_aud = _aud_recon_loss(out_r["recovered_aud"], tgt_aud, lc)
+    masked_families = set(lc.get("aud_masked_families", []))
+    use_aud_mask = (
+        cue_mode in ("corrupt_aud_only", "corrupt_both")
+        and aud_kind == "sample"
+        and aud_mode in masked_families
+        and aud_mask is not None
+        and lc.get("lambda_aud_masked", 0.0) > 0
+    )
+    mask_for_loss = aud_mask if use_aud_mask else None
+    loss_aud = _aud_recon_loss(out_r["recovered_aud"], tgt_aud, lc,
+                               mask=mask_for_loss)
     total = total + lc["lambda_aud"] * loss_aud
     logs[f"aud({aud_kind[:3]})"] = loss_aud.item()
+    if use_aud_mask:
+        logs["aud_mask_l1"] = _masked_audio_error(
+            out_r["recovered_aud"], tgt_aud, aud_mask, power=1).item()
+        logs["aud_mask_mse"] = _masked_audio_error(
+            out_r["recovered_aud"], tgt_aud, aud_mask, power=2).item()
 
     if aud_kind == "sample":
         lam_act = lc.get("lambda_aud_active", 0.0)
@@ -285,10 +536,11 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9.yaml")
+    ap.add_argument("--config", default="configs/v10a.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
+    ap.add_argument("--skip_decoder_pretrain", action="store_true")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -336,6 +588,13 @@ def main():
         else:
             log(f"[init] init_ckpt_path not found: {init_ckpt}; training from scratch.")
 
+    if args.skip_decoder_pretrain:
+        log("[decoder-pretrain] skipped by --skip_decoder_pretrain")
+    elif args.resume:
+        log("[decoder-pretrain] skipped because --resume was specified")
+    else:
+        pretrain_decoders(model, train_loader, cfg, device)
+
     opt = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"],
                            weight_decay=cfg["train"]["weight_decay"])
 
@@ -351,6 +610,7 @@ def main():
     else:
         scheduler = None
     log(f"[启动] LR 调度: {sched_name}  初始 lr={cfg['train']['lr']}")
+    log(f"[启动] grad_clip={cfg['train'].get('grad_clip', 0.0)}")
 
     start_epoch = 0
     ckpt = str(resolve_from_root(cfg["train"]["ckpt_path"]))
@@ -372,6 +632,7 @@ def main():
         log(f"[警告] --resume 指定但 checkpoint 不存在: {ckpt}，从头训练。")
 
     log_every = cfg["train"]["log_every"]
+    grad_clip = float(cfg["train"].get("grad_clip", 0.0))
     for epoch in range(start_epoch, total_epochs):
         model.train()
         epoch_loss = 0.0
@@ -384,10 +645,17 @@ def main():
             cue_mode = sample_cue_mode(cfg)
             loss, logs = compute_losses(
                 model, x_img, x_aud, labels, cue_mode, cfg,
-                proto_img, proto_aud, epoch=epoch)
+                proto_img, proto_aud, epoch=epoch, step=step)
 
             opt.zero_grad()
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"[train] non-finite loss at epoch={epoch} "
+                    f"step={step} cue={cue_mode}: {logs}")
             loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), grad_clip, error_if_nonfinite=True)
             opt.step()
 
             epoch_loss += loss.item()

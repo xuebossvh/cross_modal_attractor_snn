@@ -1,12 +1,13 @@
 """跨模态 SNN 联想记忆推理 demo。
 
-输出三张图（外行可读，默认写入当前版本 outputs/outputs_v9/figures/）：
+输出三张图（外行可读，默认写入当前版本 outputs/outputs_v10a/figures/）：
   demo_aud_only.png  — 只输入残缺语音
   demo_img_only.png  — 只输入残缺图像
   demo_both.png      — 双模态残缺输入
 
 用法：
     python -u scripts/demo_inference.py --num 8 --severity 0.5
+    python -u scripts/demo_inference.py --num 8 --severity 0.5 --protocol legacy_random
 """
 
 import bootstrap  # noqa: F401
@@ -20,7 +21,7 @@ from paths import (ensure_output_dirs, resolve_from_root,
                    figures_dir, tables_dir)
 from common import (fix_console_encoding, log, load_config, select_targets,
                     setup_matplotlib_chinese, batch_ssim, format_table_row,
-                    aud_collapse_stats)
+                    aud_collapse_stats, build_cue, set_seed)
 from data.corruption import corrupt_audio, corrupt_image, AUD_MODES, IMG_MODES
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
@@ -395,12 +396,15 @@ def main():
     setup_matplotlib_chinese()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9.yaml")
+    ap.add_argument("--config", default="configs/v10a.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--num", type=int, default=8, help="可视化样本数（默认 8）")
     ap.add_argument("--severity", type=float, default=0.5)
     ap.add_argument("--aud_corrupt_mode", default="time_mask")
     ap.add_argument("--img_corrupt_mode", default="occlusion")
+    ap.add_argument("--protocol", default="fixed_mask",
+                    choices=["fixed_mask", "legacy_random"],
+                    help="fixed_mask=固定可读残缺图 | legacy_random=随机 family 可视化")
     ap.add_argument("--out_aud", default=None)
     ap.add_argument("--out_img", default=None)
     ap.add_argument("--out_both", default=None)
@@ -410,12 +414,14 @@ def main():
     cfg = load_config(args.config)
     cfg["_config_path"] = args.config
     ensure_output_dirs(cfg)
+    set_seed(int(cfg.get("seed", 0)) + (1 if args.protocol == "legacy_random" else 0))
     fig_dir = figures_dir(cfg)
     tbl_dir = tables_dir(cfg)
-    args.out_aud = args.out_aud or str(fig_dir / "demo_aud_only.png")
-    args.out_img = args.out_img or str(fig_dir / "demo_img_only.png")
-    args.out_both = args.out_both or str(fig_dir / "demo_both.png")
-    args.eval_table = args.eval_table or str(tbl_dir / "demo_eval_table.txt")
+    suffix = "_random" if args.protocol == "legacy_random" else ""
+    args.out_aud = args.out_aud or str(fig_dir / f"demo_aud_only{suffix}.png")
+    args.out_img = args.out_img or str(fig_dir / f"demo_img_only{suffix}.png")
+    args.out_both = args.out_both or str(fig_dir / f"demo_both{suffix}.png")
+    args.eval_table = args.eval_table or str(tbl_dir / f"demo_eval_table{suffix}.txt")
     device = torch.device("cuda" if (cfg["device"] == "cuda"
                           and torch.cuda.is_available()) else "cpu")
     ckpt_path = str(resolve_from_root(args.ckpt or cfg["train"]["ckpt_path"]))
@@ -444,15 +450,28 @@ def main():
 
     log(f"[demo] 可视化 {k} 个样本")
 
-    img_cue = _make_visible_img_cue(x_img, prefer_mode=args.img_corrupt_mode,
-                                    max_severity=args.severity)
-    aud_cue = _make_visible_aud_cue(x_aud, prefer_mode=args.aud_corrupt_mode,
-                                    max_severity=args.severity)
+    if args.protocol == "legacy_random":
+        img_cue_i, _ = build_cue(x_img, x_aud, "corrupt_img_only", cfg,
+                                 severity=args.severity)
+        _, aud_cue_a = build_cue(x_img, x_aud, "corrupt_aud_only", cfg,
+                                 severity=args.severity)
+        img_cue_b, aud_cue_b = build_cue(x_img, x_aud, "corrupt_both", cfg,
+                                         severity=args.severity)
+    else:
+        img_cue_fixed = _make_visible_img_cue(
+            x_img, prefer_mode=args.img_corrupt_mode,
+            max_severity=args.severity)
+        aud_cue_fixed = _make_visible_aud_cue(
+            x_aud, prefer_mode=args.aud_corrupt_mode,
+            max_severity=args.severity)
+        img_cue_i = img_cue_b = img_cue_fixed
+        aud_cue_a = aud_cue_b = aud_cue_fixed
 
     with torch.no_grad():
-        out_aud = model(x_aud_cue=aud_cue, training_mode=False)
-        out_img = model(x_img_cue=img_cue, training_mode=False)
-        out_both = model(x_img_cue=img_cue, x_aud_cue=aud_cue, training_mode=False)
+        out_aud = model(x_aud_cue=aud_cue_a, training_mode=False)
+        out_img = model(x_img_cue=img_cue_i, training_mode=False)
+        out_both = model(x_img_cue=img_cue_b, x_aud_cue=aud_cue_b,
+                         training_mode=False)
 
     # 按 cue 模式选择 target（展示列与 loss 评估一致）
     tgt_img_a, tgt_aud_a, img_k_a, aud_k_a = select_targets(
@@ -496,23 +515,25 @@ def main():
         ("image+audio", rec_aud_b, tgt_aud_b.cpu()),
     ])
 
-    img_cue_np = img_cue.cpu()
-    aud_cue_np = aud_cue.cpu()
+    img_cue_i_np = img_cue_i.cpu()
+    aud_cue_a_np = aud_cue_a.cpu()
+    img_cue_b_np = img_cue_b.cpu()
+    aud_cue_b_np = aud_cue_b.cpu()
 
     # audio-only 类别图像：按预测标签检索类别原型（联想记忆按地址取内容）
     ret_img_a = proto_img[pred_a].cpu()
     proto_aud_cpu = proto_aud.cpu()
 
-    _plot_aud_only(k, labels_cpu, aud_cue_np,
+    _plot_aud_only(k, labels_cpu, aud_cue_a_np,
                    out_aud["recovered_img"], out_aud["recovered_aud"],
                    tgt_img_a.cpu(), tgt_aud_a.cpu(), pred_a,
                    img_k_a, aud_k_a, args.out_aud, retrieval_img=ret_img_a,
                    proto_aud=proto_aud_cpu)
-    _plot_img_only(k, labels_cpu, img_cue_np,
+    _plot_img_only(k, labels_cpu, img_cue_i_np,
                    out_img["recovered_img"], out_img["recovered_aud"],
                    tgt_img_i.cpu(), tgt_aud_i.cpu(), pred_i,
                    img_k_i, aud_k_i, args.out_img, proto_aud=proto_aud_cpu)
-    _plot_both(k, labels_cpu, img_cue_np, aud_cue_np,
+    _plot_both(k, labels_cpu, img_cue_b_np, aud_cue_b_np,
                out_both["recovered_img"], out_both["recovered_aud"],
                tgt_img_b.cpu(), tgt_aud_b.cpu(), pred_b,
                img_k_b, aud_k_b, args.out_both, proto_aud=proto_aud_cpu)

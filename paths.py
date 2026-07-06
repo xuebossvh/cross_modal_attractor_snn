@@ -1,11 +1,4 @@
-"""项目根目录与输出路径（训练权重、日志、图表等）。
-
-目录约定：
-  outputs/checkpoints/          各版本 checkpoint（跨版本共用）
-  outputs/outputs_v9/figures/   当前版本专属图表
-  outputs/outputs_v9/logs/
-  outputs/outputs_v9/tables/
-"""
+"""Project paths and versioned output directories."""
 
 import re
 from pathlib import Path
@@ -20,11 +13,11 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 DATA_ROOT = PROJECT_ROOT / "_data"
 
 DEFAULT_CKPT = CHECKPOINTS_DIR / "cross_modal_snn.pt"
-DEFAULT_CONFIG = CONFIGS_DIR / "v9.yaml"
+DEFAULT_CONFIG = CONFIGS_DIR / "v10a.yaml"
 
 
 def _normalize_version_folder(tag):
-    """'v9' / '9' / 'outputs_v9' -> 'outputs_v9'。"""
+    """Map v10a / 10 / outputs_v10a to outputs_v10a."""
     tag = str(tag).strip()
     if tag.startswith("outputs_"):
         return tag
@@ -36,7 +29,7 @@ def _normalize_version_folder(tag):
 
 
 def infer_output_version(cfg):
-    """从 train.output_version 或当前 config 文件名推断版本目录名。"""
+    """Infer the versioned output directory from config metadata."""
     train = cfg.get("train", {})
     if train.get("output_version"):
         return _normalize_version_folder(train["output_version"])
@@ -48,7 +41,7 @@ def infer_output_version(cfg):
 
 
 def version_bundle_dir(cfg):
-    """outputs/outputs_v9 等版本根目录。"""
+    """Return outputs/outputs_v* for the current config."""
     return OUTPUTS_DIR / infer_output_version(cfg)
 
 
@@ -65,7 +58,7 @@ def tables_dir(cfg):
 
 
 def ensure_output_dirs(cfg=None):
-    """创建 checkpoints + 当前版本 figures/logs/tables。"""
+    """Create checkpoint and versioned artifact directories."""
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     if cfg is None:
         return
@@ -74,7 +67,7 @@ def ensure_output_dirs(cfg=None):
 
 
 def resolve_from_root(path):
-    """将配置中的相对路径解析为基于项目根的绝对路径。"""
+    """Resolve a config path relative to the project root."""
     p = Path(path)
     if not p.is_absolute():
         p = PROJECT_ROOT / p

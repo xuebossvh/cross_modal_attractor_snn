@@ -43,12 +43,39 @@ class CrossModalSNN(nn.Module):
         self.use_detail_conditioning = detail_cfg.get("enabled", False)
         self.detail_conditioning_detach = detail_cfg.get("detach", True)
         self.detail_conditioning_zero_missing = detail_cfg.get("zero_missing", True)
+        self.detach_value_for_recon = detail_cfg.get("detach_value_for_recon", False)
+        self.detail_fusion = detail_cfg.get("fusion", "concat")
+        self.img_detail_dim = int(detail_cfg.get("img_detail_dim", d["D_img"]))
+        self.aud_detail_dim = int(detail_cfg.get("aud_detail_dim", d["D_aud"]))
 
         img_decoder_in = d["N_value_img"]
         aud_decoder_in = d["N_value_aud"]
         if self.use_detail_conditioning:
-            img_decoder_in += d["D_img"]
-            aud_decoder_in += d["D_aud"]
+            img_decoder_in += self.img_detail_dim
+            aud_decoder_in += self.aud_detail_dim
+            self.img_detail_projector = nn.Sequential(
+                nn.Linear(d["D_img"], self.img_detail_dim),
+                nn.LayerNorm(self.img_detail_dim),
+                nn.ReLU(inplace=True),
+            )
+            self.aud_detail_projector = nn.Sequential(
+                nn.Linear(d["D_aud"], self.aud_detail_dim),
+                nn.LayerNorm(self.aud_detail_dim),
+                nn.ReLU(inplace=True),
+            )
+            if self.detail_fusion == "gated_concat":
+                self.img_detail_gate = nn.Sequential(
+                    nn.Linear(d["N_value_img"] + self.img_detail_dim,
+                              self.img_detail_dim),
+                    nn.Sigmoid(),
+                )
+                self.aud_detail_gate = nn.Sequential(
+                    nn.Linear(d["N_value_aud"] + self.aud_detail_dim,
+                              self.aud_detail_dim),
+                    nn.Sigmoid(),
+                )
+            elif self.detail_fusion != "concat":
+                raise ValueError(f"Unknown detail_conditioning.fusion: {self.detail_fusion}")
 
         self.image_decoder = ImageDecoder(img_decoder_in)
         aud_dec_ch = s.get("aud_decoder_base_ch", 128)
@@ -96,6 +123,26 @@ class CrossModalSNN(nn.Module):
         if self.detail_conditioning_detach:
             detail = detail.detach()
         return detail
+
+    def _fuse_decoder_state(self, value_state, raw_detail, modality):
+        if self.detach_value_for_recon:
+            value_state = value_state.detach()
+        if not self.use_detail_conditioning:
+            return value_state
+
+        if modality == "img":
+            detail = self.img_detail_projector(raw_detail)
+            if self.detail_fusion == "gated_concat":
+                gate = self.img_detail_gate(torch.cat([value_state, detail], dim=1))
+                detail = gate * detail
+        elif modality == "aud":
+            detail = self.aud_detail_projector(raw_detail)
+            if self.detail_fusion == "gated_concat":
+                gate = self.aud_detail_gate(torch.cat([value_state, detail], dim=1))
+                detail = gate * detail
+        else:
+            raise ValueError(f"Unknown modality: {modality}")
+        return torch.cat([value_state, detail], dim=1)
 
     def forward(self, x_img_cue=None, x_aud_cue=None,
                 x_img_target=None, x_aud_target=None,
@@ -153,8 +200,13 @@ class CrossModalSNN(nn.Module):
                 spike_img_cue, self.cfg["dims"]["D_img"], batch, device, dtype)
             aud_detail = self._cue_detail_state(
                 spike_aud_cue, self.cfg["dims"]["D_aud"], batch, device, dtype)
-            img_dec_state = torch.cat([img_dec_state, img_detail], dim=1)
-            aud_dec_state = torch.cat([aud_dec_state, aud_detail], dim=1)
+            img_dec_state = self._fuse_decoder_state(
+                mem["v_img_from_A"], img_detail, "img")
+            aud_dec_state = self._fuse_decoder_state(
+                mem["v_aud_from_A"], aud_detail, "aud")
+        elif self.detach_value_for_recon:
+            img_dec_state = img_dec_state.detach()
+            aud_dec_state = aud_dec_state.detach()
 
         out["img_detail_state"] = img_detail
         out["aud_detail_state"] = aud_detail
