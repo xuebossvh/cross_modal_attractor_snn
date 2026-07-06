@@ -13,11 +13,11 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 DATA_ROOT = PROJECT_ROOT / "_data"
 
 DEFAULT_CKPT = CHECKPOINTS_DIR / "cross_modal_snn.pt"
-DEFAULT_CONFIG = CONFIGS_DIR / "v9c.yaml"
+DEFAULT_CONFIG = CONFIGS_DIR / "v10a.yaml"
 
 
 def _normalize_version_folder(tag):
-    """Map v9c / 9 / outputs_v9c to outputs_v9c."""
+    """Map v10a / 10 / outputs_v10a to outputs_v10a."""
     tag = str(tag).strip()
     if tag.startswith("outputs_"):
         return tag

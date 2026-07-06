@@ -1,7 +1,7 @@
 """评估跨模态 SNN 联想记忆网络。
 
 对 6 种 cue 模式分别评估（推理时禁用 target，decoder 的 Value 主输入来自
-v_*_from_A；v9c 可额外融合当前 cue 的 detail state）：
+v_*_from_A；v10a 可额外融合当前 cue 的 detail state）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
     clean_img_only   / clean_aud_only   / clean_both
 
@@ -18,16 +18,19 @@ v_*_from_A；v9c 可额外融合当前 cue 的 detail state）：
     legacy_random  旧随机协议：family 随机、不固定 seed，用于鲁棒性抽查。
 
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
+可选：--family_breakdown 按音频腐蚀 family 拆解 corrupt_aud_only/corrupt_both。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v9c.yaml --protocol fixed_mask
-    python -u scripts/evaluate.py --config configs/v9c.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v10a.yaml --protocol fixed_mask
+    python -u scripts/evaluate.py --config configs/v10a.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v10a.yaml --protocol fixed_mask --family_breakdown
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
 import bootstrap  # noqa: F401
 
 import argparse
+import csv
 import random
 import sys
 
@@ -39,7 +42,8 @@ from common import (fix_console_encoding, log, load_config, set_seed,
                     batch_ssim, batch_psnr, build_cue, select_targets,
                     batch_reconstruction_variance, format_table_row,
                     aud_collapse_stats)
-from paths import resolve_from_root
+from paths import resolve_from_root, tables_dir
+from data.corruption import AUD_MODES
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
 
@@ -86,7 +90,8 @@ def _log_audio_diag(diag_rows):
 
 @torch.no_grad()
 def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
-              max_batches=None, protocol="fixed_mask", mode_idx=0):
+              max_batches=None, protocol="fixed_mask", mode_idx=0,
+              fixed_img_mode_override=None, fixed_aud_mode_override=None):
     """按 cue 模式对应的恢复粒度 target 计算指标。
 
     图像/音频指标均对照 select_targets 选出的 target（区分样本级/类别级）：
@@ -112,6 +117,10 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
 
     base_seed = int(cfg.get("seed", 0))
     fixed_img_mode, fixed_aud_mode = _fixed_eval_families(cfg)
+    if fixed_img_mode_override is not None:
+        fixed_img_mode = fixed_img_mode_override
+    if fixed_aud_mode_override is not None:
+        fixed_aud_mode = fixed_aud_mode_override
 
     iterator = enumerate(loader)
     total = len(loader) if max_batches is None else min(max_batches, len(loader))
@@ -176,11 +185,62 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     }
 
 
+@torch.no_grad()
+def eval_audio_family_breakdown(model, loader, cfg, device, severity,
+                                proto_img, proto_aud, max_batches=None):
+    """固定 seed/mask，逐个音频 corruption family 评估随机协议的薄弱环节。"""
+    rows = []
+    fixed_img_mode, _ = _fixed_eval_families(cfg)
+    modes = ["corrupt_aud_only", "corrupt_both"]
+    for mode_idx, mode in enumerate(modes):
+        for fam_idx, aud_family in enumerate(AUD_MODES):
+            r = eval_mode(
+                model, loader, cfg, mode, device, severity,
+                proto_img, proto_aud, max_batches=max_batches,
+                protocol="fixed_mask", mode_idx=100 + mode_idx * 10 + fam_idx,
+                fixed_img_mode_override=fixed_img_mode,
+                fixed_aud_mode_override=aud_family)
+            d = r["diag"]
+            rows.append({
+                "cue_mode": mode,
+                "aud_family": aud_family,
+                "acc": r["acc"],
+                "img_mse": r["img_mse"],
+                "psnr": r["psnr"],
+                "img_ssim": r["ssim"],
+                "aud_mse": r["aud_mse"],
+                "rec_std": d.get("rec_std", 0.0),
+                "tgt_std": d.get("tgt_std", 0.0),
+                "top15_recall": d.get("topk_recall", 0.0),
+            })
+
+    out_dir = tables_dir(cfg)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "audio_family_breakdown_fixed.csv"
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    bw = [18, 18, 8, 9, 8, 9, 10]
+    ba = ["l", "l", "r", "r", "r", "r", "r"]
+    log("=" * sum(bw))
+    log(f"[音频 family breakdown] fixed seed/mask -> {out_path}")
+    log(format_table_row(["cue模式", "audio family", "acc", "audMSE",
+                          "rec_std", "tgt_std", "top15%"], bw, ba))
+    for r in rows:
+        log(format_table_row([
+            r["cue_mode"], r["aud_family"], f"{r['acc']*100:.1f}%",
+            f"{r['aud_mse']:.4f}", f"{r['rec_std']:.4f}",
+            f"{r['tgt_std']:.4f}", f"{r['top15_recall']*100:.1f}%",
+        ], bw, ba))
+
+
 def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9c.yaml")
+    ap.add_argument("--config", default="configs/v10a.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--severity", type=float, default=0.5)
@@ -188,6 +248,8 @@ def main():
     ap.add_argument("--protocol", default="fixed_mask",
                     choices=["fixed_mask", "legacy_random"],
                     help="fixed_mask=论文主对照(固定mask) | legacy_random=旧随机协议")
+    ap.add_argument("--family_breakdown", action="store_true",
+                    help="按音频 corruption family 评估 corrupt_aud_only/corrupt_both")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -242,6 +304,11 @@ def main():
         diag_rows.append((mode, r["diag"]))
 
     _log_audio_diag(diag_rows)
+
+    if args.family_breakdown:
+        eval_audio_family_breakdown(model, test_loader, cfg, device,
+                                    args.severity, proto_img, proto_aud,
+                                    args.max_batches)
 
     if args.severity_curve:
         log("=" * 78)

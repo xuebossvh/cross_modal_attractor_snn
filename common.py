@@ -59,7 +59,7 @@ def format_table_row(values, widths, aligns):
     )
 
 
-def load_config(path="configs/v9c.yaml"):
+def load_config(path="configs/v10a.yaml"):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 

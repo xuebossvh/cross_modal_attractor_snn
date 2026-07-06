@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v9c.yaml
+    python -u scripts/train.py --config configs/v10a.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -290,6 +290,16 @@ def _soft_cls_loss(student_logits, teacher_logits, temperature=2.0):
     return F.kl_div(log_p, q, reduction="batchmean") * (t * t)
 
 
+def _teacher_cues_for_mode(cue_mode, clean_img, clean_aud, match_modality):
+    if not match_modality:
+        return clean_img, clean_aud
+    if cue_mode in ("corrupt_aud_only", "clean_aud_only"):
+        return None, clean_aud
+    if cue_mode in ("corrupt_img_only", "clean_img_only"):
+        return clean_img, None
+    return clean_img, clean_aud
+
+
 def _class_key_alignment_loss(key_img, key_aud, labels, temperature=0.1):
     if key_img is None or key_aud is None:
         return None
@@ -350,7 +360,10 @@ def _alignment_losses(model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
     )
     if need_teacher:
         with torch.no_grad():
-            out_clean = model(x_img_cue=clean_img, x_aud_cue=clean_aud,
+            teacher_img, teacher_aud = _teacher_cues_for_mode(
+                cue_mode, clean_img, clean_aud,
+                lc.get("align_teacher_match_modality", False))
+            out_clean = model(x_img_cue=teacher_img, x_aud_cue=teacher_aud,
                               training_mode=False, phase="readout")
         lam_idx = lc.get("lambda_index_cons", 0.0)
         if lam_idx > 0:
@@ -490,7 +503,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v9c.yaml")
+    ap.add_argument("--config", default="configs/v10a.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)

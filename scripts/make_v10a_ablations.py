@@ -1,7 +1,7 @@
-"""Generate temporary configs for the first three v9c ablations.
+"""Generate temporary configs for the first three v10a ablations.
 
-The official branch config remains configs/v9c.yaml. This script writes
-experiment configs under outputs/ablations_v9c/configs/ so the repository does
+The official branch config remains configs/v10a.yaml. This script writes
+experiment configs under outputs/ablations_v10a/configs/ so the repository does
 not accumulate one YAML file per ablation.
 """
 
@@ -16,7 +16,7 @@ from common import load_config
 from paths import PROJECT_ROOT
 
 
-ABLATION_ROOT = PROJECT_ROOT / "outputs" / "ablations_v9c" / "configs"
+ABLATION_ROOT = PROJECT_ROOT / "outputs" / "ablations_v10a" / "configs"
 
 
 def _deep_update(dst, src):
@@ -45,7 +45,7 @@ def _variant(base, tag, updates):
 
 def build_variants(base):
     # A: baseline detail concat/pretrain, but remove phased input.
-    yield "v9c_ablate_A_simultaneous", _variant(base, "v9c_ablate_A_simultaneous", {
+    yield "v10a_ablate_A_simultaneous", _variant(base, "v10a_ablate_A_simultaneous", {
         "detail_conditioning": {
             "enabled": True,
             "detach": False,
@@ -60,7 +60,7 @@ def build_variants(base):
     })
 
     # B: v9-style run with only detach=false added, no decoder pretrain.
-    yield "v9c_ablate_B_detach_false_only", _variant(base, "v9c_ablate_B_detach_false_only", {
+    yield "v10a_ablate_B_detach_false_only", _variant(base, "v10a_ablate_B_detach_false_only", {
         "detail_conditioning": {
             "enabled": True,
             "detach": False,
@@ -75,7 +75,7 @@ def build_variants(base):
     })
 
     # C: v9-style run with decoder pretrain only; keep detach=true.
-    yield "v9c_ablate_C_pretrain_only", _variant(base, "v9c_ablate_C_pretrain_only", {
+    yield "v10a_ablate_C_pretrain_only", _variant(base, "v10a_ablate_C_pretrain_only", {
         "detail_conditioning": {
             "enabled": True,
             "detach": True,
@@ -90,7 +90,7 @@ def build_variants(base):
     })
 
 
-def write_variants(config="configs/v9c.yaml", out_dir=ABLATION_ROOT):
+def write_variants(config="configs/v10a.yaml", out_dir=ABLATION_ROOT):
     base = load_config(config)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -106,7 +106,7 @@ def write_variants(config="configs/v9c.yaml", out_dir=ABLATION_ROOT):
 def main():
     written = write_variants()
 
-    print("Generated v9c ablation configs:")
+    print("Generated v10a ablation configs:")
     for tag, path in written:
         rel = path.relative_to(PROJECT_ROOT).as_posix()
         log = f"outputs/{tag}/logs/train_{tag}_50ep.log"
