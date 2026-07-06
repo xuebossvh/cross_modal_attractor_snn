@@ -158,10 +158,12 @@ def resolve_train_corrupt_modes(cfg, epoch, step=None):
 
 
 def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
-              img_mode=None, aud_mode=None):
+              img_mode=None, aud_mode=None, return_masks=False):
     """根据 cue 模式构造 (img_cue, aud_cue)。clean_* 为干净输入。
 
     返回的 cue 可能是残缺的、干净的，或某一模态为 None（单模态）。
+    return_masks=True 时返回 (img_cue, aud_cue, masks)，其中
+    masks["aud"] 为音频缺失 mask 或 None。
     target 永远是 clean_img / clean_aud（在训练循环里单独传）。
 
     img_mode / aud_mode：残缺 family 覆盖；为 None 时回退到 corruption.* 配置。
@@ -172,24 +174,34 @@ def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
     s = cc["train_severity"] if severity is None else severity
     im = cc["img_mode"] if img_mode is None else img_mode
     am = cc["aud_mode"] if aud_mode is None else aud_mode
+    masks = {"img": None, "aud": None}
+
+    def pack(img_cue, aud_cue):
+        if return_masks:
+            return img_cue, aud_cue, masks
+        return img_cue, aud_cue
 
     def ci(x):
         return corrupt_image(x, im, s)
 
     def ca(x):
+        if return_masks:
+            y, mask = corrupt_audio(x, am, s, return_mask=True)
+            masks["aud"] = mask
+            return y
         return corrupt_audio(x, am, s)
 
     if mode == "corrupt_img_only":
-        return ci(clean_img), None
+        return pack(ci(clean_img), None)
     if mode == "corrupt_aud_only":
-        return None, ca(clean_aud)
+        return pack(None, ca(clean_aud))
     if mode == "corrupt_both":
-        return ci(clean_img), ca(clean_aud)
+        return pack(ci(clean_img), ca(clean_aud))
     if mode == "clean_img_only":
-        return clean_img, None
+        return pack(clean_img, None)
     if mode == "clean_aud_only":
-        return None, clean_aud
-    return clean_img, clean_aud   # clean_both
+        return pack(None, clean_aud)
+    return pack(clean_img, clean_aud)   # clean_both
 
 
 def is_aud_only_mode(mode):

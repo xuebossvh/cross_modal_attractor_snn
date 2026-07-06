@@ -83,7 +83,17 @@ def _aud_marginal_loss(rec, target):
     return loss_t + loss_f
 
 
-def _aud_recon_loss(rec, target, lc):
+def _masked_audio_error(rec, target, mask, power=2):
+    mask = mask.to(device=rec.device, dtype=rec.dtype)
+    diff = rec - target
+    err = diff.abs() if power == 1 else diff.pow(2)
+    flat_mask = mask.flatten(1)
+    denom = flat_mask.sum(dim=1).clamp_min(1.0)
+    per_sample = (err * mask).flatten(1).sum(dim=1) / denom
+    return per_sample.mean()
+
+
+def _aud_recon_loss(rec, target, lc, mask=None):
     """L1 + MSE + weighted_MSE + 时频梯度 loss。"""
     gamma = lc.get("aud_weight_gamma", 3.0)
     l1 = F.l1_loss(rec, target)
@@ -101,6 +111,13 @@ def _aud_recon_loss(rec, target, lc):
     lam_m = lc.get("lambda_aud_marginal", 0.0)
     if lam_m > 0:
         loss = loss + lam_m * _aud_marginal_loss(rec, target)
+    lam_masked = lc.get("lambda_aud_masked", 0.0)
+    if lam_masked > 0 and mask is not None:
+        loss_masked = (
+            _masked_audio_error(rec, target, mask, power=1)
+            + _masked_audio_error(rec, target, mask, power=2)
+        )
+        loss = loss + lam_masked * loss_masked
     return loss
 
 
@@ -424,9 +441,10 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
 
     severity = sample_train_severity(cfg, epoch)
     img_mode, aud_mode = resolve_train_corrupt_modes(cfg, epoch, step=step)
-    img_cue, aud_cue = build_cue(clean_img, clean_aud, cue_mode, cfg,
-                                 severity=severity,
-                                 img_mode=img_mode, aud_mode=aud_mode)
+    img_cue, aud_cue, cue_masks = build_cue(
+        clean_img, clean_aud, cue_mode, cfg, severity=severity,
+        img_mode=img_mode, aud_mode=aud_mode, return_masks=True)
+    aud_mask = cue_masks.get("aud")
     tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
         cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
     tgt_aud, aud_mix = _apply_audio_target_curriculum(
@@ -483,9 +501,24 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     total = total + lc["lambda_img"] * loss_img
     logs[f"img({img_kind[:3]})"] = loss_img.item()
 
-    loss_aud = _aud_recon_loss(out_r["recovered_aud"], tgt_aud, lc)
+    masked_families = set(lc.get("aud_masked_families", []))
+    use_aud_mask = (
+        cue_mode in ("corrupt_aud_only", "corrupt_both")
+        and aud_kind == "sample"
+        and aud_mode in masked_families
+        and aud_mask is not None
+        and lc.get("lambda_aud_masked", 0.0) > 0
+    )
+    mask_for_loss = aud_mask if use_aud_mask else None
+    loss_aud = _aud_recon_loss(out_r["recovered_aud"], tgt_aud, lc,
+                               mask=mask_for_loss)
     total = total + lc["lambda_aud"] * loss_aud
     logs[f"aud({aud_kind[:3]})"] = loss_aud.item()
+    if use_aud_mask:
+        logs["aud_mask_l1"] = _masked_audio_error(
+            out_r["recovered_aud"], tgt_aud, aud_mask, power=1).item()
+        logs["aud_mask_mse"] = _masked_audio_error(
+            out_r["recovered_aud"], tgt_aud, aud_mask, power=2).item()
 
     if aud_kind == "sample":
         lam_act = lc.get("lambda_aud_active", 0.0)

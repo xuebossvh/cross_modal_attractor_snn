@@ -31,6 +31,7 @@ import bootstrap  # noqa: F401
 
 import argparse
 import csv
+import math
 import random
 import sys
 
@@ -43,7 +44,7 @@ from common import (fix_console_encoding, log, load_config, set_seed,
                     batch_reconstruction_variance, format_table_row,
                     aud_collapse_stats)
 from paths import resolve_from_root, tables_dir
-from data.corruption import AUD_MODES
+from data.corruption import AUD_MODES, AUD_FAMILY_GROUPS
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
 
@@ -61,6 +62,62 @@ def _fixed_eval_families(cfg):
     """fixed_mask 协议使用的固定残缺 family（论文主对照）。"""
     ef = cfg["corruption"].get("eval_fixed", {}) or {}
     return ef.get("img_mode", "occlusion"), ef.get("aud_mode", "time_freq_block")
+
+
+def _audio_family_group(family):
+    for group, families in AUD_FAMILY_GROUPS.items():
+        if family in families:
+            return group
+    return "other"
+
+
+def _region_error(rec, target, region, power=2):
+    region = region.to(device=rec.device, dtype=rec.dtype)
+    denom = region.flatten(1).sum(dim=1)
+    valid = denom > 0
+    if not valid.any():
+        return float("nan")
+    err = (rec - target).abs() if power == 1 else (rec - target).pow(2)
+    per_sample = (err * region).flatten(1).sum(dim=1) / denom.clamp_min(1.0)
+    return per_sample[valid].mean().item()
+
+
+def _audio_masked_metrics(rec, target, mask):
+    if mask is None:
+        return {
+            "aud_masked_mse": float("nan"),
+            "aud_masked_l1": float("nan"),
+            "aud_visible_mse": float("nan"),
+            "aud_visible_l1": float("nan"),
+        }
+    mask = mask.to(device=rec.device, dtype=rec.dtype)
+    visible = 1.0 - mask
+    return {
+        "aud_masked_mse": _region_error(rec, target, mask, power=2),
+        "aud_masked_l1": _region_error(rec, target, mask, power=1),
+        "aud_visible_mse": _region_error(rec, target, visible, power=2),
+        "aud_visible_l1": _region_error(rec, target, visible, power=1),
+    }
+
+
+def _add_metric(sums, counts, key, value):
+    if value is None or not math.isfinite(float(value)):
+        return
+    sums[key] = sums.get(key, 0.0) + float(value)
+    counts[key] = counts.get(key, 0) + 1
+
+
+def _mean_metric(sums, counts, key):
+    count = counts.get(key, 0)
+    if count <= 0:
+        return float("nan")
+    return sums.get(key, 0.0) / count
+
+
+def _fmt_float(value, digits=4):
+    if value is None or not math.isfinite(float(value)):
+        return "nan"
+    return f"{float(value):.{digits}f}"
 
 
 def _log_audio_diag(diag_rows):
@@ -110,6 +167,8 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     sum_psnr = 0.0
     sum_ssim = 0.0
     sum_aud_mse = 0.0
+    audio_metric_sums = {}
+    audio_metric_counts = {}
     nb = 0
     all_rec = []
     img_kind = aud_kind = "?"
@@ -136,12 +195,15 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         if protocol == "fixed_mask":
             # 与模型无关的确定性 mask：仅依赖 (seed, mode, batch)
             _reseed(base_seed * 100000 + mode_idx * 10000 + bi)
-            img_cue, aud_cue = build_cue(
+            img_cue, aud_cue, cue_masks = build_cue(
                 x_img, x_aud, mode, cfg, severity=severity,
-                img_mode=fixed_img_mode, aud_mode=fixed_aud_mode)
+                img_mode=fixed_img_mode, aud_mode=fixed_aud_mode,
+                return_masks=True)
         else:
-            img_cue, aud_cue = build_cue(x_img, x_aud, mode, cfg,
-                                         severity=severity)
+            img_cue, aud_cue, cue_masks = build_cue(
+                x_img, x_aud, mode, cfg, severity=severity,
+                return_masks=True)
+        aud_mask = cue_masks.get("aud")
 
         tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
             mode, x_img, x_aud, proto_img, proto_aud, labels)
@@ -159,6 +221,11 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
 
         rec_aud = out["recovered_aud"]
         sum_aud_mse += F.mse_loss(rec_aud, tgt_aud).item()   # log-mel [B,M,T]
+        _add_metric(
+            audio_metric_sums, audio_metric_counts, "aud_ssim",
+            batch_ssim(rec_aud.unsqueeze(1), tgt_aud.unsqueeze(1)).item())
+        for mk, mv in _audio_masked_metrics(rec_aud, tgt_aud, aud_mask).items():
+            _add_metric(audio_metric_sums, audio_metric_counts, mk, mv)
 
         d = aud_collapse_stats(rec_aud, tgt_aud)
         for kk, vv in d.items():
@@ -177,6 +244,16 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         "psnr": sum_psnr / max(nb, 1),
         "ssim": sum_ssim / max(nb, 1),
         "aud_mse": sum_aud_mse / max(nb, 1),
+        "aud_ssim": _mean_metric(audio_metric_sums, audio_metric_counts,
+                                 "aud_ssim"),
+        "aud_masked_mse": _mean_metric(audio_metric_sums, audio_metric_counts,
+                                       "aud_masked_mse"),
+        "aud_masked_l1": _mean_metric(audio_metric_sums, audio_metric_counts,
+                                      "aud_masked_l1"),
+        "aud_visible_mse": _mean_metric(audio_metric_sums, audio_metric_counts,
+                                       "aud_visible_mse"),
+        "aud_visible_l1": _mean_metric(audio_metric_sums, audio_metric_counts,
+                                      "aud_visible_l1"),
         "pix_var": pix_var,
         "pair_l2": pair_l2,
         "img_kind": img_kind,
@@ -204,11 +281,17 @@ def eval_audio_family_breakdown(model, loader, cfg, device, severity,
             rows.append({
                 "cue_mode": mode,
                 "aud_family": aud_family,
+                "family_group": _audio_family_group(aud_family),
                 "acc": r["acc"],
                 "img_mse": r["img_mse"],
                 "psnr": r["psnr"],
                 "img_ssim": r["ssim"],
                 "aud_mse": r["aud_mse"],
+                "aud_ssim": r["aud_ssim"],
+                "aud_masked_mse": r["aud_masked_mse"],
+                "aud_masked_l1": r["aud_masked_l1"],
+                "aud_visible_mse": r["aud_visible_mse"],
+                "aud_visible_l1": r["aud_visible_l1"],
                 "rec_std": d.get("rec_std", 0.0),
                 "tgt_std": d.get("tgt_std", 0.0),
                 "top15_recall": d.get("topk_recall", 0.0),
@@ -222,17 +305,20 @@ def eval_audio_family_breakdown(model, loader, cfg, device, severity,
         writer.writeheader()
         writer.writerows(rows)
 
-    bw = [18, 18, 8, 9, 8, 9, 10]
-    ba = ["l", "l", "r", "r", "r", "r", "r"]
+    bw = [18, 18, 24, 8, 9, 9, 11, 10]
+    ba = ["l", "l", "l", "r", "r", "r", "r", "r"]
     log("=" * sum(bw))
     log(f"[音频 family breakdown] fixed seed/mask -> {out_path}")
-    log(format_table_row(["cue模式", "audio family", "acc", "audMSE",
-                          "rec_std", "tgt_std", "top15%"], bw, ba))
+    log(format_table_row(["cue模式", "audio family", "group", "acc",
+                          "audMSE", "audSSIM", "maskedMSE", "top15%"],
+                         bw, ba))
     for r in rows:
         log(format_table_row([
-            r["cue_mode"], r["aud_family"], f"{r['acc']*100:.1f}%",
-            f"{r['aud_mse']:.4f}", f"{r['rec_std']:.4f}",
-            f"{r['tgt_std']:.4f}", f"{r['top15_recall']*100:.1f}%",
+            r["cue_mode"], r["aud_family"], r["family_group"],
+            f"{r['acc']*100:.1f}%", _fmt_float(r["aud_mse"]),
+            _fmt_float(r["aud_ssim"], digits=3),
+            _fmt_float(r["aud_masked_mse"]),
+            f"{r['top15_recall']*100:.1f}%",
         ], bw, ba))
 
 
@@ -273,10 +359,10 @@ def main():
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
-    eval_w = [18, 7, 9, 8, 7, 9, 10, 9, 16]
-    eval_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r"]
+    eval_w = [18, 7, 9, 8, 7, 9, 8, 9, 10, 9, 16]
+    eval_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
     eval_hdr = ["cue模式", "acc", "imgMSE", "PSNR", "SSIM", "audMSE",
-                "像素方差", "样本L2", "tgt(img/aud)"]
+                "audSSIM", "maskMSE", "像素方差", "样本L2", "tgt(img/aud)"]
     fixed_img_mode, fixed_aud_mode = _fixed_eval_families(cfg)
     log("=" * sum(eval_w))
     log(f"[评估] 6 种 cue 模式  (corrupt severity={args.severity})  "
@@ -298,7 +384,10 @@ def main():
         log(format_table_row([
             mode, f"{r['acc']*100:.1f}%",
             f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['ssim']:.3f}",
-            f"{r['aud_mse']:.4f}", f"{r['pix_var']:.4f}", f"{r['pair_l2']:.4f}",
+            f"{r['aud_mse']:.4f}",
+            _fmt_float(r["aud_ssim"], digits=3),
+            _fmt_float(r["aud_masked_mse"]),
+            f"{r['pix_var']:.4f}", f"{r['pair_l2']:.4f}",
             tgt,
         ], eval_w, eval_a))
         diag_rows.append((mode, r["diag"]))
