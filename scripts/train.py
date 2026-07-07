@@ -141,10 +141,22 @@ def _aud_recon_loss(rec, target, lc, mask=None):
 
 
 def _aud_feature_loss(model, rec, target):
-    """冻结 aud_encoder 特征空间 L1（F4）；target 侧 detach，只对 rec 回传。"""
-    target_feat = rate(model.aud_encoder(
-        model._normalize_audio_for_encoder(target))).detach()
-    rec_feat = rate(model.aud_encoder(model._normalize_audio_for_encoder(rec)))
+    """冻结 aud_encoder 特征空间 L1（F4）。
+
+    target 侧 detach；提取 rec 特征时临时关闭 encoder 参数的 requires_grad，
+    使梯度只回传到 rec（decoder/refiner），不改写 aud_encoder 权重。
+    """
+    enc = model.aud_encoder
+    with torch.no_grad():
+        target_feat = rate(enc(model._normalize_audio_for_encoder(target)))
+    saved = [p.requires_grad for p in enc.parameters()]
+    for p in enc.parameters():
+        p.requires_grad_(False)
+    try:
+        rec_feat = rate(enc(model._normalize_audio_for_encoder(rec)))
+    finally:
+        for p, s in zip(enc.parameters(), saved):
+            p.requires_grad_(s)
     return F.l1_loss(rec_feat, target_feat)
 
 

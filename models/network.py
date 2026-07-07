@@ -88,12 +88,15 @@ class CrossModalSNN(nn.Module):
 
         refiner_cfg = cfg.get("audio_refiner", {})
         self.use_audio_refiner = refiner_cfg.get("enabled", False)
+        self.refiner_visible_paste_back = refiner_cfg.get(
+            "visible_paste_back", False)
         if self.use_audio_refiner:
             self.audio_refiner = AudioRefiner(
                 ac["n_mels"], ac["n_frames"],
                 hidden_ch=int(refiner_cfg.get("hidden_ch", 32)),
                 blocks=int(refiner_cfg.get("blocks", 2)),
-                delta_scale=float(refiner_cfg.get("delta_scale", 1.0)))
+                delta_scale=float(refiner_cfg.get("delta_scale", 1.0)),
+                max_dilation=int(refiner_cfg.get("max_dilation", 16)))
         else:
             self.audio_refiner = None
 
@@ -232,7 +235,13 @@ class CrossModalSNN(nn.Module):
                 and aud_cue_mask is not None):
             mask = aud_cue_mask.to(device=coarse_aud.device, dtype=coarse_aud.dtype)
             delta = self.audio_refiner(coarse_aud, x_aud_cue, mask)
-            recovered_aud = (coarse_aud + mask * delta).clamp(0.0, 1.0)
+            if self.refiner_visible_paste_back:
+                # 文献式 inpainting：缺失区用网络预测，可见区原样保留 aud_cue
+                pred = (coarse_aud + delta).clamp(0.0, 1.0)
+                recovered_aud = mask * pred + (1.0 - mask) * x_aud_cue
+            else:
+                # 仅在缺失区叠加 delta；可见区沿用 coarse（不 paste 输入 cue）
+                recovered_aud = (coarse_aud + mask * delta).clamp(0.0, 1.0)
         out["recovered_aud"] = recovered_aud
         return out
 

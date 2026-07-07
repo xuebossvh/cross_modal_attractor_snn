@@ -126,22 +126,24 @@ class AudioRefiner(nn.Module):
     """Spectrogram-space refiner (F3b, optional).
 
     Input channels: [coarse_rec, aud_cue, mask]. Output: delta [B, n_mels, n_frames].
-    The caller applies `recovered = clamp(coarse + mask * delta)` so visible regions
-    (mask=0) are never overwritten; image-only / mask=None must bypass this module.
+    Dilation grows as 2**block_index (capped by ``max_dilation``) so that stacking
+    more blocks enlarges the temporal receptive field to cover long time gaps. The
+    caller decides how to combine delta with coarse/cue (see ``network.forward``);
+    visible regions must never be overwritten.
     """
 
-    def __init__(self, n_mels, n_frames, hidden_ch=32, blocks=2, delta_scale=1.0):
+    def __init__(self, n_mels, n_frames, hidden_ch=32, blocks=2, delta_scale=1.0,
+                 max_dilation=16):
         super().__init__()
         self.n_mels = n_mels
         self.n_frames = n_frames
         self.delta_scale = float(delta_scale)
         self.in_proj = nn.Conv2d(3, hidden_ch, kernel_size=3, padding=1)
-        dilations = [1, 2, 4]
         body = []
         for bi in range(max(1, blocks)):
+            dilation = min(2 ** bi, int(max_dilation))
             body.append(nn.ReLU(inplace=True))
-            body.append(GatedConv2d(
-                hidden_ch, kernel_size=3, dilation=dilations[bi % len(dilations)]))
+            body.append(GatedConv2d(hidden_ch, kernel_size=3, dilation=dilation))
         self.body = nn.Sequential(*body)
         self.out_proj = nn.Conv2d(hidden_ch, 1, kernel_size=3, padding=1)
         nn.init.zeros_(self.out_proj.weight)
