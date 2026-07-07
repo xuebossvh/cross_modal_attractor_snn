@@ -1,0 +1,201 @@
+# v10c: v10b fixed-mask alignment with lower final severity and
+# corrupt-aware decoder pretraining.
+# Compared with v10b, this config fixes image training corruption to occlusion,
+# limits late-stage severity to 0.4, increases decoder pretrain to 25 epochs,
+# and trains for 70 main epochs.
+
+seed: 1234
+device: "cuda"
+
+snn:
+  T: 20
+  beta: 0.9
+  v_threshold: 1.0
+  surrogate_alpha: 2.0
+  encoding: "current"
+  img_encoding: "first_spike_trace"
+  trace_decay: 0.9
+  aud_encoder: "conv"
+  aud_conv_ch1: 32
+  aud_conv_ch2: 64
+  aud_decoder_base_ch: 192
+  aud_decoder_start_hw: 8
+  aud_decoder_refine_blocks: 2
+
+detail_conditioning:
+  enabled: true
+  detach: false
+  detach_value_for_recon: true
+  zero_missing: true
+  fusion: "gated_concat"
+  img_detail_dim: 128
+  aud_detail_dim: 256
+
+decoder_pretrain:
+  enabled: true
+  epochs: 25
+  lr: 0.0002
+  weight_decay: 0.0
+  grad_clip: 1.0
+  log_every: 50
+  freeze_non_decoders: true
+  resume: true
+  save_every_epoch: true
+  detail_dropout: 0.25
+  corrupt_detail: true
+  corrupt_severity: 0.4
+  img_mode: "occlusion"
+  aud_mode: "time_mask"
+  use_masked_audio_loss: true
+  lambda_img: 1.0
+  lambda_aud: 4.0
+  lambda_aud_active: 1.0
+  save_ckpt: true
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v10c_decoder_pretrain.pt"
+
+dims:
+  img_in: 784
+  img_hidden: 256
+  D_img: 128
+  N_key_img: 128
+
+  aud_in: 4096
+  aud_hidden: 256
+  D_aud: 128
+  N_key_aud: 128
+
+  N_index: 512
+  N_value_img: 384
+  N_value_aud: 768
+
+  num_classes: 10
+
+index:
+  alpha_img: 1.0
+  alpha_aud: 1.0
+  input_schedule: "simultaneous"
+  phase_split: 0.5
+  phase_current_scale: 1.0
+  phase_on_bimodal_only: true
+  recurrent_scale: 0.2
+  wta_mode: "kwta"
+  k_wta: 96
+  inhibition_strength: 1.0
+
+value:
+  binding_delay: 2
+
+ablation:
+  use_recurrent: true
+  use_kwta: true
+  use_delayed_value_target: true
+  use_binding_phase: true
+  use_modality_dropout: true
+  use_audio_aux_cls: true
+
+audio:
+  use_real_audio: true
+  feature: "log_mel"
+  n_mels: 64
+  n_frames: 64
+  sample_rate: 8000
+  duration_sec: 1.0
+  fsdd_root: "_data/fsdd/recordings"
+  auto_download: true
+  toy_audio_prototype: false
+  noise_std: 0.3
+  norm_mode: "global"
+  norm_stats_path: "_data/audio_norm_stats.pt"
+  norm_percentile_lo: 1.0
+  norm_percentile_hi: 99.0
+  encoder_norm_mode: "hybrid"
+  encoder_local_mix: 0.5
+
+cue_modes:
+  p_corrupt_img_only: 0.10
+  p_corrupt_aud_only: 0.20
+  p_corrupt_both: 0.20
+  p_clean_img_only: 0.10
+  p_clean_aud_only: 0.20
+  p_clean_both: 0.20
+
+corruption:
+  train_severity: 0.4
+  img_mode: "occlusion"
+  aud_mode: "time_mask"
+  aud_family_sampling: "balanced"
+  curriculum_mode: "staged"
+  severity_min: 0.1
+  severity_max: 0.4
+  stage1_end: 20
+  stage2_end: 35
+  aud_train_modes: ["time_mask"]
+  aud_family_curriculum:
+    enabled: false
+    early: ["time_mask"]
+    mid: ["time_mask"]
+    late: ["time_mask"]
+  eval_fixed:
+    img_mode: "occlusion"
+    aud_mode: "time_mask"
+
+loss:
+  lambda_cls: 1.0
+  lambda_cls_aud_only_mult: 2.0
+  lambda_img: 1.0
+  lambda_aud: 4.0
+  aud_weight_gamma: 5.0
+  lambda_aud_grad: 1.0
+  lambda_aud_foreground: 0.5
+  aud_foreground_top_fraction: 0.15
+  lambda_aud_marginal: 0.15
+  lambda_aud_masked: 1.0
+  aud_masked_families: ["time_mask"]
+  lambda_aud_active: 1.0
+  lambda_audio_aux: 1.0
+  lambda_bind_img: 1.0
+  lambda_bind_aud: 1.0
+  lambda_reg: 0.0005
+  img_recon: "bce"
+  lambda_img_l1: 0.5
+  lambda_img_edge: 0.5
+
+  lambda_index_cons: 0.5
+  lambda_soft_cls: 0.5
+  soft_cls_temperature: 2.0
+  align_teacher_modes: ["corrupt_both", "corrupt_aud_only"]
+  align_teacher_match_modality: true
+  lambda_key_align: 0.2
+  key_align_temperature: 0.1
+  key_align_modes: ["corrupt_both", "clean_both"]
+  lambda_aud_detail_cons: 0.0
+  aud_detail_cons_modes: ["corrupt_aud_only", "corrupt_both"]
+
+  aud_sample_curriculum:
+    enabled: true
+    modes: ["corrupt_both"]
+    start_epoch: 0
+    end_epoch: 35
+    max_sample_mix: 1.0
+
+data:
+  root: "_data"
+  use_mnist: true
+  batch_size: 128
+  num_workers: 4
+  train_subset: 0
+
+train:
+  output_version: v10c
+  epochs: 70
+  lr: 0.001
+  weight_decay: 0.0
+  grad_clip: 1.0
+  log_every: 50
+  lr_scheduler: "cosine"
+  lr_min: 0.00005
+  lr_step_size: 15
+  lr_gamma: 0.5
+  init_ckpt_path: ""
+  init_strict: false
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v10c.pt"

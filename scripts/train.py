@@ -138,7 +138,8 @@ def _target_value_state(value_layer, enc_spikes, delay):
     return target_state.detach()
 
 
-def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout):
+def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout,
+                             x_img_detail=None, x_aud_detail=None):
     """Build decoder pretrain inputs from clean target Value, without Key/Index."""
     with torch.no_grad():
         spike_img = model.img_encoder(x_img)
@@ -149,8 +150,19 @@ def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout):
         aud_state = _target_value_state(model.memory.V_aud, spike_aud, delay)
 
         if model.use_detail_conditioning:
-            img_detail = _drop_detail_state(rate(spike_img).detach(), detail_dropout)
-            aud_detail = _drop_detail_state(rate(spike_aud).detach(), detail_dropout)
+            if x_img_detail is None:
+                spike_img_detail = spike_img
+            else:
+                spike_img_detail = model.img_encoder(x_img_detail)
+            if x_aud_detail is None:
+                spike_aud_detail = spike_aud
+            else:
+                spike_aud_detail = model.aud_encoder(
+                    model._normalize_audio_for_encoder(x_aud_detail))
+            img_detail = _drop_detail_state(
+                rate(spike_img_detail).detach(), detail_dropout)
+            aud_detail = _drop_detail_state(
+                rate(spike_aud_detail).detach(), detail_dropout)
         else:
             img_detail = aud_detail = None
 
@@ -203,6 +215,12 @@ def pretrain_decoders(model, train_loader, cfg, device):
     lam_aud = pc.get("lambda_aud", lc.get("lambda_aud", 1.0))
     lam_act = pc.get("lambda_aud_active", lc.get("lambda_aud_active", 0.0))
     detail_dropout = pc.get("detail_dropout", 0.0)
+    corrupt_detail = bool(pc.get("corrupt_detail", False))
+    corrupt_severity = float(pc.get(
+        "corrupt_severity", cfg["corruption"].get("train_severity", 0.5)))
+    pre_img_mode = pc.get("img_mode", cfg["corruption"].get("img_mode", "random"))
+    pre_aud_mode = pc.get("aud_mode", cfg["corruption"].get("aud_mode", "random"))
+    use_masked_pretrain = bool(pc.get("use_masked_audio_loss", False))
     grad_clip = float(pc.get("grad_clip", 0.0))
     log_every = int(pc.get("log_every", cfg["train"].get("log_every", 50)))
     pre_ckpt = str(resolve_from_root(pc.get(
@@ -234,8 +252,14 @@ def pretrain_decoders(model, train_loader, cfg, device):
     log("[decoder-pretrain] start "
         f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
         f"detail_dropout={float(detail_dropout):.2f} "
+        f"corrupt_detail={corrupt_detail} "
         f"grad_clip={grad_clip:.2f} "
         f"freeze_non_decoders={pc.get('freeze_non_decoders', True)}")
+    if corrupt_detail:
+        log("[decoder-pretrain] corrupt detail "
+            f"img_mode={pre_img_mode} aud_mode={pre_aud_mode} "
+            f"severity={corrupt_severity:.2f} "
+            f"masked_audio_loss={use_masked_pretrain}")
 
     try:
         for epoch in range(start_epoch, epochs):
@@ -246,19 +270,43 @@ def pretrain_decoders(model, train_loader, cfg, device):
                 x_img = x_img.to(device)
                 x_aud = x_aud.to(device)
 
+                x_img_detail = None
+                x_aud_detail = None
+                aud_mask = None
+                if corrupt_detail:
+                    x_img_detail, x_aud_detail, cue_masks = build_cue(
+                        x_img, x_aud, "corrupt_both", cfg,
+                        severity=corrupt_severity,
+                        img_mode=pre_img_mode, aud_mode=pre_aud_mode,
+                        return_masks=True)
+                    aud_mask = cue_masks.get("aud")
+
                 img_state, aud_state = _pretrain_decoder_states(
-                    model, x_img, x_aud, detail_dropout)
+                    model, x_img, x_aud, detail_dropout,
+                    x_img_detail=x_img_detail, x_aud_detail=x_aud_detail)
 
                 rec_img = model.image_decoder(img_state)
                 rec_aud = model.audio_decoder(aud_state)
 
                 loss_img = _img_recon_loss(rec_img, x_img, lc)
-                loss_aud = _aud_recon_loss(rec_aud, x_aud, lc)
+                mask_for_loss = None
+                masked_families = set(lc.get("aud_masked_families", []))
+                if (use_masked_pretrain
+                        and pre_aud_mode in masked_families
+                        and aud_mask is not None):
+                    mask_for_loss = aud_mask
+                loss_aud = _aud_recon_loss(rec_aud, x_aud, lc,
+                                           mask=mask_for_loss)
                 loss = lam_img * loss_img + lam_aud * loss_aud
                 logs = {
                     "img": loss_img.item(),
                     "aud": loss_aud.item(),
                 }
+                if mask_for_loss is not None:
+                    logs["aud_mask_l1"] = _masked_audio_error(
+                        rec_aud, x_aud, mask_for_loss, power=1).item()
+                    logs["aud_mask_mse"] = _masked_audio_error(
+                        rec_aud, x_aud, mask_for_loss, power=2).item()
                 if lam_act > 0:
                     loss_act = _aud_active_loss(rec_aud, x_aud)
                     loss = loss + lam_act * loss_act
