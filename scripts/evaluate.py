@@ -208,7 +208,7 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
             mode, x_img, x_aud, proto_img, proto_aud, labels)
         out = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
-                    training_mode=False, phase="readout")
+                    training_mode=False, phase="readout", aud_cue_mask=aud_mask)
 
         pred = out["logits"].argmax(dim=1)
         correct += (pred == labels).sum().item()

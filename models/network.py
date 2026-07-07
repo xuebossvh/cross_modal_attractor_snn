@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
-from .decoders import ClassifierHead, ImageDecoder, AudioDecoder
+from .decoders import ClassifierHead, ImageDecoder, AudioDecoder, AudioRefiner
 from .lif import rate
 
 
@@ -83,7 +83,19 @@ class CrossModalSNN(nn.Module):
             aud_decoder_in, ac["n_mels"], ac["n_frames"],
             base_ch=aud_dec_ch,
             start_hw=s.get("aud_decoder_start_hw", 4),
-            refine_blocks=s.get("aud_decoder_refine_blocks", 0))
+            refine_blocks=s.get("aud_decoder_refine_blocks", 0),
+            refine_type=s.get("aud_refine_type", "plain"))
+
+        refiner_cfg = cfg.get("audio_refiner", {})
+        self.use_audio_refiner = refiner_cfg.get("enabled", False)
+        if self.use_audio_refiner:
+            self.audio_refiner = AudioRefiner(
+                ac["n_mels"], ac["n_frames"],
+                hidden_ch=int(refiner_cfg.get("hidden_ch", 32)),
+                blocks=int(refiner_cfg.get("blocks", 2)),
+                delta_scale=float(refiner_cfg.get("delta_scale", 1.0)))
+        else:
+            self.audio_refiner = None
 
         self.use_audio_aux = ab.get("use_audio_aux_cls", True)
         if self.use_audio_aux:
@@ -146,7 +158,7 @@ class CrossModalSNN(nn.Module):
 
     def forward(self, x_img_cue=None, x_aud_cue=None,
                 x_img_target=None, x_aud_target=None,
-                training_mode=False, phase="readout"):
+                training_mode=False, phase="readout", aud_cue_mask=None):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
@@ -211,11 +223,22 @@ class CrossModalSNN(nn.Module):
         out["img_detail_state"] = img_detail
         out["aud_detail_state"] = aud_detail
         out["recovered_img"] = self.image_decoder(img_dec_state)
-        out["recovered_aud"] = self.audio_decoder(aud_dec_state)
+
+        coarse_aud = self.audio_decoder(aud_dec_state)
+        out["recovered_aud_coarse"] = coarse_aud
+        recovered_aud = coarse_aud
+        if (self.audio_refiner is not None
+                and x_aud_cue is not None
+                and aud_cue_mask is not None):
+            mask = aud_cue_mask.to(device=coarse_aud.device, dtype=coarse_aud.dtype)
+            delta = self.audio_refiner(coarse_aud, x_aud_cue, mask)
+            recovered_aud = (coarse_aud + mask * delta).clamp(0.0, 1.0)
+        out["recovered_aud"] = recovered_aud
         return out
 
     @torch.no_grad()
-    def infer(self, x_img_cue=None, x_aud_cue=None):
+    def infer(self, x_img_cue=None, x_aud_cue=None, aud_cue_mask=None):
         self.eval()
         return self.forward(x_img_cue=x_img_cue, x_aud_cue=x_aud_cue,
-                            training_mode=False, phase="readout")
+                            training_mode=False, phase="readout",
+                            aud_cue_mask=aud_cue_mask)

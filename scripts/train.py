@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from common import (fix_console_encoding, log, load_config, set_seed,
                     sample_cue_mode, sample_train_severity, build_cue,
                     select_targets, is_aud_only_mode, spike_reg,
-                    resolve_train_corrupt_modes)
+                    resolve_train_corrupt_modes, batch_ssim)
 from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
@@ -93,6 +93,18 @@ def _masked_audio_error(rec, target, mask, power=2):
     return per_sample.mean()
 
 
+def _masked_tf_grad_loss(rec, target, mask):
+    """缺失区时频一阶差分 L1（F4，逐样本归一）。"""
+    m = mask.to(device=rec.device, dtype=rec.dtype)
+    dt = (rec[:, :, 1:] - rec[:, :, :-1]) - (target[:, :, 1:] - target[:, :, :-1])
+    mt = m[:, :, 1:]
+    df = (rec[:, 1:, :] - rec[:, :-1, :]) - (target[:, 1:, :] - target[:, :-1, :])
+    mf = m[:, 1:, :]
+    lt = (dt.abs() * mt).flatten(1).sum(1) / mt.flatten(1).sum(1).clamp_min(1.0)
+    lf = (df.abs() * mf).flatten(1).sum(1) / mf.flatten(1).sum(1).clamp_min(1.0)
+    return (lt + lf).mean()
+
+
 def _aud_recon_loss(rec, target, lc, mask=None):
     """L1 + MSE + weighted_MSE + 时频梯度 loss。"""
     gamma = lc.get("aud_weight_gamma", 3.0)
@@ -118,7 +130,22 @@ def _aud_recon_loss(rec, target, lc, mask=None):
             + _masked_audio_error(rec, target, mask, power=2)
         )
         loss = loss + lam_masked * loss_masked
+    lam_ssim = lc.get("lambda_aud_ssim", 0.0)
+    if lam_ssim > 0:
+        ssim = batch_ssim(rec.unsqueeze(1), target.unsqueeze(1))
+        loss = loss + lam_ssim * (1.0 - ssim)
+    lam_mgrad = lc.get("lambda_aud_masked_grad", 0.0)
+    if lam_mgrad > 0 and mask is not None:
+        loss = loss + lam_mgrad * _masked_tf_grad_loss(rec, target, mask)
     return loss
+
+
+def _aud_feature_loss(model, rec, target):
+    """冻结 aud_encoder 特征空间 L1（F4）；target 侧 detach，只对 rec 回传。"""
+    target_feat = rate(model.aud_encoder(
+        model._normalize_audio_for_encoder(target))).detach()
+    rec_feat = rate(model.aud_encoder(model._normalize_audio_for_encoder(rec)))
+    return F.l1_loss(rec_feat, target_feat)
 
 
 def _drop_detail_state(detail, drop_prob):
@@ -519,7 +546,7 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             logs["bind_aud"] = bind_aud.item()
 
     out_r = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
-                  training_mode=True, phase="readout")
+                  training_mode=True, phase="readout", aud_cue_mask=aud_mask)
 
     loss_align, align_logs = _alignment_losses(
         model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
@@ -567,6 +594,12 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             out_r["recovered_aud"], tgt_aud, aud_mask, power=1).item()
         logs["aud_mask_mse"] = _masked_audio_error(
             out_r["recovered_aud"], tgt_aud, aud_mask, power=2).item()
+
+    lam_feat = lc.get("lambda_aud_feat", 0.0)
+    if lam_feat > 0 and aud_kind == "sample":
+        loss_feat = _aud_feature_loss(model, out_r["recovered_aud"], tgt_aud)
+        total = total + lam_feat * loss_feat
+        logs["aud_feat"] = loss_feat.item()
 
     if aud_kind == "sample":
         lam_act = lc.get("lambda_aud_active", 0.0)

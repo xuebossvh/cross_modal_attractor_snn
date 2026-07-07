@@ -2,8 +2,22 @@
 
 import math
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class GatedConv2d(nn.Module):
+    """Gated convolution: feat(x) * sigmoid(gate(x)) (F3a refine unit)."""
+
+    def __init__(self, ch, kernel_size=3, dilation=1):
+        super().__init__()
+        pad = dilation * (kernel_size - 1) // 2
+        self.feat = nn.Conv2d(ch, ch, kernel_size, padding=pad, dilation=dilation)
+        self.gate = nn.Conv2d(ch, ch, kernel_size, padding=pad, dilation=dilation)
+
+    def forward(self, x):
+        return self.feat(x) * torch.sigmoid(self.gate(x))
 
 
 class ClassifierHead(nn.Module):
@@ -61,13 +75,14 @@ class AudioDecoder(nn.Module):
     """Audio decoder input state -> log-mel reconstruction [B, n_mels, n_frames]."""
 
     def __init__(self, n_value_aud, n_mels, n_frames, base_ch=128, start_hw=4,
-                 refine_blocks=0):
+                 refine_blocks=0, refine_type="plain"):
         super().__init__()
         self.n_mels = n_mels
         self.n_frames = n_frames
         self.base_ch = base_ch
         self.start_hw = start_hw
         self.refine_blocks = refine_blocks
+        self.refine_type = refine_type
 
         out_hw = max(n_mels, n_frames)
         self.out_hw = out_hw
@@ -83,9 +98,16 @@ class AudioDecoder(nn.Module):
                 cur_ch, next_ch, kernel_size=4, stride=2, padding=1))
             cur_ch = next_ch
 
-        for _ in range(refine_blocks):
+        dilations = [1, 2, 4]
+        for bi in range(refine_blocks):
             layers.append(nn.ReLU(inplace=True))
-            layers.append(nn.Conv2d(cur_ch, cur_ch, kernel_size=3, padding=1))
+            if refine_type == "gated_dilated":
+                layers.append(GatedConv2d(
+                    cur_ch, kernel_size=3, dilation=dilations[bi % len(dilations)]))
+            elif refine_type == "plain":
+                layers.append(nn.Conv2d(cur_ch, cur_ch, kernel_size=3, padding=1))
+            else:
+                raise ValueError(f"Unknown aud_refine_type: {refine_type}")
 
         layers.append(nn.ReLU(inplace=True))
         layers.append(nn.Conv2d(cur_ch, 1, kernel_size=3, padding=1))
@@ -98,3 +120,36 @@ class AudioDecoder(nn.Module):
         x = self.cnn(x)
         x = x[..., :self.n_mels, :self.n_frames]
         return F.softplus(x.squeeze(1)).clamp(0.0, 1.0)
+
+
+class AudioRefiner(nn.Module):
+    """Spectrogram-space refiner (F3b, optional).
+
+    Input channels: [coarse_rec, aud_cue, mask]. Output: delta [B, n_mels, n_frames].
+    The caller applies `recovered = clamp(coarse + mask * delta)` so visible regions
+    (mask=0) are never overwritten; image-only / mask=None must bypass this module.
+    """
+
+    def __init__(self, n_mels, n_frames, hidden_ch=32, blocks=2, delta_scale=1.0):
+        super().__init__()
+        self.n_mels = n_mels
+        self.n_frames = n_frames
+        self.delta_scale = float(delta_scale)
+        self.in_proj = nn.Conv2d(3, hidden_ch, kernel_size=3, padding=1)
+        dilations = [1, 2, 4]
+        body = []
+        for bi in range(max(1, blocks)):
+            body.append(nn.ReLU(inplace=True))
+            body.append(GatedConv2d(
+                hidden_ch, kernel_size=3, dilation=dilations[bi % len(dilations)]))
+        self.body = nn.Sequential(*body)
+        self.out_proj = nn.Conv2d(hidden_ch, 1, kernel_size=3, padding=1)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, coarse, cue, mask):
+        x = torch.stack([coarse, cue, mask], dim=1)
+        x = self.in_proj(x)
+        x = self.body(x)
+        delta = self.out_proj(x).squeeze(1)
+        return self.delta_scale * torch.tanh(delta)
