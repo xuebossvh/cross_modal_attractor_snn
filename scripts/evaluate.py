@@ -21,9 +21,9 @@ v_*_from_A；v10a 可额外融合当前 cue 的 detail state）：
 可选：--family_breakdown 按音频腐蚀 family 拆解 corrupt_aud_only/corrupt_both。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v10a.yaml --protocol fixed_mask
-    python -u scripts/evaluate.py --config configs/v10a.yaml --protocol legacy_random
-    python -u scripts/evaluate.py --config configs/v10a.yaml --protocol fixed_mask --family_breakdown
+    python -u scripts/evaluate.py --config configs/v10d.yaml --protocol fixed_mask
+    python -u scripts/evaluate.py --config configs/v10d.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v10d.yaml --protocol fixed_mask --family_breakdown
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -326,7 +326,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v10a.yaml")
+    ap.add_argument("--config", default="configs/v10d.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--severity", type=float, default=0.5)

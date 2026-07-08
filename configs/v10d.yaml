@@ -7,8 +7,7 @@
 #   - F4:  adds lambda_aud_ssim / lambda_aud_masked_grad / lambda_aud_feat loss
 #          code, all weights 0 here (ablation-ready, keeps refiner attribution clean)
 #   - conservative cue_modes adjustment (see below)
-# Ablation variants (v10c ratio / refiner-off) are NOT duplicated here; generate
-# locally: python scripts/make_ablation_configs.py --base configs/v10d.yaml
+# Attribution ablations: configs/v10d_ablation_v10c_ratio.yaml, configs/v10d_ablation_refiner_off.yaml
 # Checkpoint is NOT compatible with v10c (decoder structure + new refiner params);
 # train from scratch. Setting aud_refine_type=plain + audio_refiner.enabled=false
 # reverts to the v10c structure.

@@ -55,7 +55,7 @@ cross_modal_attractor_snn/
 ├── paths.py           # 项目根目录与 outputs 路径
 ├── outputs/           # 运行产物（不入 git，见 .gitignore）
 │   ├── checkpoints/   # 各版本 *.pt 权重（共用）
-│   └── outputs_v10a/  # 版本专属产物（旧版本同理）
+│   └── outputs_v10d/  # 当前版本产物（旧版本 outputs_v10a/ 等保留在本地）
 │       ├── logs/
 │       ├── figures/
 │       └── tables/
@@ -67,19 +67,23 @@ cross_modal_attractor_snn/
 
 ## 3. 训练
 
+当前官方配置为 **v10d**（`configs/v10d.yaml`）。历史 v10a/b/c 配置已移除，旧实验结果保留在本地 `outputs/`。
+
 ```bash
 pip install -r requirements.txt
-python scripts/mkdir_outputs.py --config configs/v10a.yaml
-nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v10a.yaml > outputs/outputs_v10a/logs/train_v10a_50ep.log 2>&1 < /dev/null &
-tail -f outputs/outputs_v10a/logs/train_v10a_50ep.log
-nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v10a.yaml --epochs 30 > outputs/outputs_v10a/logs/train_v10a_30ep.log 2>&1 < /dev/null &
+python scripts/mkdir_outputs.py --config configs/v10d.yaml
+nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v10d.yaml > outputs/outputs_v10d/logs/train_v10d_70ep.log 2>&1 < /dev/null &
+tail -f outputs/outputs_v10d/logs/train_v10d_70ep.log
 ```
 
-v10d 归因消融（不往 `configs/` 堆重复 yaml，本地生成后训练）：
+v10d 归因消融（独立 yaml，与主配置并列）：
 
 ```bash
-python scripts/make_ablation_configs.py --base configs/v10d.yaml
-# 生成 outputs/ablations_v10d/configs/v10d_ab_v10cratio.yaml 等，按脚本打印的 nohup 命令分别启动
+python scripts/mkdir_outputs.py --config configs/v10d_ablation_v10c_ratio.yaml
+nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v10d_ablation_v10c_ratio.yaml > outputs/outputs_v10d_ab_v10cratio/logs/train_v10d_ab_v10cratio_70ep.log 2>&1 < /dev/null &
+
+python scripts/mkdir_outputs.py --config configs/v10d_ablation_refiner_off.yaml
+nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v10d_ablation_refiner_off.yaml > outputs/outputs_v10d_ab_refoff/logs/train_v10d_ab_refoff_70ep.log 2>&1 < /dev/null &
 ```
 
 每个 batch 采样一种 cue 模式，并分两阶段计算损失：
@@ -91,22 +95,22 @@ python scripts/make_ablation_configs.py --base configs/v10d.yaml
   `v_*_from_A`（A 驱动的 Value）；v10a 额外融合对应 cue 的 detail state，
   计算分类 / 图像恢复 / 音频恢复 / 脉冲正则损失。
 
-每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v10a.pt`（由 yaml 指定）。
-日志 / 图表 / 表格写入 `outputs/outputs_v10a/{logs,figures,tables}/`。
+每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v10d.pt`（由 yaml 指定）。
+日志 / 图表 / 表格写入 `outputs/outputs_v10d/{logs,figures,tables}/`。
 
 > 注意：若你曾用旧架构训练过，旧 checkpoint 结构不兼容，evaluate/demo 会自动
 > 检测并回退到随机权重并给出警告——重新训练即可。
 
-快速冒烟（小子集、1 epoch）：编辑 `configs/v10a.yaml` 设 `data.train_subset: 512`、
+快速冒烟（小子集、1 epoch）：编辑 `configs/v10d.yaml` 设 `data.train_subset: 512`、
 `train.epochs: 1`，再运行 `python -u scripts/train.py`。
 
 ## 4. 评估与 Demo
 
 ```bash
-python -u scripts/evaluate.py --config configs/v10a.yaml --protocol fixed_mask --family_breakdown | tee outputs/outputs_v10a/tables/full_eval_v10a_fixed.txt
-python -u scripts/evaluate.py --config configs/v10a.yaml --protocol legacy_random | tee outputs/outputs_v10a/tables/full_eval_v10a_random.txt
-python -u scripts/demo_inference.py --config configs/v10a.yaml --num 10 --severity 0.5
-python -u scripts/demo_inference.py --config configs/v10a.yaml --num 10 --severity 0.5 --protocol legacy_random
+python -u scripts/evaluate.py --config configs/v10d.yaml --protocol fixed_mask --family_breakdown | tee outputs/outputs_v10d/tables/full_eval_v10d_fixed.txt
+python -u scripts/evaluate.py --config configs/v10d.yaml --protocol legacy_random | tee outputs/outputs_v10d/tables/full_eval_v10d_random.txt
+python -u scripts/demo_inference.py --config configs/v10d.yaml --num 10 --severity 0.4
+python -u scripts/demo_inference.py --config configs/v10d.yaml --num 10 --severity 0.4 --protocol legacy_random
 python -u scripts/smoke_test.py
 ```
 
@@ -115,11 +119,11 @@ python -u scripts/smoke_test.py
   `smp`=样本级 / `cat`=类别代表原型）。快速试跑：`python -u evaluate.py --max_batches 5`。
 - `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注
   cue type / target type / true label / pred label / confidence：
-  - `outputs/outputs_v10a/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
-  - `outputs/outputs_v10a/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
-  - `outputs/outputs_v10a/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
+  - `outputs/outputs_v10d/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
+  - `outputs/outputs_v10d/figures/demo_img_only.png`：image-only cue → **sample** image + **category** audio
+  - `outputs/outputs_v10d/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
   - random 可视化会输出 `demo_aud_only_random.png` / `demo_img_only_random.png` / `demo_both_random.png`
-  - 评估表：`outputs/outputs_v10a/tables/demo_eval_table.txt`
+  - 评估表：`outputs/outputs_v10d/tables/demo_eval_table.txt`
 
 ---
 
@@ -173,13 +177,13 @@ I_A = alpha_img * W_img_to_A(K_img) + alpha_aud * W_aud_to_A(K_aud)
 
 6 种 cue 模式（`common.py :: CUE_MODES`）：`corrupt_img_only` / `corrupt_aud_only` /
 `corrupt_both` / `clean_img_only` / `clean_aud_only` / `clean_both`，采样概率见
-`configs/v10a.yaml :: cue_modes`。
+`configs/v10d.yaml :: cue_modes`。
 
 损坏函数（`data/corruption.py`，`severity∈[0,1]`）：
 - 图像：`occlusion` / `pixel_delete` / `gaussian` / `mask_left|right|top|bottom`
 - 音频：`gaussian` / `time_mask` / `freq_mask` / `feature_dropout` / `partial_temporal` / `time_freq_block`
 
-## 8. 消融开关（`configs/v10a.yaml :: ablation`）
+## 8. 消融开关（`configs/v10d.yaml :: ablation`）
 
 | 开关 | 作用 |
 |------|------|
