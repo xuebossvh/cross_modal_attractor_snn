@@ -32,7 +32,18 @@ def _img_edge_loss(prob, target):
     return F.l1_loss(dx_p, dx_t) + F.l1_loss(dy_p, dy_t)
 
 
-def _img_recon_loss(rec, x_img, lc):
+def _masked_image_error(rec_logits, target, mask, power=2):
+    mask = mask.to(device=rec_logits.device, dtype=rec_logits.dtype)
+    prob = torch.sigmoid(rec_logits)
+    diff = prob - target
+    err = diff.abs() if power == 1 else diff.pow(2)
+    flat_mask = mask.flatten(1)
+    denom = flat_mask.sum(dim=1).clamp_min(1.0)
+    per_sample = (err * mask).flatten(1).sum(dim=1) / denom
+    return per_sample.mean()
+
+
+def _img_recon_loss(rec, x_img, lc, mask=None):
     if lc["img_recon"] == "bce":
         base = F.binary_cross_entropy_with_logits(rec, x_img)
     else:
@@ -45,6 +56,12 @@ def _img_recon_loss(rec, x_img, lc):
             base = base + lam_l1 * F.l1_loss(prob, x_img)
         if lam_edge > 0:
             base = base + lam_edge * _img_edge_loss(prob, x_img)
+    lam_masked = lc.get("lambda_img_masked", 0.0)
+    if lam_masked > 0 and mask is not None:
+        base = base + lam_masked * (
+            _masked_image_error(rec, x_img, mask, power=1)
+            + _masked_image_error(rec, x_img, mask, power=2)
+        )
     return base
 
 
@@ -311,6 +328,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
 
                 x_img_detail = None
                 x_aud_detail = None
+                img_mask = None
                 aud_mask = None
                 if corrupt_detail:
                     x_img_detail, x_aud_detail, cue_masks = build_cue(
@@ -318,6 +336,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
                         severity=corrupt_severity,
                         img_mode=pre_img_mode, aud_mode=pre_aud_mode,
                         return_masks=True)
+                    img_mask = cue_masks.get("img")
                     aud_mask = cue_masks.get("aud")
 
                 img_state, aud_state = _pretrain_decoder_states(
@@ -327,7 +346,14 @@ def pretrain_decoders(model, train_loader, cfg, device):
                 rec_img = model.image_decoder(img_state)
                 rec_aud = model.audio_decoder(aud_state)
 
-                loss_img = _img_recon_loss(rec_img, x_img, lc)
+                mask_for_img_loss = None
+                img_masked_families = set(lc.get("img_masked_families", []))
+                if (pc.get("use_masked_image_loss", False)
+                        and pre_img_mode in img_masked_families
+                        and img_mask is not None):
+                    mask_for_img_loss = img_mask
+                loss_img = _img_recon_loss(rec_img, x_img, lc,
+                                           mask=mask_for_img_loss)
                 mask_for_loss = None
                 masked_families = set(lc.get("aud_masked_families", []))
                 if (use_masked_pretrain
@@ -352,6 +378,17 @@ def pretrain_decoders(model, train_loader, cfg, device):
                         rec_aud, x_aud, visible_mask, power=1).item()
                     logs["aud_visible_mse"] = _masked_audio_error(
                         rec_aud, x_aud, visible_mask, power=2).item()
+                if mask_for_img_loss is not None:
+                    logs["img_mask_l1"] = _masked_image_error(
+                        rec_img, x_img, mask_for_img_loss, power=1).item()
+                    logs["img_mask_mse"] = _masked_image_error(
+                        rec_img, x_img, mask_for_img_loss, power=2).item()
+                    visible_img_mask = 1.0 - mask_for_img_loss.to(
+                        device=rec_img.device, dtype=rec_img.dtype)
+                    logs["img_visible_l1"] = _masked_image_error(
+                        rec_img, x_img, visible_img_mask, power=1).item()
+                    logs["img_visible_mse"] = _masked_image_error(
+                        rec_img, x_img, visible_img_mask, power=2).item()
                 if lam_act > 0:
                     loss_act = _aud_active_loss(rec_aud, x_aud)
                     loss = loss + lam_act * loss_act
@@ -537,6 +574,7 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     img_cue, aud_cue, cue_masks = build_cue(
         clean_img, clean_aud, cue_mode, cfg, severity=severity,
         img_mode=img_mode, aud_mode=aud_mode, return_masks=True)
+    img_mask = cue_masks.get("img")
     aud_mask = cue_masks.get("aud")
     tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
         cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
@@ -564,7 +602,8 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             logs["bind_aud"] = bind_aud.item()
 
     out_r = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
-                  training_mode=True, phase="readout", aud_cue_mask=aud_mask)
+                  training_mode=True, phase="readout",
+                  img_cue_mask=img_mask, aud_cue_mask=aud_mask)
 
     loss_align, align_logs = _alignment_losses(
         model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
@@ -590,9 +629,31 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             total = total + lam_aux * loss_aux
             logs["aux_aud"] = loss_aux.item()
 
-    loss_img = _img_recon_loss(out_r["recovered_img"], tgt_img, lc)
+    img_masked_families = set(lc.get("img_masked_families", []))
+    use_img_mask = (
+        cue_mode in ("corrupt_img_only", "corrupt_both")
+        and img_kind == "sample"
+        and img_mode in img_masked_families
+        and img_mask is not None
+        and lc.get("lambda_img_masked", 0.0) > 0
+    )
+    mask_for_img_loss = img_mask if use_img_mask else None
+    loss_img = _img_recon_loss(out_r["recovered_img"], tgt_img, lc,
+                               mask=mask_for_img_loss)
     total = total + lc["lambda_img"] * loss_img
     logs[f"img({img_kind[:3]})"] = loss_img.item()
+    if use_img_mask:
+        logs["img_mask_l1"] = _masked_image_error(
+            out_r["recovered_img"], tgt_img, img_mask, power=1).item()
+        logs["img_mask_mse"] = _masked_image_error(
+            out_r["recovered_img"], tgt_img, img_mask, power=2).item()
+        visible_img_mask = 1.0 - img_mask.to(
+            device=out_r["recovered_img"].device,
+            dtype=out_r["recovered_img"].dtype)
+        logs["img_visible_l1"] = _masked_image_error(
+            out_r["recovered_img"], tgt_img, visible_img_mask, power=1).item()
+        logs["img_visible_mse"] = _masked_image_error(
+            out_r["recovered_img"], tgt_img, visible_img_mask, power=2).item()
 
     masked_families = set(lc.get("aud_masked_families", []))
     use_aud_mask = (

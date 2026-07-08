@@ -2,7 +2,7 @@
 
 支持两种输入（自动识别）：
   1. demo_eval_table.txt  — 【汇总】段（8 列）
-  2. eval_*.log           — evaluate.py 全量评估日志（9 列）
+  2. eval_*.log           — evaluate.py 全量评估日志（兼容 v10a-v10e）
   3. 上述日志若含 [音频塌缩诊断] 段，自动生成 aud_diag 表格（PNG+CSV）
 
 用法：
@@ -33,6 +33,29 @@ _FULL_ROW_RE = re.compile(
     r"(\d+\.\d+)%\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
+    r"(\S+)",
+)
+# v10b+ 全量评估日志含 audSSIM / maskMSE 两列（在 audMSE 与像素方差之间）
+_FULL_ROW_V10B_RE = re.compile(
+    r"(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"(\d+\.\d+)%\s+"
+    r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"   # imgMSE PSNR imgSSIM
+    r"([\d.]+)\s+([\d.]+)\s+"              # audMSE audSSIM
+    r"([\d.]+|nan)\s+"                     # maskMSE
+    r"([\d.]+)\s+([\d.]+)\s+"              # pix_var sampleL2
+    r"(\S+)",
+)
+# v10e+ 全量评估日志同时含 imgMaskMSE / audMaskMSE
+_FULL_ROW_V10E_RE = re.compile(
+    r"(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"(\d+\.\d+)%\s+"
+    r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"   # imgMSE PSNR imgSSIM
+    r"([\d.]+|nan)\s+"                     # imgMaskMSE
+    r"([\d.]+)\s+([\d.]+|nan)\s+"          # audMSE audSSIM
+    r"([\d.]+|nan)\s+"                     # audMaskMSE
+    r"([\d.]+)\s+([\d.]+)\s+"              # pix_var sampleL2
     r"(\S+)",
 )
 _AUD_DIAG_ROW_RE = re.compile(
@@ -87,6 +110,9 @@ def parse_eval_full_log(path):
     severity = None
     n_test = None
 
+    def _maybe_float(text):
+        return None if text == "nan" else float(text)
+
     for line in text.splitlines():
         m = re.search(r"corrupt severity=([\d.]+)", line)
         if m:
@@ -94,6 +120,45 @@ def parse_eval_full_log(path):
         m = re.search(r"\[dataset\] test.*n=(\d+)", line)
         if m:
             n_test = int(m.group(1))
+        m = _FULL_ROW_V10E_RE.search(line)
+        if m:
+            img_mask_mse = _maybe_float(m.group(6))
+            aud_mask_mse = _maybe_float(m.group(9))
+            by_mode[m.group(1)] = {
+                "mode": m.group(1),
+                "acc": float(m.group(2)) / 100.0,
+                "img_mse": float(m.group(3)),
+                "psnr": float(m.group(4)),
+                "img_ssim": float(m.group(5)),
+                "img_mask_mse": img_mask_mse,
+                "aud_mse": float(m.group(7)),
+                "aud_ssim": _maybe_float(m.group(8)),
+                "aud_mask_mse": aud_mask_mse,
+                "mask_mse": aud_mask_mse,
+                "pix_var": float(m.group(10)),
+                "pair_l2": float(m.group(11)),
+                "tgt": m.group(12),
+            }
+            continue
+        m = _FULL_ROW_V10B_RE.search(line)
+        if m:
+            mask_mse = m.group(8)
+            by_mode[m.group(1)] = {
+                "mode": m.group(1),
+                "acc": float(m.group(2)) / 100.0,
+                "img_mse": float(m.group(3)),
+                "psnr": float(m.group(4)),
+                "img_ssim": float(m.group(5)),
+                "img_mask_mse": None,
+                "aud_mse": float(m.group(6)),
+                "aud_ssim": float(m.group(7)),
+                "aud_mask_mse": float(mask_mse) if mask_mse != "nan" else None,
+                "mask_mse": float(mask_mse) if mask_mse != "nan" else None,
+                "pix_var": float(m.group(9)),
+                "pair_l2": float(m.group(10)),
+                "tgt": m.group(11),
+            }
+            continue
         m = _FULL_ROW_RE.search(line)
         if m:
             by_mode[m.group(1)] = {
@@ -102,7 +167,11 @@ def parse_eval_full_log(path):
                 "img_mse": float(m.group(3)),
                 "psnr": float(m.group(4)),
                 "img_ssim": float(m.group(5)),
+                "img_mask_mse": None,
                 "aud_mse": float(m.group(6)),
+                "aud_ssim": None,
+                "aud_mask_mse": None,
+                "mask_mse": None,
                 "pix_var": float(m.group(7)),
                 "pair_l2": float(m.group(8)),
                 "tgt": m.group(9),
@@ -269,14 +338,43 @@ def _default_aud_diag_out(path, main_out=None):
 
 
 def render_full_eval_table(rows, title, path):
-    headers = ["", "acc", "img MSE", "PSNR", "img SSIM", "aud MSE",
-               "target(image/audio)"]
-    cell = [[
-        r["mode"], f"{r['acc']:.3f}",
-        f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['img_ssim']:.3f}",
-        f"{r['aud_mse']:.4f}", _expand_target(r["tgt"]),
-    ] for r in rows]
-    col_w = [0.14, 0.08, 0.10, 0.08, 0.10, 0.10, 0.18]
+    has_img_mask = any(r.get("img_mask_mse") is not None for r in rows)
+    has_aud_ssim = any(r.get("aud_ssim") is not None for r in rows)
+    if has_img_mask:
+        headers = ["", "acc", "img MSE", "PSNR", "img SSIM", "img mask MSE",
+                   "aud MSE", "aud SSIM", "aud mask MSE",
+                   "target(image/audio)"]
+        cell = [[
+            r["mode"], f"{r['acc']:.3f}",
+            f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['img_ssim']:.3f}",
+            f"{r['img_mask_mse']:.4f}" if r.get("img_mask_mse") is not None else "nan",
+            f"{r['aud_mse']:.4f}",
+            f"{r['aud_ssim']:.3f}" if r.get("aud_ssim") is not None else "nan",
+            f"{r['aud_mask_mse']:.4f}" if r.get("aud_mask_mse") is not None else "nan",
+            _expand_target(r["tgt"]),
+        ] for r in rows]
+        col_w = [0.11, 0.06, 0.08, 0.06, 0.08, 0.10, 0.08, 0.08, 0.10, 0.15]
+    elif has_aud_ssim:
+        headers = ["", "acc", "img MSE", "PSNR", "img SSIM", "aud MSE",
+                   "aud SSIM", "mask MSE", "target(image/audio)"]
+        cell = [[
+            r["mode"], f"{r['acc']:.3f}",
+            f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['img_ssim']:.3f}",
+            f"{r['aud_mse']:.4f}",
+            f"{r['aud_ssim']:.3f}" if r.get("aud_ssim") is not None else "",
+            f"{r['mask_mse']:.4f}" if r.get("mask_mse") is not None else "nan",
+            _expand_target(r["tgt"]),
+        ] for r in rows]
+        col_w = [0.12, 0.07, 0.09, 0.07, 0.09, 0.09, 0.09, 0.09, 0.16]
+    else:
+        headers = ["", "acc", "img MSE", "PSNR", "img SSIM", "aud MSE",
+                   "target(image/audio)"]
+        cell = [[
+            r["mode"], f"{r['acc']:.3f}",
+            f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['img_ssim']:.3f}",
+            f"{r['aud_mse']:.4f}", _expand_target(r["tgt"]),
+        ] for r in rows]
+        col_w = [0.14, 0.08, 0.10, 0.08, 0.10, 0.10, 0.18]
     return _render_table(headers, cell, col_w, title, path, font_size=8.5)
 
 

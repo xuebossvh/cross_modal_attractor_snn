@@ -163,7 +163,7 @@ def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
 
     返回的 cue 可能是残缺的、干净的，或某一模态为 None（单模态）。
     return_masks=True 时返回 (img_cue, aud_cue, masks)，其中
-    masks["aud"] 为音频缺失 mask 或 None。
+    masks["img"] / masks["aud"] 为对应模态缺失 mask 或 None。
     target 永远是 clean_img / clean_aud（在训练循环里单独传）。
 
     img_mode / aud_mode：残缺 family 覆盖；为 None 时回退到 corruption.* 配置。
@@ -182,6 +182,10 @@ def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
         return img_cue, aud_cue
 
     def ci(x):
+        if return_masks:
+            y, mask = corrupt_image(x, im, s, return_mask=True)
+            masks["img"] = mask
+            return y
         return corrupt_image(x, im, s)
 
     def ca(x):

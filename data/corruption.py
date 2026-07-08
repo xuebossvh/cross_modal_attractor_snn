@@ -29,7 +29,7 @@ def _resolve(mode, pool):
     return random.choice(pool) if mode == "random" else mode
 
 
-def corrupt_image(x_img, mode="random", severity=0.5):
+def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False):
     """损坏图像 cue。
 
     输入 : x_img [B, 1, H, W]，值域 [0, 1]
@@ -40,37 +40,51 @@ def corrupt_image(x_img, mode="random", severity=0.5):
     B, C, H, W = x.shape
     m = _resolve(mode, IMG_MODES)
     s = float(max(0.0, min(1.0, severity)))
+    mask = None
 
     if m == "occlusion":
         # 在随机位置挖掉一个边长 ~ s*H 的方块
         bh = max(1, int(round(s * H)))
         bw = max(1, int(round(s * W)))
+        mask = torch.zeros_like(x)
         for i in range(B):
             top = random.randint(0, max(0, H - bh))
             left = random.randint(0, max(0, W - bw))
             x[i, :, top:top + bh, left:left + bw] = 0.0
+            mask[i, :, top:top + bh, left:left + bw] = 1.0
     elif m == "pixel_delete":
         # 随机删除 s 比例像素（置 0）
         keep = (torch.rand_like(x) > s).float()
         x = x * keep
+        mask = 1.0 - keep
     elif m == "gaussian":
         # 叠加高斯噪声后裁剪
         x = x + s * torch.randn_like(x)
         x = x.clamp(0.0, 1.0)
     elif m == "mask_left":
         w = int(round(s * W))
+        mask = torch.zeros_like(x)
         x[:, :, :, :w] = 0.0
+        mask[:, :, :, :w] = 1.0
     elif m == "mask_right":
         w = int(round(s * W))
+        mask = torch.zeros_like(x)
         if w > 0:
             x[:, :, :, W - w:] = 0.0
+            mask[:, :, :, W - w:] = 1.0
     elif m == "mask_top":
         h = int(round(s * H))
+        mask = torch.zeros_like(x)
         x[:, :, :h, :] = 0.0
+        mask[:, :, :h, :] = 1.0
     elif m == "mask_bottom":
         h = int(round(s * H))
+        mask = torch.zeros_like(x)
         if h > 0:
             x[:, :, H - h:, :] = 0.0
+            mask[:, :, H - h:, :] = 1.0
+    if return_mask:
+        return x, mask
     return x
 
 

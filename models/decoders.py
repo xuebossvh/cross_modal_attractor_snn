@@ -57,6 +57,37 @@ class ImageDecoder(nn.Module):
         return self.cnn(x)
 
 
+class ImageRefiner(nn.Module):
+    """Image-space refiner (optional).
+
+    Input channels: [coarse_prob, img_cue, mask]. Output: delta [B,1,H,W].
+    The caller decides how to paste visible pixels back; this module only
+    predicts a bounded residual for the image space.
+    """
+
+    def __init__(self, hidden_ch=32, blocks=3, delta_scale=1.0,
+                 max_dilation=4):
+        super().__init__()
+        self.delta_scale = float(delta_scale)
+        self.in_proj = nn.Conv2d(3, hidden_ch, kernel_size=3, padding=1)
+        body = []
+        for bi in range(max(1, blocks)):
+            dilation = min(2 ** bi, int(max_dilation))
+            body.append(nn.ReLU(inplace=True))
+            body.append(GatedConv2d(hidden_ch, kernel_size=3, dilation=dilation))
+        self.body = nn.Sequential(*body)
+        self.out_proj = nn.Conv2d(hidden_ch, 1, kernel_size=3, padding=1)
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, coarse_prob, cue, mask):
+        x = torch.cat([coarse_prob, cue, mask], dim=1)
+        x = self.in_proj(x)
+        x = self.body(x)
+        delta = self.out_proj(x)
+        return self.delta_scale * torch.tanh(delta)
+
+
 def _audio_decoder_stages(out_hw, start_hw=4):
     """Count stride-2 upsampling stages from start_hw to out_hw."""
     if out_hw < start_hw or out_hw % start_hw != 0:

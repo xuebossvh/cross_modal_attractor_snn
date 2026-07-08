@@ -5,7 +5,8 @@ import torch.nn as nn
 
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
-from .decoders import ClassifierHead, ImageDecoder, AudioDecoder, AudioRefiner
+from .decoders import (ClassifierHead, ImageDecoder, ImageRefiner,
+                       AudioDecoder, AudioRefiner)
 from .lif import rate
 
 
@@ -78,6 +79,19 @@ class CrossModalSNN(nn.Module):
                 raise ValueError(f"Unknown detail_conditioning.fusion: {self.detail_fusion}")
 
         self.image_decoder = ImageDecoder(img_decoder_in)
+        img_refiner_cfg = cfg.get("image_refiner", {})
+        self.use_image_refiner = img_refiner_cfg.get("enabled", False)
+        self.image_refiner_visible_paste_back = img_refiner_cfg.get(
+            "visible_paste_back", False)
+        if self.use_image_refiner:
+            self.image_refiner = ImageRefiner(
+                hidden_ch=int(img_refiner_cfg.get("hidden_ch", 32)),
+                blocks=int(img_refiner_cfg.get("blocks", 3)),
+                delta_scale=float(img_refiner_cfg.get("delta_scale", 1.0)),
+                max_dilation=int(img_refiner_cfg.get("max_dilation", 4)))
+        else:
+            self.image_refiner = None
+
         aud_dec_ch = s.get("aud_decoder_base_ch", 128)
         self.audio_decoder = AudioDecoder(
             aud_decoder_in, ac["n_mels"], ac["n_frames"],
@@ -159,9 +173,15 @@ class CrossModalSNN(nn.Module):
             raise ValueError(f"Unknown modality: {modality}")
         return torch.cat([value_state, detail], dim=1)
 
+    @staticmethod
+    def _prob_to_logits(prob, eps=1e-4):
+        prob = prob.clamp(eps, 1.0 - eps)
+        return torch.logit(prob)
+
     def forward(self, x_img_cue=None, x_aud_cue=None,
                 x_img_target=None, x_aud_target=None,
-                training_mode=False, phase="readout", aud_cue_mask=None):
+                training_mode=False, phase="readout",
+                img_cue_mask=None, aud_cue_mask=None):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
@@ -225,7 +245,22 @@ class CrossModalSNN(nn.Module):
 
         out["img_detail_state"] = img_detail
         out["aud_detail_state"] = aud_detail
-        out["recovered_img"] = self.image_decoder(img_dec_state)
+        coarse_img = self.image_decoder(img_dec_state)
+        out["recovered_img_coarse"] = coarse_img
+        recovered_img = coarse_img
+        if (self.image_refiner is not None
+                and x_img_cue is not None
+                and img_cue_mask is not None):
+            mask = img_cue_mask.to(device=coarse_img.device, dtype=coarse_img.dtype)
+            coarse_prob = torch.sigmoid(coarse_img)
+            delta = self.image_refiner(coarse_prob, x_img_cue, mask)
+            if self.image_refiner_visible_paste_back:
+                pred = (coarse_prob + delta).clamp(0.0, 1.0)
+                final_prob = mask * pred + (1.0 - mask) * x_img_cue
+            else:
+                final_prob = (coarse_prob + mask * delta).clamp(0.0, 1.0)
+            recovered_img = self._prob_to_logits(final_prob)
+        out["recovered_img"] = recovered_img
 
         coarse_aud = self.audio_decoder(aud_dec_state)
         out["recovered_aud_coarse"] = coarse_aud
@@ -246,8 +281,10 @@ class CrossModalSNN(nn.Module):
         return out
 
     @torch.no_grad()
-    def infer(self, x_img_cue=None, x_aud_cue=None, aud_cue_mask=None):
+    def infer(self, x_img_cue=None, x_aud_cue=None,
+              img_cue_mask=None, aud_cue_mask=None):
         self.eval()
         return self.forward(x_img_cue=x_img_cue, x_aud_cue=x_aud_cue,
                             training_mode=False, phase="readout",
+                            img_cue_mask=img_cue_mask,
                             aud_cue_mask=aud_cue_mask)

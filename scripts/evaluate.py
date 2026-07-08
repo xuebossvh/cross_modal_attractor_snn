@@ -100,6 +100,24 @@ def _audio_masked_metrics(rec, target, mask):
     }
 
 
+def _image_masked_metrics(rec_img_prob, target, mask):
+    if mask is None:
+        return {
+            "img_masked_mse": float("nan"),
+            "img_masked_l1": float("nan"),
+            "img_visible_mse": float("nan"),
+            "img_visible_l1": float("nan"),
+        }
+    mask = mask.to(device=rec_img_prob.device, dtype=rec_img_prob.dtype)
+    visible = 1.0 - mask
+    return {
+        "img_masked_mse": _region_error(rec_img_prob, target, mask, power=2),
+        "img_masked_l1": _region_error(rec_img_prob, target, mask, power=1),
+        "img_visible_mse": _region_error(rec_img_prob, target, visible, power=2),
+        "img_visible_l1": _region_error(rec_img_prob, target, visible, power=1),
+    }
+
+
 def _add_metric(sums, counts, key, value):
     if value is None or not math.isfinite(float(value)):
         return
@@ -167,6 +185,8 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     sum_psnr = 0.0
     sum_ssim = 0.0
     sum_aud_mse = 0.0
+    image_metric_sums = {}
+    image_metric_counts = {}
     audio_metric_sums = {}
     audio_metric_counts = {}
     nb = 0
@@ -203,12 +223,14 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
             img_cue, aud_cue, cue_masks = build_cue(
                 x_img, x_aud, mode, cfg, severity=severity,
                 return_masks=True)
+        img_mask = cue_masks.get("img")
         aud_mask = cue_masks.get("aud")
 
         tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
             mode, x_img, x_aud, proto_img, proto_aud, labels)
         out = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
-                    training_mode=False, phase="readout", aud_cue_mask=aud_mask)
+                    training_mode=False, phase="readout",
+                    img_cue_mask=img_mask, aud_cue_mask=aud_mask)
 
         pred = out["logits"].argmax(dim=1)
         correct += (pred == labels).sum().item()
@@ -218,6 +240,8 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         sum_img_mse += F.mse_loss(rec_img, tgt_img).item()
         sum_psnr += batch_psnr(rec_img, tgt_img).item()
         sum_ssim += batch_ssim(rec_img, tgt_img).item()
+        for mk, mv in _image_masked_metrics(rec_img, tgt_img, img_mask).items():
+            _add_metric(image_metric_sums, image_metric_counts, mk, mv)
 
         rec_aud = out["recovered_aud"]
         sum_aud_mse += F.mse_loss(rec_aud, tgt_aud).item()   # log-mel [B,M,T]
@@ -243,6 +267,14 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         "img_mse": sum_img_mse / max(nb, 1),
         "psnr": sum_psnr / max(nb, 1),
         "ssim": sum_ssim / max(nb, 1),
+        "img_masked_mse": _mean_metric(image_metric_sums, image_metric_counts,
+                                       "img_masked_mse"),
+        "img_masked_l1": _mean_metric(image_metric_sums, image_metric_counts,
+                                      "img_masked_l1"),
+        "img_visible_mse": _mean_metric(image_metric_sums, image_metric_counts,
+                                       "img_visible_mse"),
+        "img_visible_l1": _mean_metric(image_metric_sums, image_metric_counts,
+                                      "img_visible_l1"),
         "aud_mse": sum_aud_mse / max(nb, 1),
         "aud_ssim": _mean_metric(audio_metric_sums, audio_metric_counts,
                                  "aud_ssim"),
@@ -359,10 +391,11 @@ def main():
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
-    eval_w = [18, 7, 9, 8, 7, 9, 8, 9, 10, 9, 16]
-    eval_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
-    eval_hdr = ["cue模式", "acc", "imgMSE", "PSNR", "SSIM", "audMSE",
-                "audSSIM", "maskMSE", "像素方差", "样本L2", "tgt(img/aud)"]
+    eval_w = [18, 7, 9, 8, 7, 10, 9, 8, 10, 10, 9, 16]
+    eval_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
+    eval_hdr = ["cue模式", "acc", "imgMSE", "PSNR", "SSIM", "imgMaskMSE",
+                "audMSE", "audSSIM", "audMaskMSE", "像素方差", "样本L2",
+                "tgt(img/aud)"]
     fixed_img_mode, fixed_aud_mode = _fixed_eval_families(cfg)
     log("=" * sum(eval_w))
     log(f"[评估] 6 种 cue 模式  (corrupt severity={args.severity})  "
@@ -384,6 +417,7 @@ def main():
         log(format_table_row([
             mode, f"{r['acc']*100:.1f}%",
             f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['ssim']:.3f}",
+            _fmt_float(r["img_masked_mse"]),
             f"{r['aud_mse']:.4f}",
             _fmt_float(r["aud_ssim"], digits=3),
             _fmt_float(r["aud_masked_mse"]),

@@ -112,7 +112,8 @@ def _rec_col_title(is_mel, kind):
 
 def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred,
                    img_kind="sample", aud_kind="sample", retrieval_img=None,
-                   proto_aud=None, aud_mask=None, rec_aud_coarse=None):
+                   proto_aud=None, img_mask=None, rec_img_coarse=None,
+                   aud_mask=None, rec_aud_coarse=None):
     """input_specs: [(tensor, is_mel, col_title), ...]"""
     cols = []
     for tensor, is_mel, title in input_specs:
@@ -121,6 +122,20 @@ def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred
             "is_mel": is_mel,
             "data": lambda i, t=tensor: t[i],
             "foot_fn": lambda i, m=is_mel, y=labels: _foot(m, y[i]),
+        })
+    if img_mask is not None:
+        cols.append({
+            "title": "image mask",
+            "is_mel": False,
+            "data": lambda i, m=img_mask: m[i, 0],
+            "foot_fn": lambda i: "1=missing",
+        })
+    if rec_img_coarse is not None:
+        cols.append({
+            "title": "coarse image",
+            "is_mel": False,
+            "data": lambda i, c=rec_img_coarse: c[i, 0],
+            "foot_fn": lambda i, y=labels: _foot(False, y[i]),
         })
     cols.append({
         "title": _rec_col_title(False, img_kind),
@@ -176,17 +191,22 @@ def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred
 
 def _plot_demo(k, labels, tgt_img, tgt_aud, pred, out_path, suptitle,
                input_specs, outputs, img_kind="sample", aud_kind="sample",
-               retrieval_img=None, aud_mask=None, rec_aud_coarse=None):
+               retrieval_img=None, img_mask=None, rec_img_coarse=None,
+               aud_mask=None, rec_aud_coarse=None):
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
 
     rec_img = torch.sigmoid(outputs["img"]).cpu()
     rec_aud = outputs["aud"].cpu()
+    if rec_img_coarse is not None:
+        rec_img_coarse = torch.sigmoid(rec_img_coarse).cpu()
     tgt_img = tgt_img.cpu()
     tgt_aud = tgt_aud.cpu()
     cols = _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud,
                           labels, pred, img_kind, aud_kind, retrieval_img,
                           proto_aud=outputs.get("proto_aud"),
+                          img_mask=img_mask,
+                          rec_img_coarse=rec_img_coarse,
                           aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse)
     ncols = len(cols)
 
@@ -305,12 +325,51 @@ def _make_visible_aud_cue_with_mask(clean, prefer_modes, min_mse=0.003,
     return out, out_mask
 
 
-def _make_visible_img_cue(clean, prefer_mode="occlusion", max_severity=0.5):
+def _make_visible_img_cue(clean, prefer_mode="occlusion", max_severity=0.5,
+                          return_mask=False):
     modes = [m for m in IMG_MODES if m != "gaussian"]
     if prefer_mode in modes:
         modes = [prefer_mode] + [m for m in modes if m != prefer_mode]
-    return _make_visible_cue(clean, corrupt_image, modes,
-                             max_severity=max_severity)
+    if not return_mask:
+        return _make_visible_cue(clean, corrupt_image, modes,
+                                 max_severity=max_severity)
+    return _make_visible_img_cue_with_mask(clean, modes, max_severity=max_severity)
+
+
+def _make_visible_img_cue_with_mask(clean, prefer_modes, min_mse=0.003,
+                                    min_keep=0.30, max_severity=0.5):
+    """与 _make_visible_cue 同逻辑，但同次 corrupt_image 采样保留 img_mask。"""
+    sweep = tuple(s for s in (0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6)
+                  if s <= max_severity + 1e-6) or (max_severity,)
+    out = clean.clone()
+    out_mask = torch.zeros_like(clean)
+    for i in range(clean.size(0)):
+        sample = clean[i:i + 1]
+        chosen, chosen_mask = None, None
+        fallback, fallback_mask, fallback_keep = None, None, -1.0
+        for mode in prefer_modes:
+            for s in sweep:
+                cand, m = corrupt_image(
+                    sample, mode=mode, severity=s, return_mask=True)
+                cand = cand[0]
+                m = m[0] if m is not None else torch.zeros_like(cand)
+                diff, keep = _cue_quality(sample, cand.unsqueeze(0))
+                if diff >= min_mse and keep >= min_keep:
+                    chosen, chosen_mask = cand, m
+                    break
+                if diff >= min_mse and keep > fallback_keep:
+                    fallback, fallback_mask, fallback_keep = cand, m, keep
+            if chosen is not None:
+                break
+        if chosen is not None:
+            out[i] = chosen
+            out_mask[i] = chosen_mask
+        elif fallback is not None:
+            out[i] = fallback
+            out_mask[i] = fallback_mask
+        else:
+            out[i] = sample[0]
+    return out, out_mask
 
 
 def _pred_conf(logits):
@@ -422,18 +481,21 @@ def _plot_aud_only(k, labels, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
 
 
 def _plot_img_only(k, labels, img_cue, rec_img, rec_aud, tgt_img, tgt_aud,
-                   pred, img_kind, aud_kind, out_path, proto_aud=None):
+                   pred, img_kind, aud_kind, out_path, proto_aud=None,
+                   img_mask=None, rec_img_coarse=None):
     _plot_demo(
         k, labels, tgt_img, tgt_aud, pred, out_path,
         suptitle="corrupted image → recovered image & audio",
         input_specs=[(img_cue, False, "corrupted image")],
         outputs={"img": rec_img, "aud": rec_aud, "proto_aud": proto_aud},
         img_kind=img_kind, aud_kind=aud_kind,
+        img_mask=img_mask, rec_img_coarse=rec_img_coarse,
     )
 
 
 def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
                pred, img_kind, aud_kind, out_path, proto_aud=None,
+               img_mask=None, rec_img_coarse=None,
                aud_mask=None, rec_aud_coarse=None):
     _plot_demo(
         k, labels, tgt_img, tgt_aud, pred, out_path,
@@ -444,6 +506,7 @@ def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
         ],
         outputs={"img": rec_img, "aud": rec_aud, "proto_aud": proto_aud},
         img_kind=img_kind, aud_kind=aud_kind,
+        img_mask=img_mask, rec_img_coarse=rec_img_coarse,
         aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse,
     )
 
@@ -507,10 +570,11 @@ def main():
 
     log(f"[demo] 可视化 {k} 个样本  protocol={args.protocol}")
 
+    img_mask_i = img_mask_b = None
     aud_mask_a = aud_mask_b = None
 
     if args.protocol == "legacy_random":
-        img_cue_i, _, _ = build_cue(
+        img_cue_i, _, masks_i = build_cue(
             x_img, x_aud, "corrupt_img_only", cfg,
             severity=args.severity, return_masks=True)
         _, aud_cue_a, masks_a = build_cue(
@@ -519,31 +583,36 @@ def main():
         img_cue_b, aud_cue_b, masks_b = build_cue(
             x_img, x_aud, "corrupt_both", cfg,
             severity=args.severity, return_masks=True)
+        img_mask_i = masks_i.get("img")
+        img_mask_b = masks_b.get("img")
         aud_mask_a = masks_a.get("aud")
         aud_mask_b = masks_b.get("aud")
     else:
-        img_cue_fixed = _make_visible_img_cue(
+        img_cue_fixed, img_mask_fixed = _make_visible_img_cue(
             x_img, prefer_mode=args.img_corrupt_mode,
-            max_severity=args.severity)
+            max_severity=args.severity, return_mask=True)
         aud_cue_fixed, aud_mask_fixed = _make_visible_aud_cue(
             x_aud, prefer_mode=args.aud_corrupt_mode,
             max_severity=args.severity, return_mask=True)
         img_cue_i = img_cue_b = img_cue_fixed
         aud_cue_a = aud_cue_b = aud_cue_fixed
+        img_mask_i = img_mask_b = img_mask_fixed
         aud_mask_a = aud_mask_b = aud_mask_fixed
 
-    def _aud_mask_on_device(m):
+    def _mask_on_device(m):
         if m is None:
             return None
         return m.to(device)
 
     with torch.no_grad():
         out_aud = model(x_aud_cue=aud_cue_a, training_mode=False,
-                        aud_cue_mask=_aud_mask_on_device(aud_mask_a))
-        out_img = model(x_img_cue=img_cue_i, training_mode=False)
+                        aud_cue_mask=_mask_on_device(aud_mask_a))
+        out_img = model(x_img_cue=img_cue_i, training_mode=False,
+                        img_cue_mask=_mask_on_device(img_mask_i))
         out_both = model(x_img_cue=img_cue_b, x_aud_cue=aud_cue_b,
                           training_mode=False,
-                          aud_cue_mask=_aud_mask_on_device(aud_mask_b))
+                          img_cue_mask=_mask_on_device(img_mask_b),
+                          aud_cue_mask=_mask_on_device(aud_mask_b))
 
     # 按 cue 模式选择 target（展示列与 loss 评估一致）
     tgt_img_a, tgt_aud_a, img_k_a, aud_k_a = select_targets(
@@ -591,8 +660,12 @@ def main():
     aud_cue_a_np = aud_cue_a.cpu()
     img_cue_b_np = img_cue_b.cpu()
     aud_cue_b_np = aud_cue_b.cpu()
+    img_mask_i_np = img_mask_i.cpu() if img_mask_i is not None else None
+    img_mask_b_np = img_mask_b.cpu() if img_mask_b is not None else None
     aud_mask_a_np = aud_mask_a.cpu() if aud_mask_a is not None else None
     aud_mask_b_np = aud_mask_b.cpu() if aud_mask_b is not None else None
+    coarse_i = out_img["recovered_img_coarse"].cpu()
+    coarse_b_img = out_both["recovered_img_coarse"].cpu()
     coarse_a = out_aud["recovered_aud_coarse"].cpu()
     coarse_b = out_both["recovered_aud_coarse"].cpu()
 
@@ -609,11 +682,13 @@ def main():
     _plot_img_only(k, labels_cpu, img_cue_i_np,
                    out_img["recovered_img"], out_img["recovered_aud"],
                    tgt_img_i.cpu(), tgt_aud_i.cpu(), pred_i,
-                   img_k_i, aud_k_i, args.out_img, proto_aud=proto_aud_cpu)
+                   img_k_i, aud_k_i, args.out_img, proto_aud=proto_aud_cpu,
+                   img_mask=img_mask_i_np, rec_img_coarse=coarse_i)
     _plot_both(k, labels_cpu, img_cue_b_np, aud_cue_b_np,
                out_both["recovered_img"], out_both["recovered_aud"],
                tgt_img_b.cpu(), tgt_aud_b.cpu(), pred_b,
                img_k_b, aud_k_b, args.out_both, proto_aud=proto_aud_cpu,
+               img_mask=img_mask_b_np, rec_img_coarse=coarse_b_img,
                aud_mask=aud_mask_b_np, rec_aud_coarse=coarse_b)
 
 
