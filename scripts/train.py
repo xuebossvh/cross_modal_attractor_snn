@@ -346,6 +346,12 @@ def pretrain_decoders(model, train_loader, cfg, device):
                         rec_aud, x_aud, mask_for_loss, power=1).item()
                     logs["aud_mask_mse"] = _masked_audio_error(
                         rec_aud, x_aud, mask_for_loss, power=2).item()
+                    visible_mask = 1.0 - mask_for_loss.to(
+                        device=rec_aud.device, dtype=rec_aud.dtype)
+                    logs["aud_visible_l1"] = _masked_audio_error(
+                        rec_aud, x_aud, visible_mask, power=1).item()
+                    logs["aud_visible_mse"] = _masked_audio_error(
+                        rec_aud, x_aud, visible_mask, power=2).item()
                 if lam_act > 0:
                     loss_act = _aud_active_loss(rec_aud, x_aud)
                     loss = loss + lam_act * loss_act
@@ -606,6 +612,13 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             out_r["recovered_aud"], tgt_aud, aud_mask, power=1).item()
         logs["aud_mask_mse"] = _masked_audio_error(
             out_r["recovered_aud"], tgt_aud, aud_mask, power=2).item()
+        visible_mask = 1.0 - aud_mask.to(
+            device=out_r["recovered_aud"].device,
+            dtype=out_r["recovered_aud"].dtype)
+        logs["aud_visible_l1"] = _masked_audio_error(
+            out_r["recovered_aud"], tgt_aud, visible_mask, power=1).item()
+        logs["aud_visible_mse"] = _masked_audio_error(
+            out_r["recovered_aud"], tgt_aud, visible_mask, power=2).item()
 
     lam_feat = lc.get("lambda_aud_feat", 0.0)
     if lam_feat > 0 and aud_kind == "sample":

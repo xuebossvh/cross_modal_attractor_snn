@@ -1,7 +1,8 @@
 # v10d ablation B: v10d cue ratio + gated_dilated decoder, but the F3b spectrogram
-# refiner is DISABLED. Isolates the refiner (F3b) contribution: comparing v10d vs
-# this config shows the pure effect of the refiner branch under the same cue ratio
-# and decoder structure.
+# refiner is DISABLED. In v10d, visible paste-back lives inside the refiner branch,
+# so this config disables the whole refiner + paste-back post-processing path.
+# Comparing v10d vs this config estimates that combined post-processing contribution
+# under the same cue ratio and decoder structure.
 # Only audio_refiner.enabled and output_version/ckpt paths differ from v10d.yaml.
 
 seed: 1234
@@ -24,7 +25,7 @@ snn:
   aud_refine_type: "gated_dilated"
 
 audio_refiner:
-  enabled: false           # F3b refiner OFF (isolates refiner contribution)
+  enabled: false           # refiner + paste-back post-processing OFF
   hidden_ch: 32
   blocks: 4
   max_dilation: 16
