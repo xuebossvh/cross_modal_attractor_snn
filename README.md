@@ -75,18 +75,11 @@ tail -f outputs/outputs_v10a/logs/train_v10a_50ep.log
 nohup env PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v10a.yaml --epochs 30 > outputs/outputs_v10a/logs/train_v10a_30ep.log 2>&1 < /dev/null &
 ```
 
-可选：一条后台命令跑主训练，主训练结束后自动顺序跑 3 个 v10a 消融：
+v10d 归因消融（不往 `configs/` 堆重复 yaml，本地生成后训练）：
 
 ```bash
-nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v10a_suite.py --config configs/v10a.yaml --with_ablations > outputs/outputs_v10a/logs/suite_v10a_with_ablations.log 2>&1 < /dev/null &
-tail -f outputs/outputs_v10a/logs/suite_v10a_with_ablations.log
-```
-
-如果主训练已经跑完，只想补跑三个消融：
-
-```bash
-nohup env PYTHONUNBUFFERED=1 python -u scripts/run_v10a_suite.py --config configs/v10a.yaml --ablations_only > outputs/outputs_v10a/logs/suite_v10a_ablations_only.log 2>&1 < /dev/null &
-tail -f outputs/outputs_v10a/logs/suite_v10a_ablations_only.log
+python scripts/make_ablation_configs.py --base configs/v10d.yaml
+# 生成 outputs/ablations_v10d/configs/v10d_ab_v10cratio.yaml 等，按脚本打印的 nohup 命令分别启动
 ```
 
 每个 batch 采样一种 cue 模式，并分两阶段计算损失：
