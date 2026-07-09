@@ -64,6 +64,12 @@ _AUD_DIAG_ROW_RE = re.compile(
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
     r"([\d.]+)%\s*$",
 )
+_ATTR_ROW_RE = re.compile(
+    r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
+)
 
 
 def parse_eval_summary(path):
@@ -219,6 +225,45 @@ def parse_aud_collapse_diag(path):
             })
     if not rows:
         raise ValueError(f"未在 {path} 中找到 [音频塌缩诊断] 数据行。")
+    return rows
+
+
+def parse_attribution_table(path):
+    """解析 evaluate.py [归因] coarse/final masked MSE 段。"""
+    rows = []
+    in_block = False
+    past_hdr = False
+
+    def _maybe_float(text):
+        return None if text == "nan" else float(text)
+
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if "[归因]" in line:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            if rows:
+                break
+            continue
+        if stripped.startswith("=") or stripped.startswith("-"):
+            continue
+        if "imgCoarse" in stripped or "cue模式" in stripped:
+            past_hdr = True
+            continue
+        m = _ATTR_ROW_RE.match(stripped)
+        if m and past_hdr:
+            rows.append({
+                "mode": m.group(1),
+                "img_coarse_masked_mse": _maybe_float(m.group(2)),
+                "img_final_masked_mse": _maybe_float(m.group(3)),
+                "aud_coarse_masked_mse": _maybe_float(m.group(4)),
+                "aud_final_masked_mse": _maybe_float(m.group(5)),
+            })
+    if not rows:
+        raise ValueError(f"未在 {path} 中找到 [归因] 数据行。")
     return rows
 
 
@@ -378,6 +423,24 @@ def render_full_eval_table(rows, title, path):
     return _render_table(headers, cell, col_w, title, path, font_size=8.5)
 
 
+def render_attribution_table(rows, title, path):
+    headers = ["", "img coarse mask", "img final mask",
+               "aud coarse mask", "aud final mask"]
+    cell = [[
+        r["mode"],
+        f"{r['img_coarse_masked_mse']:.4f}"
+        if r.get("img_coarse_masked_mse") is not None else "nan",
+        f"{r['img_final_masked_mse']:.4f}"
+        if r.get("img_final_masked_mse") is not None else "nan",
+        f"{r['aud_coarse_masked_mse']:.4f}"
+        if r.get("aud_coarse_masked_mse") is not None else "nan",
+        f"{r['aud_final_masked_mse']:.4f}"
+        if r.get("aud_final_masked_mse") is not None else "nan",
+    ] for r in rows]
+    col_w = [0.16, 0.14, 0.14, 0.14, 0.14]
+    return _render_table(headers, cell, col_w, title, path, font_size=8.5)
+
+
 def _parse_n_samples(path):
     for line in Path(path).read_text(encoding="utf-8").splitlines():
         m = re.match(r"样本数:\s*(\d+)", line.strip())
@@ -449,6 +512,19 @@ def main():
         if args.diag_only:
             raise
         log(f"[plot] 跳过音频塌缩诊断表：{e}")
+
+    attr_out = None
+    if out is not None:
+        p = Path(out)
+        attr_out = p.with_name(f"{p.stem}_attribution{p.suffix}")
+    try:
+        attr_rows = parse_attribution_table(src)
+        attr_title = "Coarse vs Final Masked MSE"
+        a_png, a_csv = render_attribution_table(attr_rows, attr_title, attr_out)
+        log(f"[plot] 归因表 -> {a_png}")
+        log(f"[plot] 归因 CSV -> {a_csv}")
+    except ValueError as e:
+        log(f"[plot] 跳过归因表：{e}")
 
 
 if __name__ == "__main__":

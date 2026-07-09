@@ -81,6 +81,8 @@ class CrossModalSNN(nn.Module):
         self.image_decoder = ImageDecoder(img_decoder_in)
         img_refiner_cfg = cfg.get("image_refiner", {})
         self.use_image_refiner = img_refiner_cfg.get("enabled", False)
+        self.image_refiner_pasteback_only = img_refiner_cfg.get(
+            "pasteback_only", False)
         self.image_refiner_visible_paste_back = img_refiner_cfg.get(
             "visible_paste_back", False)
         if self.use_image_refiner:
@@ -102,6 +104,8 @@ class CrossModalSNN(nn.Module):
 
         refiner_cfg = cfg.get("audio_refiner", {})
         self.use_audio_refiner = refiner_cfg.get("enabled", False)
+        self.audio_refiner_pasteback_only = refiner_cfg.get(
+            "pasteback_only", False)
         self.refiner_visible_paste_back = refiner_cfg.get(
             "visible_paste_back", False)
         if self.use_audio_refiner:
@@ -178,6 +182,39 @@ class CrossModalSNN(nn.Module):
         prob = prob.clamp(eps, 1.0 - eps)
         return torch.logit(prob)
 
+    def _apply_image_refiner(self, coarse_logits, img_cue, img_mask):
+        if img_cue is None or img_mask is None:
+            return coarse_logits
+        mask = img_mask.to(device=coarse_logits.device,
+                           dtype=coarse_logits.dtype)
+        coarse_prob = torch.sigmoid(coarse_logits)
+        if self.image_refiner is not None:
+            delta = self.image_refiner(coarse_prob, img_cue, mask)
+            if self.image_refiner_visible_paste_back:
+                pred = (coarse_prob + delta).clamp(0.0, 1.0)
+                final_prob = mask * pred + (1.0 - mask) * img_cue
+            else:
+                final_prob = (coarse_prob + mask * delta).clamp(0.0, 1.0)
+        elif self.image_refiner_pasteback_only:
+            final_prob = mask * coarse_prob + (1.0 - mask) * img_cue
+        else:
+            return coarse_logits
+        return self._prob_to_logits(final_prob)
+
+    def _apply_audio_refiner(self, coarse_aud, aud_cue, aud_mask):
+        if aud_cue is None or aud_mask is None:
+            return coarse_aud
+        mask = aud_mask.to(device=coarse_aud.device, dtype=coarse_aud.dtype)
+        if self.audio_refiner is not None:
+            delta = self.audio_refiner(coarse_aud, aud_cue, mask)
+            if self.refiner_visible_paste_back:
+                pred = (coarse_aud + delta).clamp(0.0, 1.0)
+                return mask * pred + (1.0 - mask) * aud_cue
+            return (coarse_aud + mask * delta).clamp(0.0, 1.0)
+        if self.audio_refiner_pasteback_only:
+            return mask * coarse_aud + (1.0 - mask) * aud_cue
+        return coarse_aud
+
     def forward(self, x_img_cue=None, x_aud_cue=None,
                 x_img_target=None, x_aud_target=None,
                 training_mode=False, phase="readout",
@@ -247,37 +284,13 @@ class CrossModalSNN(nn.Module):
         out["aud_detail_state"] = aud_detail
         coarse_img = self.image_decoder(img_dec_state)
         out["recovered_img_coarse"] = coarse_img
-        recovered_img = coarse_img
-        if (self.image_refiner is not None
-                and x_img_cue is not None
-                and img_cue_mask is not None):
-            mask = img_cue_mask.to(device=coarse_img.device, dtype=coarse_img.dtype)
-            coarse_prob = torch.sigmoid(coarse_img)
-            delta = self.image_refiner(coarse_prob, x_img_cue, mask)
-            if self.image_refiner_visible_paste_back:
-                pred = (coarse_prob + delta).clamp(0.0, 1.0)
-                final_prob = mask * pred + (1.0 - mask) * x_img_cue
-            else:
-                final_prob = (coarse_prob + mask * delta).clamp(0.0, 1.0)
-            recovered_img = self._prob_to_logits(final_prob)
-        out["recovered_img"] = recovered_img
+        out["recovered_img"] = self._apply_image_refiner(
+            coarse_img, x_img_cue, img_cue_mask)
 
         coarse_aud = self.audio_decoder(aud_dec_state)
         out["recovered_aud_coarse"] = coarse_aud
-        recovered_aud = coarse_aud
-        if (self.audio_refiner is not None
-                and x_aud_cue is not None
-                and aud_cue_mask is not None):
-            mask = aud_cue_mask.to(device=coarse_aud.device, dtype=coarse_aud.dtype)
-            delta = self.audio_refiner(coarse_aud, x_aud_cue, mask)
-            if self.refiner_visible_paste_back:
-                # 文献式 inpainting：缺失区用网络预测，可见区原样保留 aud_cue
-                pred = (coarse_aud + delta).clamp(0.0, 1.0)
-                recovered_aud = mask * pred + (1.0 - mask) * x_aud_cue
-            else:
-                # 仅在缺失区叠加 delta；可见区沿用 coarse（不 paste 输入 cue）
-                recovered_aud = (coarse_aud + mask * delta).clamp(0.0, 1.0)
-        out["recovered_aud"] = recovered_aud
+        out["recovered_aud"] = self._apply_audio_refiner(
+            coarse_aud, x_aud_cue, aud_cue_mask)
         return out
 
     @torch.no_grad()

@@ -237,19 +237,29 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         n += labels.size(0)
 
         rec_img = torch.sigmoid(out["recovered_img"])
+        rec_img_coarse = torch.sigmoid(out["recovered_img_coarse"])
         sum_img_mse += F.mse_loss(rec_img, tgt_img).item()
         sum_psnr += batch_psnr(rec_img, tgt_img).item()
         sum_ssim += batch_ssim(rec_img, tgt_img).item()
         for mk, mv in _image_masked_metrics(rec_img, tgt_img, img_mask).items():
             _add_metric(image_metric_sums, image_metric_counts, mk, mv)
+        for mk, mv in _image_masked_metrics(
+                rec_img_coarse, tgt_img, img_mask).items():
+            key = mk.replace("img_", "img_coarse_")
+            _add_metric(image_metric_sums, image_metric_counts, key, mv)
 
         rec_aud = out["recovered_aud"]
+        rec_aud_coarse = out["recovered_aud_coarse"]
         sum_aud_mse += F.mse_loss(rec_aud, tgt_aud).item()   # log-mel [B,M,T]
         _add_metric(
             audio_metric_sums, audio_metric_counts, "aud_ssim",
             batch_ssim(rec_aud.unsqueeze(1), tgt_aud.unsqueeze(1)).item())
         for mk, mv in _audio_masked_metrics(rec_aud, tgt_aud, aud_mask).items():
             _add_metric(audio_metric_sums, audio_metric_counts, mk, mv)
+        for mk, mv in _audio_masked_metrics(
+                rec_aud_coarse, tgt_aud, aud_mask).items():
+            key = mk.replace("aud_", "aud_coarse_")
+            _add_metric(audio_metric_sums, audio_metric_counts, key, mv)
 
         d = aud_collapse_stats(rec_aud, tgt_aud)
         for kk, vv in d.items():
@@ -275,6 +285,10 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                                        "img_visible_mse"),
         "img_visible_l1": _mean_metric(image_metric_sums, image_metric_counts,
                                       "img_visible_l1"),
+        "img_coarse_masked_mse": _mean_metric(
+            image_metric_sums, image_metric_counts, "img_coarse_masked_mse"),
+        "img_coarse_visible_mse": _mean_metric(
+            image_metric_sums, image_metric_counts, "img_coarse_visible_mse"),
         "aud_mse": sum_aud_mse / max(nb, 1),
         "aud_ssim": _mean_metric(audio_metric_sums, audio_metric_counts,
                                  "aud_ssim"),
@@ -286,6 +300,10 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                                        "aud_visible_mse"),
         "aud_visible_l1": _mean_metric(audio_metric_sums, audio_metric_counts,
                                       "aud_visible_l1"),
+        "aud_coarse_masked_mse": _mean_metric(
+            audio_metric_sums, audio_metric_counts, "aud_coarse_masked_mse"),
+        "aud_coarse_visible_mse": _mean_metric(
+            audio_metric_sums, audio_metric_counts, "aud_coarse_visible_mse"),
         "pix_var": pix_var,
         "pair_l2": pair_l2,
         "img_kind": img_kind,
@@ -409,6 +427,7 @@ def main():
     log("=" * sum(eval_w))
     log(format_table_row(eval_hdr, eval_w, eval_a))
     diag_rows = []
+    attr_rows = []
     for mi, mode in enumerate(EVAL_MODES):
         r = eval_mode(model, test_loader, cfg, mode, device,
                       args.severity, proto_img, proto_aud, args.max_batches,
@@ -425,8 +444,26 @@ def main():
             tgt,
         ], eval_w, eval_a))
         diag_rows.append((mode, r["diag"]))
+        attr_rows.append((mode, r))
 
     _log_audio_diag(diag_rows)
+
+    attr_w = [18, 12, 12, 12, 12]
+    attr_a = ["l", "r", "r", "r", "r"]
+    log("=" * sum(attr_w))
+    log("[归因] coarse/final masked MSE（主看 coarse->final 是否下降；"
+        "final_visible≈0 是 paste-back 机制，不代表可见区学习）")
+    log(format_table_row(
+        ["cue模式", "imgCoarse", "imgFinal", "audCoarse", "audFinal"],
+        attr_w, attr_a))
+    for mode, r in attr_rows:
+        log(format_table_row([
+            mode,
+            _fmt_float(r["img_coarse_masked_mse"]),
+            _fmt_float(r["img_masked_mse"]),
+            _fmt_float(r["aud_coarse_masked_mse"]),
+            _fmt_float(r["aud_masked_mse"]),
+        ], attr_w, attr_a))
 
     if args.family_breakdown:
         eval_audio_family_breakdown(model, test_loader, cfg, device,

@@ -231,13 +231,30 @@ def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout,
     return img_state, aud_state
 
 
-def _set_decoder_pretrain_requires_grad(model, freeze_non_decoders=True):
+def _set_decoder_pretrain_requires_grad(model, cfg, freeze_non_decoders=True):
     previous = []
+    pc = cfg.get("decoder_pretrain", {})
+    img_cfg = cfg.get("image_refiner", {})
+    aud_cfg = cfg.get("audio_refiner", {})
+    train_img_refiner = (
+        pc.get("train_image_refiner", False)
+        and img_cfg.get("enabled", False)
+        and not img_cfg.get("pasteback_only", False)
+    )
+    train_aud_refiner = (
+        pc.get("train_audio_refiner", False)
+        and aud_cfg.get("enabled", False)
+        and not aud_cfg.get("pasteback_only", False)
+    )
     decoder_prefixes = (
         "image_decoder.", "audio_decoder.",
         "img_detail_projector.", "aud_detail_projector.",
         "img_detail_gate.", "aud_detail_gate.",
     )
+    if train_img_refiner:
+        decoder_prefixes = decoder_prefixes + ("image_refiner.",)
+    if train_aud_refiner:
+        decoder_prefixes = decoder_prefixes + ("audio_refiner.",)
     for name, param in model.named_parameters():
         previous.append((param, param.requires_grad))
         if freeze_non_decoders:
@@ -293,7 +310,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
             return
 
     previous_requires_grad = _set_decoder_pretrain_requires_grad(
-        model, pc.get("freeze_non_decoders", True))
+        model, cfg, pc.get("freeze_non_decoders", True))
     params = [p for p in model.parameters() if p.requires_grad]
     if not params:
         _restore_requires_grad(previous_requires_grad)
@@ -305,12 +322,26 @@ def pretrain_decoders(model, train_loader, cfg, device):
     )
 
     steps_per_epoch = len(train_loader)
+    lam_coarse_aux = float(pc.get("lambda_coarse_aux", 0.0))
+    train_img_refiner = (
+        pc.get("train_image_refiner", False)
+        and cfg.get("image_refiner", {}).get("enabled", False)
+        and not cfg.get("image_refiner", {}).get("pasteback_only", False)
+    )
+    train_aud_refiner = (
+        pc.get("train_audio_refiner", False)
+        and cfg.get("audio_refiner", {}).get("enabled", False)
+        and not cfg.get("audio_refiner", {}).get("pasteback_only", False)
+    )
     log("[decoder-pretrain] start "
         f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
         f"detail_dropout={float(detail_dropout):.2f} "
         f"corrupt_detail={corrupt_detail} "
         f"grad_clip={grad_clip:.2f} "
-        f"freeze_non_decoders={pc.get('freeze_non_decoders', True)}")
+        f"freeze_non_decoders={pc.get('freeze_non_decoders', True)} "
+        f"train_image_refiner={train_img_refiner} "
+        f"train_audio_refiner={train_aud_refiner} "
+        f"lambda_coarse_aux={lam_coarse_aux:.3f}")
     if corrupt_detail:
         log("[decoder-pretrain] corrupt detail "
             f"img_mode={pre_img_mode} aud_mode={pre_aud_mode} "
@@ -343,8 +374,12 @@ def pretrain_decoders(model, train_loader, cfg, device):
                     model, x_img, x_aud, detail_dropout,
                     x_img_detail=x_img_detail, x_aud_detail=x_aud_detail)
 
-                rec_img = model.image_decoder(img_state)
-                rec_aud = model.audio_decoder(aud_state)
+                coarse_img = model.image_decoder(img_state)
+                coarse_aud = model.audio_decoder(aud_state)
+                rec_img = model._apply_image_refiner(
+                    coarse_img, x_img_detail, img_mask)
+                rec_aud = model._apply_audio_refiner(
+                    coarse_aud, x_aud_detail, aud_mask)
 
                 mask_for_img_loss = None
                 img_masked_families = set(lc.get("img_masked_families", []))
@@ -354,6 +389,9 @@ def pretrain_decoders(model, train_loader, cfg, device):
                     mask_for_img_loss = img_mask
                 loss_img = _img_recon_loss(rec_img, x_img, lc,
                                            mask=mask_for_img_loss)
+                if lam_coarse_aux > 0:
+                    loss_img = loss_img + lam_coarse_aux * _img_recon_loss(
+                        coarse_img, x_img, lc, mask=mask_for_img_loss)
                 mask_for_loss = None
                 masked_families = set(lc.get("aud_masked_families", []))
                 if (use_masked_pretrain
@@ -362,6 +400,9 @@ def pretrain_decoders(model, train_loader, cfg, device):
                     mask_for_loss = aud_mask
                 loss_aud = _aud_recon_loss(rec_aud, x_aud, lc,
                                            mask=mask_for_loss)
+                if lam_coarse_aux > 0:
+                    loss_aud = loss_aud + lam_coarse_aux * _aud_recon_loss(
+                        coarse_aud, x_aud, lc, mask=mask_for_loss)
                 loss = lam_img * loss_img + lam_aud * loss_aud
                 logs = {
                     "img": loss_img.item(),
@@ -424,6 +465,32 @@ def pretrain_decoders(model, train_loader, cfg, device):
     if pc.get("save_ckpt", True):
         _save_decoder_pretrain_ckpt(model, cfg, pre_ckpt, epochs - 1, epochs)
         log(f"[decoder-pretrain] checkpoint saved -> {pre_ckpt}")
+
+
+def _build_train_optimizer(model, cfg):
+    """Adam with optional lr_mult for refiner param groups."""
+    base_lr = cfg["train"]["lr"]
+    wd = cfg["train"]["weight_decay"]
+    img_mult = float(cfg.get("image_refiner", {}).get("lr_mult", 1.0))
+    aud_mult = float(cfg.get("audio_refiner", {}).get("lr_mult", 1.0))
+    base_params = []
+    img_refiner_params = []
+    aud_refiner_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if name.startswith("image_refiner."):
+            img_refiner_params.append(param)
+        elif name.startswith("audio_refiner."):
+            aud_refiner_params.append(param)
+        else:
+            base_params.append(param)
+    groups = [{"params": base_params, "lr": base_lr}]
+    if img_refiner_params:
+        groups.append({"params": img_refiner_params, "lr": base_lr * img_mult})
+    if aud_refiner_params:
+        groups.append({"params": aud_refiner_params, "lr": base_lr * aud_mult})
+    return torch.optim.Adam(groups, lr=base_lr, weight_decay=wd)
 
 
 def _mode_enabled(cue_mode, modes):
@@ -762,8 +829,7 @@ def main():
     else:
         pretrain_decoders(model, train_loader, cfg, device)
 
-    opt = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"],
-                           weight_decay=cfg["train"]["weight_decay"])
+    opt = _build_train_optimizer(model, cfg)
 
     sched_name = cfg["train"].get("lr_scheduler", "none")
     if sched_name == "cosine":
