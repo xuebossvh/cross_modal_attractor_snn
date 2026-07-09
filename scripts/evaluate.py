@@ -448,21 +448,26 @@ def main():
 
     _log_audio_diag(diag_rows)
 
-    attr_w = [18, 12, 12, 12, 12]
-    attr_a = ["l", "r", "r", "r", "r"]
+    attr_w = [18, 10, 10, 10, 10, 10, 10, 10, 10]
+    attr_a = ["l"] + ["r"] * 8
     log("=" * sum(attr_w))
-    log("[归因] coarse/final masked MSE（主看 coarse->final 是否下降；"
-        "final_visible≈0 是 paste-back 机制，不代表可见区学习）")
+    log("[归因] coarse/final masked/visible MSE（主看 mask coarse->final；"
+        "final visible≈0 是 paste-back 机制，不代表可见区学习）")
     log(format_table_row(
-        ["cue模式", "imgCoarse", "imgFinal", "audCoarse", "audFinal"],
+        ["cue模式", "imgCmask", "imgFmask", "imgCvis", "imgFvis",
+         "audCmask", "audFmask", "audCvis", "audFvis"],
         attr_w, attr_a))
     for mode, r in attr_rows:
         log(format_table_row([
             mode,
             _fmt_float(r["img_coarse_masked_mse"]),
             _fmt_float(r["img_masked_mse"]),
+            _fmt_float(r["img_coarse_visible_mse"]),
+            _fmt_float(r["img_visible_mse"]),
             _fmt_float(r["aud_coarse_masked_mse"]),
             _fmt_float(r["aud_masked_mse"]),
+            _fmt_float(r["aud_coarse_visible_mse"]),
+            _fmt_float(r["aud_visible_mse"]),
         ], attr_w, attr_a))
 
     if args.family_breakdown:

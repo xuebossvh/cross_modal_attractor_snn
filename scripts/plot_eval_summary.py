@@ -68,6 +68,14 @@ _ATTR_ROW_RE = re.compile(
     r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
     r"clean_img_only|clean_aud_only|clean_both)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
+)
+_ATTR_ROW_RE_LEGACY = re.compile(
+    r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
 )
 
@@ -229,7 +237,7 @@ def parse_aud_collapse_diag(path):
 
 
 def parse_attribution_table(path):
-    """解析 evaluate.py [归因] coarse/final masked MSE 段。"""
+    """解析 evaluate.py [归因] coarse/final masked/visible MSE 段。"""
     rows = []
     in_block = False
     past_hdr = False
@@ -250,7 +258,7 @@ def parse_attribution_table(path):
             continue
         if stripped.startswith("=") or stripped.startswith("-"):
             continue
-        if "imgCoarse" in stripped or "cue模式" in stripped:
+        if "imgCmask" in stripped or "imgCoarse" in stripped or "cue模式" in stripped:
             past_hdr = True
             continue
         m = _ATTR_ROW_RE.match(stripped)
@@ -259,8 +267,26 @@ def parse_attribution_table(path):
                 "mode": m.group(1),
                 "img_coarse_masked_mse": _maybe_float(m.group(2)),
                 "img_final_masked_mse": _maybe_float(m.group(3)),
+                "img_coarse_visible_mse": _maybe_float(m.group(4)),
+                "img_final_visible_mse": _maybe_float(m.group(5)),
+                "aud_coarse_masked_mse": _maybe_float(m.group(6)),
+                "aud_final_masked_mse": _maybe_float(m.group(7)),
+                "aud_coarse_visible_mse": _maybe_float(m.group(8)),
+                "aud_final_visible_mse": _maybe_float(m.group(9)),
+            })
+            continue
+        m = _ATTR_ROW_RE_LEGACY.match(stripped)
+        if m and past_hdr:
+            rows.append({
+                "mode": m.group(1),
+                "img_coarse_masked_mse": _maybe_float(m.group(2)),
+                "img_final_masked_mse": _maybe_float(m.group(3)),
+                "img_coarse_visible_mse": None,
+                "img_final_visible_mse": None,
                 "aud_coarse_masked_mse": _maybe_float(m.group(4)),
                 "aud_final_masked_mse": _maybe_float(m.group(5)),
+                "aud_coarse_visible_mse": None,
+                "aud_final_visible_mse": None,
             })
     if not rows:
         raise ValueError(f"未在 {path} 中找到 [归因] 数据行。")
@@ -424,20 +450,28 @@ def render_full_eval_table(rows, title, path):
 
 
 def render_attribution_table(rows, title, path):
-    headers = ["", "img coarse mask", "img final mask",
-               "aud coarse mask", "aud final mask"]
+    headers = ["", "img C mask", "img F mask", "img C vis", "img F vis",
+               "aud C mask", "aud F mask", "aud C vis", "aud F vis"]
     cell = [[
         r["mode"],
         f"{r['img_coarse_masked_mse']:.4f}"
         if r.get("img_coarse_masked_mse") is not None else "nan",
         f"{r['img_final_masked_mse']:.4f}"
         if r.get("img_final_masked_mse") is not None else "nan",
+        f"{r['img_coarse_visible_mse']:.4f}"
+        if r.get("img_coarse_visible_mse") is not None else "nan",
+        f"{r['img_final_visible_mse']:.4f}"
+        if r.get("img_final_visible_mse") is not None else "nan",
         f"{r['aud_coarse_masked_mse']:.4f}"
         if r.get("aud_coarse_masked_mse") is not None else "nan",
         f"{r['aud_final_masked_mse']:.4f}"
         if r.get("aud_final_masked_mse") is not None else "nan",
+        f"{r['aud_coarse_visible_mse']:.4f}"
+        if r.get("aud_coarse_visible_mse") is not None else "nan",
+        f"{r['aud_final_visible_mse']:.4f}"
+        if r.get("aud_final_visible_mse") is not None else "nan",
     ] for r in rows]
-    col_w = [0.16, 0.14, 0.14, 0.14, 0.14]
+    col_w = [0.14] + [0.095] * 8
     return _render_table(headers, cell, col_w, title, path, font_size=8.5)
 
 
@@ -519,7 +553,7 @@ def main():
         attr_out = p.with_name(f"{p.stem}_attribution{p.suffix}")
     try:
         attr_rows = parse_attribution_table(src)
-        attr_title = "Coarse vs Final Masked MSE"
+        attr_title = "Coarse vs Final Masked/Visible MSE"
         a_png, a_csv = render_attribution_table(attr_rows, attr_title, attr_out)
         log(f"[plot] 归因表 -> {a_png}")
         log(f"[plot] 归因 CSV -> {a_csv}")

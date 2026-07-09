@@ -333,6 +333,14 @@ def pretrain_decoders(model, train_loader, cfg, device):
         and cfg.get("audio_refiner", {}).get("enabled", False)
         and not cfg.get("audio_refiner", {}).get("pasteback_only", False)
     )
+    use_img_final_helper = (
+        train_img_refiner
+        or cfg.get("image_refiner", {}).get("pasteback_only", False)
+    )
+    use_aud_final_helper = (
+        train_aud_refiner
+        or cfg.get("audio_refiner", {}).get("pasteback_only", False)
+    )
     log("[decoder-pretrain] start "
         f"epochs={epochs} lr={pc.get('lr', cfg['train']['lr'])} "
         f"detail_dropout={float(detail_dropout):.2f} "
@@ -341,6 +349,8 @@ def pretrain_decoders(model, train_loader, cfg, device):
         f"freeze_non_decoders={pc.get('freeze_non_decoders', True)} "
         f"train_image_refiner={train_img_refiner} "
         f"train_audio_refiner={train_aud_refiner} "
+        f"img_final_path={'helper' if use_img_final_helper else 'coarse'} "
+        f"aud_final_path={'helper' if use_aud_final_helper else 'coarse'} "
         f"lambda_coarse_aux={lam_coarse_aux:.3f}")
     if corrupt_detail:
         log("[decoder-pretrain] corrupt detail "
@@ -376,10 +386,14 @@ def pretrain_decoders(model, train_loader, cfg, device):
 
                 coarse_img = model.image_decoder(img_state)
                 coarse_aud = model.audio_decoder(aud_state)
-                rec_img = model._apply_image_refiner(
-                    coarse_img, x_img_detail, img_mask)
-                rec_aud = model._apply_audio_refiner(
-                    coarse_aud, x_aud_detail, aud_mask)
+                rec_img = (
+                    model._apply_image_refiner(coarse_img, x_img_detail, img_mask)
+                    if use_img_final_helper else coarse_img
+                )
+                rec_aud = (
+                    model._apply_audio_refiner(coarse_aud, x_aud_detail, aud_mask)
+                    if use_aud_final_helper else coarse_aud
+                )
 
                 mask_for_img_loss = None
                 img_masked_families = set(lc.get("img_masked_families", []))
