@@ -10,8 +10,13 @@ import random
 
 import torch
 
-IMG_MODES = ["occlusion", "pixel_delete", "gaussian",
-             "mask_left", "mask_right", "mask_top", "mask_bottom"]
+IMG_TRAIN_MODES = [
+    "occlusion", "pixel_delete", "mask_vertical",
+    "mask_horizontal", "block_corner",
+]
+IMG_MODES = IMG_TRAIN_MODES + [
+    "gaussian", "mask_left", "mask_right", "mask_top", "mask_bottom",
+]
 AUD_MODES = ["gaussian", "time_mask", "freq_mask",
              "feature_dropout", "partial_temporal", "time_freq_block"]
 AUD_FAMILY_GROUPS = {
@@ -33,8 +38,9 @@ def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False):
     """损坏图像 cue。
 
     输入 : x_img [B, 1, H, W]，值域 [0, 1]
-    模式 : occlusion / pixel_delete / gaussian /
-           mask_left / mask_right / mask_top / mask_bottom / random
+    模式 : occlusion / pixel_delete / mask_vertical / mask_horizontal /
+           block_corner / gaussian / mask_left / mask_right /
+           mask_top / mask_bottom / random
     """
     x = x_img.clone()
     B, C, H, W = x.shape
@@ -57,6 +63,43 @@ def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False):
         keep = (torch.rand_like(x) > s).float()
         x = x * keep
         mask = 1.0 - keep
+    elif m == "mask_vertical":
+        # 随机遮挡左侧或右侧连续竖向区域
+        w = int(round(s * W))
+        mask = torch.zeros_like(x)
+        if w > 0:
+            if random.random() < 0.5:
+                x[:, :, :, :w] = 0.0
+                mask[:, :, :, :w] = 1.0
+            else:
+                x[:, :, :, W - w:] = 0.0
+                mask[:, :, :, W - w:] = 1.0
+    elif m == "mask_horizontal":
+        # 随机遮挡上侧或下侧连续横向区域
+        h = int(round(s * H))
+        mask = torch.zeros_like(x)
+        if h > 0:
+            if random.random() < 0.5:
+                x[:, :, :h, :] = 0.0
+                mask[:, :, :h, :] = 1.0
+            else:
+                x[:, :, H - h:, :] = 0.0
+                mask[:, :, H - h:, :] = 1.0
+    elif m == "block_corner":
+        # 在四个角之一遮挡一个连续方块
+        bh = max(1, int(round(s * H)))
+        bw = max(1, int(round(s * W)))
+        mask = torch.zeros_like(x)
+        corners = (
+            (0, 0),
+            (0, max(0, W - bw)),
+            (max(0, H - bh), 0),
+            (max(0, H - bh), max(0, W - bw)),
+        )
+        for i in range(B):
+            top, left = random.choice(corners)
+            x[i, :, top:top + bh, left:left + bw] = 0.0
+            mask[i, :, top:top + bh, left:left + bw] = 1.0
     elif m == "gaussian":
         # 叠加高斯噪声后裁剪
         x = x + s * torch.randn_like(x)

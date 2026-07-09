@@ -9,6 +9,7 @@ import bootstrap  # noqa: F401
 
 import argparse
 import os
+import random
 
 import torch
 import torch.nn.functional as F
@@ -293,6 +294,9 @@ def pretrain_decoders(model, train_loader, cfg, device):
         "corrupt_severity", cfg["corruption"].get("train_severity", 0.5)))
     pre_img_mode = pc.get("img_mode", cfg["corruption"].get("img_mode", "random"))
     pre_aud_mode = pc.get("aud_mode", cfg["corruption"].get("aud_mode", "random"))
+    pre_img_modes = pc.get("img_modes")
+    pre_aud_modes = pc.get("aud_modes")
+    pre_family_sampling = pc.get("family_sampling", "balanced")
     use_masked_pretrain = bool(pc.get("use_masked_audio_loss", False))
     grad_clip = float(pc.get("grad_clip", 0.0))
     log_every = int(pc.get("log_every", cfg["train"].get("log_every", 50)))
@@ -355,6 +359,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
     if corrupt_detail:
         log("[decoder-pretrain] corrupt detail "
             f"img_mode={pre_img_mode} aud_mode={pre_aud_mode} "
+            f"img_modes={pre_img_modes or '-'} aud_modes={pre_aud_modes or '-'} "
             f"severity={corrupt_severity:.2f} "
             f"masked_audio_loss={use_masked_pretrain}")
 
@@ -372,13 +377,20 @@ def pretrain_decoders(model, train_loader, cfg, device):
                 img_mask = None
                 aud_mask = None
                 if corrupt_detail:
+                    cur_pre_img_mode = _select_family_mode(
+                        pre_img_modes, pre_img_mode, step, pre_family_sampling)
+                    cur_pre_aud_mode = _select_family_mode(
+                        pre_aud_modes, pre_aud_mode, step, pre_family_sampling)
                     x_img_detail, x_aud_detail, cue_masks = build_cue(
                         x_img, x_aud, "corrupt_both", cfg,
                         severity=corrupt_severity,
-                        img_mode=pre_img_mode, aud_mode=pre_aud_mode,
+                        img_mode=cur_pre_img_mode, aud_mode=cur_pre_aud_mode,
                         return_masks=True)
                     img_mask = cue_masks.get("img")
                     aud_mask = cue_masks.get("aud")
+                else:
+                    cur_pre_img_mode = pre_img_mode
+                    cur_pre_aud_mode = pre_aud_mode
 
                 img_state, aud_state = _pretrain_decoder_states(
                     model, x_img, x_aud, detail_dropout,
@@ -398,7 +410,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
                 mask_for_img_loss = None
                 img_masked_families = set(lc.get("img_masked_families", []))
                 if (pc.get("use_masked_image_loss", False)
-                        and pre_img_mode in img_masked_families
+                        and cur_pre_img_mode in img_masked_families
                         and img_mask is not None):
                     mask_for_img_loss = img_mask
                 loss_img = _img_recon_loss(rec_img, x_img, lc,
@@ -409,7 +421,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
                 mask_for_loss = None
                 masked_families = set(lc.get("aud_masked_families", []))
                 if (use_masked_pretrain
-                        and pre_aud_mode in masked_families
+                        and cur_pre_aud_mode in masked_families
                         and aud_mask is not None):
                     mask_for_loss = aud_mask
                 loss_aud = _aud_recon_loss(rec_aud, x_aud, lc,
@@ -505,6 +517,14 @@ def _build_train_optimizer(model, cfg):
     if aud_refiner_params:
         groups.append({"params": aud_refiner_params, "lr": base_lr * aud_mult})
     return torch.optim.Adam(groups, lr=base_lr, weight_decay=wd)
+
+
+def _select_family_mode(pool, fallback, step, strategy="balanced"):
+    if pool:
+        if str(strategy).lower() == "balanced":
+            return pool[int(step) % len(pool)]
+        return random.choice(pool)
+    return fallback
 
 
 def _mode_enabled(cue_mode, modes):

@@ -122,13 +122,29 @@ def sample_train_severity(cfg, epoch):
 def resolve_train_corrupt_modes(cfg, epoch, step=None):
     """训练用残缺 family 选择（受控池 + 可选课程式分阶段）。
 
-    返回 (img_mode, aud_mode)。图像沿用 corruption.img_mode；音频优先按
+    返回 (img_mode, aud_mode)。图像从 img_train_modes 采样；音频优先按
     aud_family_curriculum（early/mid/late）分阶段，否则从 aud_train_modes 采样。
     """
     import random as _r
-    from data.corruption import AUD_TRAIN_MODES
+    from data.corruption import AUD_TRAIN_MODES, IMG_TRAIN_MODES
     cc = cfg["corruption"]
-    img_mode = cc.get("img_mode", "random")
+
+    def choose(pool, strategy, fallback):
+        if pool:
+            if isinstance(strategy, dict):
+                strategy = strategy.get("mode", "random")
+            if str(strategy).lower() == "balanced":
+                step_idx = 0 if step is None else int(step)
+                return pool[step_idx % len(pool)]
+            return _r.choice(pool)
+        return fallback
+
+    img_pool = cc.get("img_train_modes", IMG_TRAIN_MODES)
+    img_mode = choose(
+        img_pool,
+        cc.get("img_family_sampling", cc.get("family_sampling", "random")),
+        cc.get("img_mode", "random"),
+    )
 
     sched = cc.get("aud_family_curriculum") or {}
     if sched.get("enabled", False):
@@ -143,17 +159,11 @@ def resolve_train_corrupt_modes(cfg, epoch, step=None):
     else:
         pool = cc.get("aud_train_modes", AUD_TRAIN_MODES)
 
-    if pool:
-        strategy = cc.get("aud_family_sampling", "random")
-        if isinstance(strategy, dict):
-            strategy = strategy.get("mode", "random")
-        if str(strategy).lower() == "balanced":
-            step_idx = 0 if step is None else int(step)
-            aud_mode = pool[step_idx % len(pool)]
-        else:
-            aud_mode = _r.choice(pool)
-    else:
-        aud_mode = cc.get("aud_mode", "random")
+    aud_mode = choose(
+        pool,
+        cc.get("aud_family_sampling", cc.get("family_sampling", "random")),
+        cc.get("aud_mode", "random"),
+    )
     return img_mode, aud_mode
 
 

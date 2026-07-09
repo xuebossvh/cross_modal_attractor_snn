@@ -69,6 +69,9 @@ decoder_pretrain:
   corrupt_severity: 0.4
   img_mode: "occlusion"
   aud_mode: "time_mask"
+  img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
+  aud_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+  family_sampling: "balanced"
   use_masked_audio_loss: true
   use_masked_image_loss: true
   train_audio_refiner: true
@@ -150,28 +153,32 @@ corruption:
   train_severity: 0.4
   img_mode: "occlusion"
   aud_mode: "time_mask"
+  img_family_sampling: "balanced"
   aud_family_sampling: "balanced"
   curriculum_mode: "staged"
   severity_min: 0.1
   severity_max: 0.4
   stage1_end: 20
   stage2_end: 35
-  aud_train_modes: ["time_mask"]
+  img_train_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
+  aud_train_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
   aud_family_curriculum:
     enabled: false
-    early: ["time_mask"]
-    mid: ["time_mask"]
-    late: ["time_mask"]
+    early: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+    mid: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+    late: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
   eval_fixed:
     img_mode: "occlusion"
     aud_mode: "time_mask"
+    img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
+    aud_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
 
 loss:
   lambda_cls: 1.0
   lambda_cls_aud_only_mult: 2.0
   lambda_img: 1.0
   lambda_img_masked: 1.0
-  img_masked_families: ["occlusion"]
+  img_masked_families: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
   lambda_aud: 4.0
   aud_weight_gamma: 5.0
   lambda_aud_grad: 1.0
@@ -179,7 +186,7 @@ loss:
   aud_foreground_top_fraction: 0.15
   lambda_aud_marginal: 0.15
   lambda_aud_masked: 1.0
-  aud_masked_families: ["time_mask"]
+  aud_masked_families: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
   lambda_aud_active: 1.0
   lambda_aud_ssim: 0.0
   lambda_aud_masked_grad: 0.0

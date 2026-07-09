@@ -44,7 +44,8 @@ from common import (fix_console_encoding, log, load_config, set_seed,
                     batch_reconstruction_variance, format_table_row,
                     aud_collapse_stats)
 from paths import resolve_from_root, tables_dir
-from data.corruption import AUD_MODES, AUD_FAMILY_GROUPS
+from data.corruption import (AUD_MODES, AUD_FAMILY_GROUPS,
+                             AUD_TRAIN_MODES, IMG_TRAIN_MODES)
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
 
@@ -62,6 +63,29 @@ def _fixed_eval_families(cfg):
     """fixed_mask 协议使用的固定残缺 family（论文主对照）。"""
     ef = cfg["corruption"].get("eval_fixed", {}) or {}
     return ef.get("img_mode", "occlusion"), ef.get("aud_mode", "time_freq_block")
+
+
+def _as_list(value, fallback):
+    if value is None:
+        return list(fallback)
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _fixed_eval_family_pairs(cfg):
+    """fixed_mask 主评估 family 列表；默认 zip image/audio 五 family。"""
+    ef = cfg["corruption"].get("eval_fixed", {}) or {}
+    img_modes = _as_list(ef.get("img_modes"), [_fixed_eval_families(cfg)[0]])
+    aud_modes = _as_list(ef.get("aud_modes"), [_fixed_eval_families(cfg)[1]])
+    if len(img_modes) == 1 and len(aud_modes) > 1:
+        img_modes = img_modes * len(aud_modes)
+    if len(aud_modes) == 1 and len(img_modes) > 1:
+        aud_modes = aud_modes * len(img_modes)
+    if len(img_modes) != len(aud_modes):
+        n = min(len(img_modes), len(aud_modes))
+        img_modes, aud_modes = img_modes[:n], aud_modes[:n]
+    return list(zip(img_modes, aud_modes))
 
 
 def _audio_family_group(family):
@@ -319,8 +343,10 @@ def eval_audio_family_breakdown(model, loader, cfg, device, severity,
     rows = []
     fixed_img_mode, _ = _fixed_eval_families(cfg)
     modes = ["corrupt_aud_only", "corrupt_both"]
+    ef = cfg["corruption"].get("eval_fixed", {}) or {}
+    aud_families = _as_list(ef.get("aud_modes"), AUD_TRAIN_MODES)
     for mode_idx, mode in enumerate(modes):
-        for fam_idx, aud_family in enumerate(AUD_MODES):
+        for fam_idx, aud_family in enumerate(aud_families):
             r = eval_mode(
                 model, loader, cfg, mode, device, severity,
                 proto_img, proto_aud, max_batches=max_batches,
@@ -414,61 +440,72 @@ def main():
     eval_hdr = ["cue模式", "acc", "imgMSE", "PSNR", "SSIM", "imgMaskMSE",
                 "audMSE", "audSSIM", "audMaskMSE", "像素方差", "样本L2",
                 "tgt(img/aud)"]
-    fixed_img_mode, fixed_aud_mode = _fixed_eval_families(cfg)
+    family_pairs = (_fixed_eval_family_pairs(cfg)
+                    if args.protocol == "fixed_mask"
+                    else [_fixed_eval_families(cfg)])
     log("=" * sum(eval_w))
     log(f"[评估] 6 种 cue 模式  (corrupt severity={args.severity})  "
         f"协议={args.protocol}")
     if args.protocol == "fixed_mask":
-        log(f"  固定残缺：img={fixed_img_mode}  aud={fixed_aud_mode}  "
+        fam_text = ", ".join(
+            f"{i + 1}:{im}/{am}" for i, (im, am) in enumerate(family_pairs))
+        log(f"  固定残缺 family pairs: {fam_text}")
+        log(
             f"seed={int(cfg.get('seed', 0))}（masks 与模型无关，可跨版本对比）")
     else:
         log("  随机残缺：family 随机、不固定 seed（鲁棒性抽查，不可跨版本严格对比）")
     log("  指标按恢复粒度对照 target：img/aud 列后缀 (smp)=样本级  (cat)=类别代表原型")
-    log("=" * sum(eval_w))
-    log(format_table_row(eval_hdr, eval_w, eval_a))
-    diag_rows = []
-    attr_rows = []
-    for mi, mode in enumerate(EVAL_MODES):
-        r = eval_mode(model, test_loader, cfg, mode, device,
-                      args.severity, proto_img, proto_aud, args.max_batches,
-                      protocol=args.protocol, mode_idx=mi)
-        tgt = f"{r['img_kind']}/{r['aud_kind']}"
-        log(format_table_row([
-            mode, f"{r['acc']*100:.1f}%",
-            f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['ssim']:.3f}",
-            _fmt_float(r["img_masked_mse"]),
-            f"{r['aud_mse']:.4f}",
-            _fmt_float(r["aud_ssim"], digits=3),
-            _fmt_float(r["aud_masked_mse"]),
-            f"{r['pix_var']:.4f}", f"{r['pair_l2']:.4f}",
-            tgt,
-        ], eval_w, eval_a))
-        diag_rows.append((mode, r["diag"]))
-        attr_rows.append((mode, r))
+    for fam_idx, (fixed_img_mode, fixed_aud_mode) in enumerate(family_pairs):
+        log("=" * sum(eval_w))
+        log(f"[评估 family {fam_idx + 1}/{len(family_pairs)}] "
+            f"img={fixed_img_mode}  aud={fixed_aud_mode}")
+        log(format_table_row(eval_hdr, eval_w, eval_a))
+        diag_rows = []
+        attr_rows = []
+        for mi, mode in enumerate(EVAL_MODES):
+            r = eval_mode(
+                model, test_loader, cfg, mode, device,
+                args.severity, proto_img, proto_aud, args.max_batches,
+                protocol=args.protocol, mode_idx=fam_idx * 100 + mi,
+                fixed_img_mode_override=fixed_img_mode,
+                fixed_aud_mode_override=fixed_aud_mode)
+            tgt = f"{r['img_kind']}/{r['aud_kind']}"
+            log(format_table_row([
+                mode, f"{r['acc']*100:.1f}%",
+                f"{r['img_mse']:.4f}", f"{r['psnr']:.2f}", f"{r['ssim']:.3f}",
+                _fmt_float(r["img_masked_mse"]),
+                f"{r['aud_mse']:.4f}",
+                _fmt_float(r["aud_ssim"], digits=3),
+                _fmt_float(r["aud_masked_mse"]),
+                f"{r['pix_var']:.4f}", f"{r['pair_l2']:.4f}",
+                tgt,
+            ], eval_w, eval_a))
+            diag_rows.append((mode, r["diag"]))
+            attr_rows.append((mode, r))
 
-    _log_audio_diag(diag_rows)
+        _log_audio_diag(diag_rows)
 
-    attr_w = [18, 10, 10, 10, 10, 10, 10, 10, 10]
-    attr_a = ["l"] + ["r"] * 8
-    log("=" * sum(attr_w))
-    log("[归因] coarse/final masked/visible MSE（主看 mask coarse->final；"
-        "final visible≈0 是 paste-back 机制，不代表可见区学习）")
-    log(format_table_row(
-        ["cue模式", "imgCmask", "imgFmask", "imgCvis", "imgFvis",
-         "audCmask", "audFmask", "audCvis", "audFvis"],
-        attr_w, attr_a))
-    for mode, r in attr_rows:
-        log(format_table_row([
-            mode,
-            _fmt_float(r["img_coarse_masked_mse"]),
-            _fmt_float(r["img_masked_mse"]),
-            _fmt_float(r["img_coarse_visible_mse"]),
-            _fmt_float(r["img_visible_mse"]),
-            _fmt_float(r["aud_coarse_masked_mse"]),
-            _fmt_float(r["aud_masked_mse"]),
-            _fmt_float(r["aud_coarse_visible_mse"]),
-            _fmt_float(r["aud_visible_mse"]),
-        ], attr_w, attr_a))
+        attr_w = [18, 10, 10, 10, 10, 10, 10, 10, 10]
+        attr_a = ["l"] + ["r"] * 8
+        log("=" * sum(attr_w))
+        log("[归因] coarse/final masked/visible MSE（主看 mask coarse->final；"
+            "final visible≈0 是 paste-back 机制，不代表可见区学习）")
+        log(format_table_row(
+            ["cue模式", "imgCmask", "imgFmask", "imgCvis", "imgFvis",
+             "audCmask", "audFmask", "audCvis", "audFvis"],
+            attr_w, attr_a))
+        for mode, r in attr_rows:
+            log(format_table_row([
+                mode,
+                _fmt_float(r["img_coarse_masked_mse"]),
+                _fmt_float(r["img_masked_mse"]),
+                _fmt_float(r["img_coarse_visible_mse"]),
+                _fmt_float(r["img_visible_mse"]),
+                _fmt_float(r["aud_coarse_masked_mse"]),
+                _fmt_float(r["aud_masked_mse"]),
+                _fmt_float(r["aud_coarse_visible_mse"]),
+                _fmt_float(r["aud_visible_mse"]),
+            ], attr_w, attr_a))
 
     if args.family_breakdown:
         eval_audio_family_breakdown(model, test_loader, cfg, device,

@@ -22,7 +22,8 @@ from paths import (ensure_output_dirs, resolve_from_root,
 from common import (fix_console_encoding, log, load_config, select_targets,
                     setup_matplotlib_chinese, batch_ssim, format_table_row,
                     aud_collapse_stats, build_cue, set_seed)
-from data.corruption import corrupt_audio, corrupt_image, AUD_MODES, IMG_MODES
+from data.corruption import (corrupt_audio, corrupt_image, AUD_MODES,
+                             IMG_MODES, AUD_TRAIN_MODES, IMG_TRAIN_MODES)
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
 
@@ -113,7 +114,8 @@ def _rec_col_title(is_mel, kind):
 def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred,
                    img_kind="sample", aud_kind="sample", retrieval_img=None,
                    proto_aud=None, img_mask=None, rec_img_coarse=None,
-                   aud_mask=None, rec_aud_coarse=None):
+                   aud_mask=None, rec_aud_coarse=None,
+                   img_family_labels=None, aud_family_labels=None):
     """input_specs: [(tensor, is_mel, col_title), ...]"""
     cols = []
     for tensor, is_mel, title in input_specs:
@@ -128,7 +130,8 @@ def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred
             "title": "image mask",
             "is_mel": False,
             "data": lambda i, m=img_mask: m[i, 0],
-            "foot_fn": lambda i: "1=missing",
+            "foot_fn": lambda i, fam=img_family_labels: (
+                f"{fam[i]} | 1=missing" if fam is not None else "1=missing"),
         })
     if rec_img_coarse is not None:
         cols.append({
@@ -155,7 +158,8 @@ def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred
             "title": "audio mask",
             "is_mel": True,
             "data": lambda i, m=aud_mask: m[i],
-            "foot_fn": lambda i: "1=missing",
+            "foot_fn": lambda i, fam=aud_family_labels: (
+                f"{fam[i]} | 1=missing" if fam is not None else "1=missing"),
         })
     if rec_aud_coarse is not None:
         cols.append({
@@ -192,7 +196,8 @@ def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred
 def _plot_demo(k, labels, tgt_img, tgt_aud, pred, out_path, suptitle,
                input_specs, outputs, img_kind="sample", aud_kind="sample",
                retrieval_img=None, img_mask=None, rec_img_coarse=None,
-               aud_mask=None, rec_aud_coarse=None):
+               aud_mask=None, rec_aud_coarse=None,
+               img_family_labels=None, aud_family_labels=None):
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
 
@@ -207,7 +212,9 @@ def _plot_demo(k, labels, tgt_img, tgt_aud, pred, out_path, suptitle,
                           proto_aud=outputs.get("proto_aud"),
                           img_mask=img_mask,
                           rec_img_coarse=rec_img_coarse,
-                          aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse)
+                          aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse,
+                          img_family_labels=img_family_labels,
+                          aud_family_labels=aud_family_labels)
     ncols = len(cols)
 
     # 布局：每样本占「大图行 + 标签行」；标签行 = 上下两图之间的间隙
@@ -372,6 +379,51 @@ def _make_visible_img_cue_with_mask(clean, prefer_modes, min_mse=0.003,
     return out, out_mask
 
 
+def _as_list(value, fallback):
+    if value is None:
+        return list(fallback)
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _demo_family_modes(cfg, args):
+    ef = cfg["corruption"].get("eval_fixed", {}) or {}
+    img_modes = _as_list(ef.get("img_modes"), IMG_TRAIN_MODES)
+    aud_modes = _as_list(ef.get("aud_modes"), AUD_TRAIN_MODES)
+    if args.img_corrupt_mode is not None:
+        img_modes = [args.img_corrupt_mode]
+    if args.aud_corrupt_mode is not None:
+        aud_modes = [args.aud_corrupt_mode]
+    return img_modes, aud_modes
+
+
+def _expand_demo_family_labels(modes, k):
+    if not modes:
+        return [""] * k
+    per_family = max(1, k // len(modes))
+    labels = []
+    for mode in modes:
+        labels.extend([mode] * per_family)
+    idx = 0
+    while len(labels) < k:
+        labels.append(modes[idx % len(modes)])
+        idx += 1
+    return labels[:k]
+
+
+def _make_family_cue_with_mask(clean, labels, corrupt_fn, severity):
+    out = clean.clone()
+    out_mask = torch.zeros_like(clean)
+    for i, mode in enumerate(labels):
+        cand, mask = corrupt_fn(
+            clean[i:i + 1], mode=mode, severity=severity, return_mask=True)
+        out[i] = cand[0]
+        if mask is not None:
+            out_mask[i] = mask[0]
+    return out, out_mask
+
+
 def _pred_conf(logits):
     """返回 (pred[B], confidence[B]) ，confidence = softmax 最大概率。"""
     prob = torch.softmax(logits, dim=1)
@@ -468,7 +520,8 @@ def _save_eval_table(text, path):
 
 def _plot_aud_only(k, labels, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
                    pred, img_kind, aud_kind, out_path, retrieval_img=None,
-                   proto_aud=None, aud_mask=None, rec_aud_coarse=None):
+                   proto_aud=None, aud_mask=None, rec_aud_coarse=None,
+                   aud_family_labels=None):
     _plot_demo(
         k, labels, tgt_img, tgt_aud, pred, out_path,
         suptitle="corrupted audio → recovered image & audio",
@@ -477,12 +530,14 @@ def _plot_aud_only(k, labels, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
         img_kind=img_kind, aud_kind=aud_kind,
         retrieval_img=retrieval_img,
         aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse,
+        aud_family_labels=aud_family_labels,
     )
 
 
 def _plot_img_only(k, labels, img_cue, rec_img, rec_aud, tgt_img, tgt_aud,
                    pred, img_kind, aud_kind, out_path, proto_aud=None,
-                   img_mask=None, rec_img_coarse=None):
+                   img_mask=None, rec_img_coarse=None,
+                   img_family_labels=None):
     _plot_demo(
         k, labels, tgt_img, tgt_aud, pred, out_path,
         suptitle="corrupted image → recovered image & audio",
@@ -490,13 +545,15 @@ def _plot_img_only(k, labels, img_cue, rec_img, rec_aud, tgt_img, tgt_aud,
         outputs={"img": rec_img, "aud": rec_aud, "proto_aud": proto_aud},
         img_kind=img_kind, aud_kind=aud_kind,
         img_mask=img_mask, rec_img_coarse=rec_img_coarse,
+        img_family_labels=img_family_labels,
     )
 
 
 def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
                pred, img_kind, aud_kind, out_path, proto_aud=None,
                img_mask=None, rec_img_coarse=None,
-               aud_mask=None, rec_aud_coarse=None):
+               aud_mask=None, rec_aud_coarse=None,
+               img_family_labels=None, aud_family_labels=None):
     _plot_demo(
         k, labels, tgt_img, tgt_aud, pred, out_path,
         suptitle="corrupted image & audio → recovered image & audio",
@@ -508,6 +565,8 @@ def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
         img_kind=img_kind, aud_kind=aud_kind,
         img_mask=img_mask, rec_img_coarse=rec_img_coarse,
         aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse,
+        img_family_labels=img_family_labels,
+        aud_family_labels=aud_family_labels,
     )
 
 
@@ -518,10 +577,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/v10d.yaml")
     ap.add_argument("--ckpt", default=None)
-    ap.add_argument("--num", type=int, default=8, help="可视化样本数（默认 8）")
+    ap.add_argument("--num", type=int, default=10,
+                    help="可视化样本数（fixed_mask 默认 10；5 family × 2）")
     ap.add_argument("--severity", type=float, default=0.5)
-    ap.add_argument("--aud_corrupt_mode", default="time_mask")
-    ap.add_argument("--img_corrupt_mode", default="occlusion")
+    ap.add_argument("--aud_corrupt_mode", default=None,
+                    help="覆盖 demo 音频 family；默认使用 eval_fixed.aud_modes")
+    ap.add_argument("--img_corrupt_mode", default=None,
+                    help="覆盖 demo 图像 family；默认使用 eval_fixed.img_modes")
     ap.add_argument("--protocol", default="fixed_mask",
                     choices=["fixed_mask", "legacy_random"],
                     help="fixed_mask=固定可读残缺图 | legacy_random=随机 family 可视化")
@@ -572,6 +634,8 @@ def main():
 
     img_mask_i = img_mask_b = None
     aud_mask_a = aud_mask_b = None
+    img_family_labels = None
+    aud_family_labels = None
 
     if args.protocol == "legacy_random":
         img_cue_i, _, masks_i = build_cue(
@@ -588,12 +652,15 @@ def main():
         aud_mask_a = masks_a.get("aud")
         aud_mask_b = masks_b.get("aud")
     else:
-        img_cue_fixed, img_mask_fixed = _make_visible_img_cue(
-            x_img, prefer_mode=args.img_corrupt_mode,
-            max_severity=args.severity, return_mask=True)
-        aud_cue_fixed, aud_mask_fixed = _make_visible_aud_cue(
-            x_aud, prefer_mode=args.aud_corrupt_mode,
-            max_severity=args.severity, return_mask=True)
+        img_modes, aud_modes = _demo_family_modes(cfg, args)
+        img_family_labels = _expand_demo_family_labels(img_modes, k)
+        aud_family_labels = _expand_demo_family_labels(aud_modes, k)
+        log("[demo] fixed family labels: "
+            f"img={img_family_labels} aud={aud_family_labels}")
+        img_cue_fixed, img_mask_fixed = _make_family_cue_with_mask(
+            x_img, img_family_labels, corrupt_image, args.severity)
+        aud_cue_fixed, aud_mask_fixed = _make_family_cue_with_mask(
+            x_aud, aud_family_labels, corrupt_audio, args.severity)
         img_cue_i = img_cue_b = img_cue_fixed
         aud_cue_a = aud_cue_b = aud_cue_fixed
         img_mask_i = img_mask_b = img_mask_fixed
@@ -678,18 +745,22 @@ def main():
                    tgt_img_a.cpu(), tgt_aud_a.cpu(), pred_a,
                    img_k_a, aud_k_a, args.out_aud, retrieval_img=ret_img_a,
                    proto_aud=proto_aud_cpu,
-                   aud_mask=aud_mask_a_np, rec_aud_coarse=coarse_a)
+                   aud_mask=aud_mask_a_np, rec_aud_coarse=coarse_a,
+                   aud_family_labels=aud_family_labels)
     _plot_img_only(k, labels_cpu, img_cue_i_np,
                    out_img["recovered_img"], out_img["recovered_aud"],
                    tgt_img_i.cpu(), tgt_aud_i.cpu(), pred_i,
                    img_k_i, aud_k_i, args.out_img, proto_aud=proto_aud_cpu,
-                   img_mask=img_mask_i_np, rec_img_coarse=coarse_i)
+                   img_mask=img_mask_i_np, rec_img_coarse=coarse_i,
+                   img_family_labels=img_family_labels)
     _plot_both(k, labels_cpu, img_cue_b_np, aud_cue_b_np,
                out_both["recovered_img"], out_both["recovered_aud"],
                tgt_img_b.cpu(), tgt_aud_b.cpu(), pred_b,
                img_k_b, aud_k_b, args.out_both, proto_aud=proto_aud_cpu,
                img_mask=img_mask_b_np, rec_img_coarse=coarse_b_img,
-               aud_mask=aud_mask_b_np, rec_aud_coarse=coarse_b)
+               aud_mask=aud_mask_b_np, rec_aud_coarse=coarse_b,
+               img_family_labels=img_family_labels,
+               aud_family_labels=aud_family_labels)
 
 
 if __name__ == "__main__":
