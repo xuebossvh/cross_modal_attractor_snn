@@ -62,7 +62,7 @@ decoder_pretrain:
   - pixel_delete
   - mask_vertical
   - mask_horizontal
-  - block_corner
+  - salt_mask
   aud_modes:
   - time_mask
   - freq_mask
@@ -153,7 +153,7 @@ corruption:
   - pixel_delete
   - mask_vertical
   - mask_horizontal
-  - block_corner
+  - salt_mask
   aud_train_modes:
   - time_mask
   - freq_mask
@@ -188,7 +188,7 @@ corruption:
     - pixel_delete
     - mask_vertical
     - mask_horizontal
-    - block_corner
+    - salt_mask
     aud_modes:
     - time_mask
     - freq_mask
@@ -205,7 +205,7 @@ loss:
   - pixel_delete
   - mask_vertical
   - mask_horizontal
-  - block_corner
+  - salt_mask
   lambda_aud: 4.0
   aud_weight_gamma: 5.0
   lambda_aud_grad: 1.0

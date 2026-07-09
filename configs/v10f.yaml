@@ -69,7 +69,7 @@ decoder_pretrain:
   corrupt_severity: 0.4
   img_mode: "occlusion"
   aud_mode: "time_mask"
-  img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
+  img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
   aud_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
   family_sampling: "balanced"
   use_masked_audio_loss: true
@@ -160,7 +160,7 @@ corruption:
   severity_max: 0.4
   stage1_end: 20
   stage2_end: 35
-  img_train_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
+  img_train_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
   aud_train_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
   aud_family_curriculum:
     enabled: false
@@ -170,7 +170,7 @@ corruption:
   eval_fixed:
     img_mode: "occlusion"
     aud_mode: "time_mask"
-    img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
+    img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
     aud_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
 
 loss:
@@ -178,7 +178,7 @@ loss:
   lambda_cls_aud_only_mult: 2.0
   lambda_img: 1.0
   lambda_img_masked: 1.0
-  img_masked_families: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "block_corner"]
+  img_masked_families: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
   lambda_aud: 4.0
   aud_weight_gamma: 5.0
   lambda_aud_grad: 1.0

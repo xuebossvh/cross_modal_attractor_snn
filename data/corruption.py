@@ -12,7 +12,7 @@ import torch
 
 IMG_TRAIN_MODES = [
     "occlusion", "pixel_delete", "mask_vertical",
-    "mask_horizontal", "block_corner",
+    "mask_horizontal", "salt_mask",
 ]
 IMG_MODES = IMG_TRAIN_MODES + [
     "gaussian", "mask_left", "mask_right", "mask_top", "mask_bottom",
@@ -26,8 +26,11 @@ AUD_FAMILY_GROUPS = {
 }
 
 # 受控训练残缺池（避免 full-random 让模型放弃样本级恢复）。
-# 仅保留结构化遮挡 + 少量噪声，不与 block 过度叠加。
-AUD_TRAIN_MODES = ["time_mask", "freq_mask", "time_freq_block", "gaussian"]
+# 默认保留 5 个带 mask 的谱图缺失 family，与 v10f 主协议一致。
+AUD_TRAIN_MODES = [
+    "time_mask", "freq_mask", "feature_dropout",
+    "partial_temporal", "time_freq_block",
+]
 
 
 def _resolve(mode, pool):
@@ -39,7 +42,7 @@ def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False):
 
     输入 : x_img [B, 1, H, W]，值域 [0, 1]
     模式 : occlusion / pixel_delete / mask_vertical / mask_horizontal /
-           block_corner / gaussian / mask_left / mask_right /
+           salt_mask / gaussian / mask_left / mask_right /
            mask_top / mask_bottom / random
     """
     x = x_img.clone()
@@ -85,21 +88,10 @@ def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False):
             else:
                 x[:, :, H - h:, :] = 0.0
                 mask[:, :, H - h:, :] = 1.0
-    elif m == "block_corner":
-        # 在四个角之一遮挡一个连续方块
-        bh = max(1, int(round(s * H)))
-        bw = max(1, int(round(s * W)))
-        mask = torch.zeros_like(x)
-        corners = (
-            (0, 0),
-            (0, max(0, W - bw)),
-            (max(0, H - bh), 0),
-            (max(0, H - bh), max(0, W - bw)),
-        )
-        for i in range(B):
-            top, left = random.choice(corners)
-            x[i, :, top:top + bh, left:left + bw] = 0.0
-            mask[i, :, top:top + bh, left:left + bw] = 1.0
+    elif m == "salt_mask":
+        # 白色缺失：随机像素置 1，同时把这些位置标为 missing。
+        mask = (torch.rand_like(x) < s).float()
+        x = x * (1.0 - mask) + mask
     elif m == "gaussian":
         # 叠加高斯噪声后裁剪
         x = x + s * torch.randn_like(x)
