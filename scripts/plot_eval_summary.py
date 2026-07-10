@@ -1,8 +1,8 @@
 """将评估结果转为表格图 + CSV。
 
 支持两种输入（自动识别）：
-  1. demo_eval_table.txt  — 【汇总】段（8 列）
-  2. eval_*.log           — evaluate.py 全量评估日志（兼容 v10a-v10e）
+  1. demo_eval_table.txt  — 【汇总】段（10 列，含 img/aud mask MSE）
+  2. eval_*.log           — evaluate.py 全量评估日志；多 family 时写入 tables/<family_slug>/
   3. 上述日志若含 [音频塌缩诊断] 段，自动生成 aud_diag 表格（PNG+CSV）
 
 用法：
@@ -78,62 +78,23 @@ _ATTR_ROW_RE_LEGACY = re.compile(
     r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
 )
+_FAMILY_HDR_RE = re.compile(
+    r"\[评估 family (\d+)/(\d+)\] img=(\S+)\s+aud=(\S+)",
+)
 
 
-def parse_eval_summary(path):
-    """解析 demo_eval_table.txt【汇总】段。"""
-    text = Path(path).read_text(encoding="utf-8")
-    rows = []
-    in_block = False
-    past_sep = False
-    for line in text.splitlines():
-        if "【汇总】" in line:
-            in_block = True
-            continue
-        if not in_block:
-            continue
-        if line.strip().startswith("-"):
-            past_sep = True
-            continue
-        if not past_sep or not line.strip():
-            continue
-        if line.strip().startswith("【"):
-            break
-        cols = re.split(r"\s{2,}", line.strip())
-        if len(cols) < 6:
-            continue
-        rows.append({
-            "mode": cols[0],
-            "acc": float(cols[1].rstrip("%")) / 100.0,
-            "img_ssim": float(cols[2]),
-            "img_mse": float(cols[3]),
-            "aud_ssim": float(cols[4]),
-            "aud_mse": float(cols[5]),
-            "img_tgt": cols[6] if len(cols) > 6 else "",
-            "aud_tgt": cols[7] if len(cols) > 7 else "",
-        })
-    if not rows:
-        raise ValueError(f"未在 {path} 中找到【汇总】数据。")
-    return rows, "demo"
+def _maybe_float(text):
+    return None if text == "nan" else float(text)
 
 
-def parse_eval_full_log(path):
-    """解析 evaluate.py 全量评估日志中的 6 行结果。"""
-    text = Path(path).read_text(encoding="utf-8")
+def _order_eval_rows(by_mode):
+    return [by_mode[m] for m in _EVAL_MODES if m in by_mode]
+
+
+def _parse_full_rows_from_text(text):
+    """从日志片段解析 6 种 cue 模式主评估行。"""
     by_mode = {}
-    severity = None
-    n_test = None
-
-    def _maybe_float(text):
-        return None if text == "nan" else float(text)
-
     for line in text.splitlines():
-        m = re.search(r"corrupt severity=([\d.]+)", line)
-        if m:
-            severity = float(m.group(1))
-        m = re.search(r"\[dataset\] test.*n=(\d+)", line)
-        if m:
-            n_test = int(m.group(1))
         m = _FULL_ROW_V10E_RE.search(line)
         if m:
             img_mask_mse = _maybe_float(m.group(6))
@@ -190,19 +151,14 @@ def parse_eval_full_log(path):
                 "pair_l2": float(m.group(8)),
                 "tgt": m.group(9),
             }
-
-    rows = [by_mode[m] for m in _EVAL_MODES if m in by_mode]
-    if not rows:
-        raise ValueError(f"未在 {path} 中找到 evaluate.py 结果行。")
-    meta = {"severity": severity, "n_test": n_test}
-    return rows, "full", meta
+    return _order_eval_rows(by_mode)
 
 
-def parse_aud_collapse_diag(path):
-    """解析 evaluate.py / demo 日志末尾的 [音频塌缩诊断] 段。"""
+def _parse_aud_diag_from_text(text):
+    """从日志片段解析 [音频塌缩诊断] 段。"""
     rows = []
     in_block = False
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if "音频塌缩诊断" in line:
             in_block = True
             continue
@@ -231,23 +187,18 @@ def parse_aud_collapse_diag(path):
                 "tgt_max": float(m.group(7)),
                 "topk_recall": float(m.group(8)) / 100.0,
             })
-    if not rows:
-        raise ValueError(f"未在 {path} 中找到 [音频塌缩诊断] 数据行。")
     return rows
 
 
-def parse_attribution_table(path):
-    """解析 evaluate.py [归因] coarse/final masked/visible MSE 段。"""
+def _parse_attribution_from_text(text):
+    """从日志片段解析 [归因] 段。"""
     rows = []
     in_block = False
     past_hdr = False
-
-    def _maybe_float(text):
-        return None if text == "nan" else float(text)
-
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if "[归因]" in line:
             in_block = True
+            past_hdr = False
             continue
         if not in_block:
             continue
@@ -288,6 +239,163 @@ def parse_attribution_table(path):
                 "aud_coarse_visible_mse": None,
                 "aud_final_visible_mse": None,
             })
+    return rows
+
+
+def _split_family_blocks(text):
+    """按 [评估 family i/n] 切分多 family 日志。"""
+    parts = re.split(r"(?=\[评估 family \d+/\d+\])", text)
+    blocks = []
+    for part in parts:
+        m = _FAMILY_HDR_RE.search(part)
+        if not m:
+            continue
+        blocks.append({
+            "family_idx": int(m.group(1)),
+            "family_total": int(m.group(2)),
+            "img_mode": m.group(3),
+            "aud_mode": m.group(4),
+            "text": part,
+        })
+    return blocks
+
+
+def _family_slug(family):
+    if family.get("family_idx") is None:
+        return ""
+    return (
+        f"family{family['family_idx']:02d}_"
+        f"{family['img_mode']}_{family['aud_mode']}"
+    )
+
+
+def _family_dir(base_out, family):
+    """多 family 评估表写入 tables/<family_slug>/ 子目录。"""
+    p = Path(base_out)
+    slug = _family_slug(family)
+    if not slug:
+        return p.parent
+    return p.parent / slug
+
+
+def _family_artifact_path(base_out, family, stem):
+    return _family_dir(base_out, family) / f"{stem}.png"
+
+
+def _family_title(base_title, family):
+    slug = _family_slug(family)
+    if not slug:
+        return base_title
+    return (
+        f"{base_title} — img={family['img_mode']} / aud={family['aud_mode']} "
+        f"({family['family_idx']}/{family['family_total']})"
+    )
+
+
+def parse_eval_summary(path):
+    """解析 demo_eval_table.txt【汇总】段。"""
+    text = Path(path).read_text(encoding="utf-8")
+    rows = []
+    in_block = False
+    past_sep = False
+    for line in text.splitlines():
+        if "【汇总】" in line:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if line.strip().startswith("-"):
+            past_sep = True
+            continue
+        if not past_sep or not line.strip():
+            continue
+        if line.strip().startswith("【"):
+            break
+        cols = re.split(r"\s{2,}", line.strip())
+        if len(cols) < 6:
+            continue
+        row = {
+            "mode": cols[0],
+            "acc": float(cols[1].rstrip("%")) / 100.0,
+            "img_ssim": float(cols[2]),
+            "img_mse": float(cols[3]),
+            "aud_ssim": float(cols[4]),
+            "aud_mse": float(cols[5]),
+        }
+        if len(cols) >= 10:
+            row["img_masked_mse"] = _maybe_float(cols[6])
+            row["aud_masked_mse"] = _maybe_float(cols[7])
+            row["img_tgt"] = cols[8]
+            row["aud_tgt"] = cols[9]
+        else:
+            row["img_masked_mse"] = None
+            row["aud_masked_mse"] = None
+            row["img_tgt"] = cols[6] if len(cols) > 6 else ""
+            row["aud_tgt"] = cols[7] if len(cols) > 7 else ""
+        rows.append(row)
+    if not rows:
+        raise ValueError(f"未在 {path} 中找到【汇总】数据。")
+    return rows, "demo"
+
+
+def parse_eval_full_log(path):
+    """解析 evaluate.py 全量评估日志；多 family 时返回分 family 列表。"""
+    text = Path(path).read_text(encoding="utf-8")
+    severity = None
+    n_test = None
+    for line in text.splitlines():
+        m = re.search(r"corrupt severity=([\d.]+)", line)
+        if m:
+            severity = float(m.group(1))
+        m = re.search(r"\[dataset\] test.*n=(\d+)", line)
+        if m:
+            n_test = int(m.group(1))
+
+    blocks = _split_family_blocks(text)
+    meta = {"severity": severity, "n_test": n_test}
+    if blocks:
+        families = []
+        for block in blocks:
+            rows = _parse_full_rows_from_text(block["text"])
+            if not rows:
+                continue
+            families.append({
+                **block,
+                "rows": rows,
+                "aud_diag": _parse_aud_diag_from_text(block["text"]),
+                "attribution": _parse_attribution_from_text(block["text"]),
+            })
+        if not families:
+            raise ValueError(f"未在 {path} 中找到 evaluate.py 结果行。")
+        return families, "full_families", meta
+
+    rows = _parse_full_rows_from_text(text)
+    if not rows:
+        raise ValueError(f"未在 {path} 中找到 evaluate.py 结果行。")
+    family = {
+        "family_idx": None,
+        "family_total": None,
+        "img_mode": None,
+        "aud_mode": None,
+        "text": text,
+        "rows": rows,
+        "aud_diag": _parse_aud_diag_from_text(text),
+        "attribution": _parse_attribution_from_text(text),
+    }
+    return [family], "full_families", meta
+
+
+def parse_aud_collapse_diag(path):
+    """解析 evaluate.py / demo 日志末尾的 [音频塌缩诊断] 段。"""
+    rows = _parse_aud_diag_from_text(Path(path).read_text(encoding="utf-8"))
+    if not rows:
+        raise ValueError(f"未在 {path} 中找到 [音频塌缩诊断] 数据行。")
+    return rows
+
+
+def parse_attribution_table(path):
+    """解析 evaluate.py [归因] coarse/final masked/visible MSE 段。"""
+    rows = _parse_attribution_from_text(Path(path).read_text(encoding="utf-8"))
     if not rows:
         raise ValueError(f"未在 {path} 中找到 [归因] 数据行。")
     return rows
@@ -299,11 +407,52 @@ def detect_input(path):
         return parse_eval_summary(path)
     if any(m in text for m in _EVAL_MODES) and "imgMSE" in text:
         return parse_eval_full_log(path)
-    # 尝试 full log（无表头时仅靠结果行）
     try:
         return parse_eval_full_log(path)
     except ValueError:
         return parse_eval_summary(path)
+
+
+def _render_full_family_tables(families, base_out, base_title, meta=None):
+    """为每个 family 生成主表 + 归因 + 音频塌缩诊断表。"""
+    if base_out is None:
+        base_out = Path("full_eval_table.png")
+    base_out = Path(base_out)
+    sev = meta.get("severity") if meta else None
+    n_test = meta.get("n_test") if meta else None
+    if base_title is None:
+        parts = ["Full Test Evaluation"]
+        if n_test is not None:
+            parts.append(f"(n={n_test})")
+        if sev is not None:
+            parts.append(f"sev={sev}")
+        base_title = " ".join(parts)
+
+    outputs = []
+    for family in families:
+        main_out = _family_artifact_path(base_out, family, "full_eval")
+        title = _family_title(base_title, family)
+        png, csv = render_full_eval_table(family["rows"], title, main_out)
+        log(f"[plot] 主评估表 -> {png}")
+        log(f"[plot] CSV -> {csv}")
+        outputs.append((png, csv))
+
+        if family.get("aud_diag"):
+            diag_out = _family_artifact_path(base_out, family, "aud_diag")
+            d_png, d_csv = render_aud_diag_table(
+                family["aud_diag"], "Audio Collapse Diagnostics", diag_out)
+            log(f"[plot] 音频塌缩诊断表 -> {d_png}")
+            log(f"[plot] 音频塌缩诊断 CSV -> {d_csv}")
+
+        if family.get("attribution"):
+            attr_out = _family_artifact_path(base_out, family, "attribution")
+            a_png, a_csv = render_attribution_table(
+                family["attribution"], "Coarse vs Final Masked/Visible MSE",
+                attr_out)
+            log(f"[plot] 归因表 -> {a_png}")
+            log(f"[plot] 归因 CSV -> {a_csv}")
+
+    return outputs
 
 
 def _save_table_figure(fig, path, *, pad_inches=0.08):
@@ -367,15 +516,32 @@ def _render_table(headers, cell, col_widths, title, path, font_size=9):
 
 
 def render_demo_table(rows, title, path):
-    headers = ["", "acc", "img SSIM", "img MSE", "aud SSIM", "aud MSE",
-               "img target", "aud target"]
-    cell = [[
-        r["mode"], f"{r['acc']:.3f}",
-        f"{r['img_ssim']:.3f}", f"{r['img_mse']:.4f}",
-        f"{r['aud_ssim']:.3f}", f"{r['aud_mse']:.4f}",
-        r["img_tgt"], r["aud_tgt"],
-    ] for r in rows]
-    col_w = [0.13, 0.09, 0.11, 0.11, 0.11, 0.11, 0.165, 0.165]
+    has_img_mask = any(r.get("img_masked_mse") is not None for r in rows)
+    has_aud_mask = any(r.get("aud_masked_mse") is not None for r in rows)
+    if has_img_mask or has_aud_mask:
+        headers = ["", "acc", "img SSIM", "img MSE", "aud SSIM", "aud MSE",
+                   "img mask MSE", "aud mask MSE", "img target", "aud target"]
+        cell = [[
+            r["mode"], f"{r['acc']:.3f}",
+            f"{r['img_ssim']:.3f}", f"{r['img_mse']:.4f}",
+            f"{r['aud_ssim']:.3f}", f"{r['aud_mse']:.4f}",
+            f"{r['img_masked_mse']:.4f}"
+            if r.get("img_masked_mse") is not None else "nan",
+            f"{r['aud_masked_mse']:.4f}"
+            if r.get("aud_masked_mse") is not None else "nan",
+            r["img_tgt"], r["aud_tgt"],
+        ] for r in rows]
+        col_w = [0.11, 0.07, 0.09, 0.09, 0.09, 0.09, 0.10, 0.10, 0.13, 0.13]
+    else:
+        headers = ["", "acc", "img SSIM", "img MSE", "aud SSIM", "aud MSE",
+                   "img target", "aud target"]
+        cell = [[
+            r["mode"], f"{r['acc']:.3f}",
+            f"{r['img_ssim']:.3f}", f"{r['img_mse']:.4f}",
+            f"{r['aud_ssim']:.3f}", f"{r['aud_mse']:.4f}",
+            r["img_tgt"], r["aud_tgt"],
+        ] for r in rows]
+        col_w = [0.13, 0.09, 0.11, 0.11, 0.11, 0.11, 0.165, 0.165]
     return _render_table(headers, cell, col_w, title, path)
 
 
@@ -485,7 +651,7 @@ def _parse_n_samples(path):
 
 def _default_out(path, kind):
     p = Path(path)
-    if kind == "full":
+    if kind in ("full", "full_families"):
         return p.parent.parent / "tables" / "full_eval_table.png"
     return p.parent.parent / "figures" / "demo_eval_summary_table.png"
 
@@ -496,7 +662,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("input", nargs="?",
-                    default="outputs/outputs_v10a/tables/demo_eval_table.txt")
+                    default="outputs/outputs_v10f/tables/demo_eval_table.txt")
     ap.add_argument("--out", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--diag-out", default=None, help="音频塌缩诊断表输出路径")
@@ -508,57 +674,70 @@ def main():
     src = Path(args.input)
     out = Path(args.out) if args.out else None
 
-    if not args.diag_only:
-        result = detect_input(src)
-        if len(result) == 2:
-            rows, kind = result
-            meta = None
+    result = detect_input(src)
+    if len(result) == 2:
+        rows, kind = result
+        meta = None
+        families = None
+    else:
+        families, kind, meta = result
+        rows = None
+
+    if out is None:
+        out = _default_out(src, "full" if kind == "full_families" else kind)
+
+    if kind == "full_families":
+        if args.diag_only:
+            for family in families:
+                if not family.get("aud_diag"):
+                    continue
+                diag_out = (
+                    Path(args.diag_out)
+                    if args.diag_out
+                    else _family_artifact_path(out, family, "aud_diag")
+                )
+                diag_title = args.diag_title or _family_title(
+                    "Audio Collapse Diagnostics", family)
+                d_png, d_csv = render_aud_diag_table(
+                    family["aud_diag"], diag_title, diag_out)
+                log(f"[plot] 音频塌缩诊断表 -> {d_png}")
+                log(f"[plot] 音频塌缩诊断 CSV -> {d_csv}")
         else:
-            rows, kind, meta = result
-
-        if out is None:
-            out = _default_out(src, kind)
-
-        if kind == "full":
-            title = args.title or "Full Test Evaluation(n=1000)"
-            png, csv = render_full_eval_table(rows, title, out)
-        else:
-            title = args.title or "Demo Evaluation(n=8)"
-            png, csv = render_demo_table(rows, title, out)
-
+            _render_full_family_tables(families, out, args.title, meta)
+    elif not args.diag_only:
+        title = args.title or "Demo Evaluation(n=8)"
+        png, csv = render_demo_table(rows, title, out)
         log(f"[plot] 表格图 -> {png}")
         log(f"[plot] CSV -> {csv}")
 
-    diag_out = Path(args.diag_out) if args.diag_out else _default_aud_diag_out(
-        src, out)
-    try:
+        diag_out = Path(args.diag_out) if args.diag_out else _default_aud_diag_out(
+            src, out)
+        try:
+            diag_rows = parse_aud_collapse_diag(src)
+            diag_title = args.diag_title or "Audio Collapse Diagnostics"
+            d_png, d_csv = render_aud_diag_table(diag_rows, diag_title, diag_out)
+            log(f"[plot] 音频塌缩诊断表 -> {d_png}")
+            log(f"[plot] 音频塌缩诊断 CSV -> {d_csv}")
+        except ValueError as e:
+            log(f"[plot] 跳过音频塌缩诊断表：{e}")
+
+        attr_out = out.with_name(f"{out.stem}_attribution{out.suffix}")
+        try:
+            attr_rows = parse_attribution_table(src)
+            a_png, a_csv = render_attribution_table(
+                attr_rows, "Coarse vs Final Masked/Visible MSE", attr_out)
+            log(f"[plot] 归因表 -> {a_png}")
+            log(f"[plot] 归因 CSV -> {a_csv}")
+        except ValueError as e:
+            log(f"[plot] 跳过归因表：{e}")
+    else:
+        diag_out = Path(args.diag_out) if args.diag_out else _default_aud_diag_out(
+            src, out)
         diag_rows = parse_aud_collapse_diag(src)
-        if args.diag_title:
-            diag_title = args.diag_title
-        elif args.diag_only and args.title:
-            diag_title = args.title
-        else:
-            diag_title = "Audio Collapse Diagnostics"
+        diag_title = args.diag_title or args.title or "Audio Collapse Diagnostics"
         d_png, d_csv = render_aud_diag_table(diag_rows, diag_title, diag_out)
         log(f"[plot] 音频塌缩诊断表 -> {d_png}")
         log(f"[plot] 音频塌缩诊断 CSV -> {d_csv}")
-    except ValueError as e:
-        if args.diag_only:
-            raise
-        log(f"[plot] 跳过音频塌缩诊断表：{e}")
-
-    attr_out = None
-    if out is not None:
-        p = Path(out)
-        attr_out = p.with_name(f"{p.stem}_attribution{p.suffix}")
-    try:
-        attr_rows = parse_attribution_table(src)
-        attr_title = "Coarse vs Final Masked/Visible MSE"
-        a_png, a_csv = render_attribution_table(attr_rows, attr_title, attr_out)
-        log(f"[plot] 归因表 -> {a_png}")
-        log(f"[plot] 归因 CSV -> {a_csv}")
-    except ValueError as e:
-        log(f"[plot] 跳过归因表：{e}")
 
 
 if __name__ == "__main__":

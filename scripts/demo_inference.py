@@ -13,6 +13,7 @@
 import bootstrap  # noqa: F401
 
 import argparse
+import math
 
 import torch
 import torch.nn.functional as F
@@ -431,7 +432,26 @@ def _pred_conf(logits):
     return pred.cpu(), conf.cpu()
 
 
-def _mode_metrics(rec_img_logits, rec_aud, tgt_img, tgt_aud, labels, pred):
+def _region_error(rec, target, region, power=2):
+    """在 region 内计算 rec vs target 的 MSE/L1（与 evaluate.py 一致）。"""
+    region = region.to(dtype=rec.dtype)
+    denom = region.flatten(1).sum(dim=1)
+    valid = denom > 0
+    if not valid.any():
+        return float("nan")
+    err = (rec - target).abs() if power == 1 else (rec - target).pow(2)
+    per_sample = (err * region).flatten(1).sum(dim=1) / denom.clamp_min(1.0)
+    return per_sample[valid].mean().item()
+
+
+def _fmt_mask_mse(value):
+    if value is None or not math.isfinite(float(value)):
+        return "nan"
+    return f"{float(value):.4f}"
+
+
+def _mode_metrics(rec_img_logits, rec_aud, tgt_img, tgt_aud, labels, pred,
+                  img_mask=None, aud_mask=None):
     """单 cue 模式下的分类 / 图像 / 音频指标。"""
     rec_img = torch.sigmoid(rec_img_logits).cpu()
     rec_aud = rec_aud.cpu()
@@ -442,18 +462,25 @@ def _mode_metrics(rec_img_logits, rec_aud, tgt_img, tgt_aud, labels, pred):
     img_ssim = batch_ssim(rec_img, tgt_img).item()
     aud_mse = F.mse_loss(rec_aud, tgt_aud).item()
     aud_ssim = batch_ssim(rec_aud.unsqueeze(1), tgt_aud.unsqueeze(1)).item()
+    img_masked_mse = (
+        _region_error(rec_img, tgt_img, img_mask.cpu(), power=2)
+        if img_mask is not None else float("nan"))
+    aud_masked_mse = (
+        _region_error(rec_aud, tgt_aud, aud_mask.cpu(), power=2)
+        if aud_mask is not None else float("nan"))
     return {
         "acc": acc, "img_mse": img_mse, "img_ssim": img_ssim,
         "aud_mse": aud_mse, "aud_ssim": aud_ssim,
+        "img_masked_mse": img_masked_mse, "aud_masked_mse": aud_masked_mse,
     }
 
 
 def _format_eval_table(rows, k):
     """生成评估表文本（汇总 + 逐样本），中英文混排按显示宽度对齐。"""
-    sum_w = [14, 10, 10, 10, 10, 10, 12, 12]
-    sum_a = ["l", "r", "r", "r", "r", "r", "r", "r"]
+    sum_w = [14, 10, 10, 10, 10, 10, 12, 12, 12, 12]
+    sum_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
     sum_hdr = ["模式", "分类ACC", "图像SSIM", "图像MSE", "音频SSIM", "音频MSE",
-               "img目标", "aud目标"]
+               "图像maskMSE", "音频maskMSE", "img目标", "aud目标"]
     sep = "-" * sum(sum_w)
 
     lines = [
@@ -469,6 +496,8 @@ def _format_eval_table(rows, k):
             r["mode"], f"{r['acc']*100:.1f}%",
             f"{r['img_ssim']:.3f}", f"{r['img_mse']:.4f}",
             f"{r['aud_ssim']:.3f}", f"{r['aud_mse']:.4f}",
+            _fmt_mask_mse(r.get("img_masked_mse")),
+            _fmt_mask_mse(r.get("aud_masked_mse")),
             r["img_tgt"], r["aud_tgt"],
         ], sum_w, sum_a))
 
@@ -575,7 +604,7 @@ def main():
     setup_matplotlib_chinese()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v10d.yaml")
+    ap.add_argument("--config", default="configs/v10f.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--num", type=int, default=10,
                     help="可视化样本数（fixed_mask 默认 10；5 family × 2）")
@@ -699,11 +728,14 @@ def main():
     rec_aud_b = out_both["recovered_aud"].cpu()
 
     m_a = _mode_metrics(out_aud["recovered_img"], rec_aud_a,
-                        tgt_img_a.cpu(), tgt_aud_a.cpu(), labels_cpu, pred_a)
+                        tgt_img_a.cpu(), tgt_aud_a.cpu(), labels_cpu, pred_a,
+                        aud_mask=aud_mask_a)
     m_i = _mode_metrics(out_img["recovered_img"], rec_aud_i,
-                        tgt_img_i.cpu(), tgt_aud_i.cpu(), labels_cpu, pred_i)
+                        tgt_img_i.cpu(), tgt_aud_i.cpu(), labels_cpu, pred_i,
+                        img_mask=img_mask_i)
     m_b = _mode_metrics(out_both["recovered_img"], rec_aud_b,
-                        tgt_img_b.cpu(), tgt_aud_b.cpu(), labels_cpu, pred_b)
+                        tgt_img_b.cpu(), tgt_aud_b.cpu(), labels_cpu, pred_b,
+                        img_mask=img_mask_b, aud_mask=aud_mask_b)
 
     eval_rows = [
         {"mode": "audio-only", "labels": labels_cpu, "pred": pred_a,
