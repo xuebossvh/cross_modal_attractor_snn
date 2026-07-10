@@ -123,11 +123,35 @@ def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False):
     return x
 
 
+def _active_trailing_window(sample, width, threshold_ratio=0.1):
+    """Return a fixed-width window ending at the last active speech frame."""
+    total_frames = sample.size(-1)
+    width = max(0, min(int(width), total_frames))
+    if width == 0:
+        return total_frames, total_frames
+
+    frame_energy = sample.detach().abs().mean(dim=0)
+    peak = frame_energy.max()
+    if not torch.isfinite(peak) or peak.item() <= 1e-8:
+        return total_frames - width, total_frames
+
+    active = torch.nonzero(
+        frame_energy >= peak * float(threshold_ratio), as_tuple=False
+    ).flatten()
+    if active.numel() == 0:
+        return total_frames - width, total_frames
+
+    end = min(total_frames, int(active[-1].item()) + 1)
+    end = max(width, end)
+    start = end - width
+    return start, end
+
+
 def corrupt_audio(x_aud, mode="random", severity=0.5, return_mask=False):
     """损坏音频 cue（作用于 2D log-mel 特征 [B, n_mels, n_frames]）。
 
-    模式 : gaussian / time_mask / freq_mask /
-           feature_dropout / partial_temporal / random
+    模式 : gaussian / time_mask / freq_mask / feature_dropout /
+           partial_temporal / time_freq_block / random
     """
     x = x_aud.clone()
     if x.dim() == 2:                       # [B, F] -> 不可做时间/频率 mask，仅噪声/dropout
@@ -162,12 +186,14 @@ def corrupt_audio(x_aud, mode="random", severity=0.5, return_mask=False):
         x = x * keep
         mask = 1.0 - keep
     elif m == "partial_temporal":
-        # 只保留前 (1-s) 比例的帧，后段全遮（部分时序 cue）
+        # 遮挡真实语音的 trailing segment，避免固定尾部只命中 padding/silence。
         w = int(round(s * Tf))
         mask = torch.zeros_like(x)
         if w > 0:
-            x[:, :, Tf - w:] = 0.0
-            mask[:, :, Tf - w:] = 1.0
+            for i in range(B):
+                t0, t1 = _active_trailing_window(x_aud[i], w)
+                x[i, :, t0:t1] = 0.0
+                mask[i, :, t0:t1] = 1.0
     elif m == "time_freq_block":
         # 同时遮挡一段连续帧 × 一段连续频带（二维块遮挡）
         wt = int(round(s * Tf))

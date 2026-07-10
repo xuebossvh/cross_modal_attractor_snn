@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v10f.yaml
+    python -u scripts/train.py --config configs/v11a.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -111,6 +111,17 @@ def _masked_audio_error(rec, target, mask, power=2):
     return per_sample.mean()
 
 
+def _masked_audio_weighted_mse(rec, target, mask, gamma=5.0):
+    """缺失区能量加权 MSE；高能语音位置比静音位置权重更高。"""
+    mask = mask.to(device=rec.device, dtype=rec.dtype)
+    weight = 1.0 + float(gamma) * target.clamp_min(0.0)
+    denom = mask.flatten(1).sum(dim=1).clamp_min(1.0)
+    per_sample = (
+        weight * (rec - target).pow(2) * mask
+    ).flatten(1).sum(dim=1) / denom
+    return per_sample.mean()
+
+
 def _masked_tf_grad_loss(rec, target, mask):
     """缺失区时频一阶差分 L1（F4，逐样本归一）。"""
     m = mask.to(device=rec.device, dtype=rec.dtype)
@@ -148,6 +159,11 @@ def _aud_recon_loss(rec, target, lc, mask=None):
             + _masked_audio_error(rec, target, mask, power=2)
         )
         loss = loss + lam_masked * loss_masked
+    lam_masked_weighted = lc.get("lambda_aud_masked_weighted", 0.0)
+    if lam_masked_weighted > 0 and mask is not None:
+        loss = loss + lam_masked_weighted * _masked_audio_weighted_mse(
+            rec, target, mask,
+            gamma=lc.get("aud_masked_weight_gamma", gamma))
     lam_ssim = lc.get("lambda_aud_ssim", 0.0)
     if lam_ssim > 0:
         ssim = batch_ssim(rec.unsqueeze(1), target.unsqueeze(1))
@@ -439,6 +455,9 @@ def pretrain_decoders(model, train_loader, cfg, device):
                         rec_aud, x_aud, mask_for_loss, power=1).item()
                     logs["aud_mask_mse"] = _masked_audio_error(
                         rec_aud, x_aud, mask_for_loss, power=2).item()
+                    logs["aud_mask_wmse"] = _masked_audio_weighted_mse(
+                        rec_aud, x_aud, mask_for_loss,
+                        gamma=lc.get("aud_masked_weight_gamma", 5.0)).item()
                     visible_mask = 1.0 - mask_for_loss.to(
                         device=rec_aud.device, dtype=rec_aud.dtype)
                     logs["aud_visible_l1"] = _masked_audio_error(
@@ -732,7 +751,8 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
 
     img_masked_families = set(lc.get("img_masked_families", []))
     use_img_mask = (
-        cue_mode in ("corrupt_img_only", "corrupt_both")
+        cue_mode in ("corrupt_img_only", "corrupt_both",
+                     "corrupt_img_clean_aud")
         and img_kind == "sample"
         and img_mode in img_masked_families
         and img_mask is not None
@@ -758,7 +778,8 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
 
     masked_families = set(lc.get("aud_masked_families", []))
     use_aud_mask = (
-        cue_mode in ("corrupt_aud_only", "corrupt_both")
+        cue_mode in ("corrupt_aud_only", "corrupt_both",
+                     "clean_img_corrupt_aud")
         and aud_kind == "sample"
         and aud_mode in masked_families
         and aud_mask is not None
@@ -774,6 +795,9 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             out_r["recovered_aud"], tgt_aud, aud_mask, power=1).item()
         logs["aud_mask_mse"] = _masked_audio_error(
             out_r["recovered_aud"], tgt_aud, aud_mask, power=2).item()
+        logs["aud_mask_wmse"] = _masked_audio_weighted_mse(
+            out_r["recovered_aud"], tgt_aud, aud_mask,
+            gamma=lc.get("aud_masked_weight_gamma", 5.0)).item()
         visible_mask = 1.0 - aud_mask.to(
             device=out_r["recovered_aud"].device,
             dtype=out_r["recovered_aud"].dtype)
@@ -804,7 +828,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v10f.yaml")
+    ap.add_argument("--config", default="configs/v11a.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)

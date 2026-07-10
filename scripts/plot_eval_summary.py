@@ -25,10 +25,12 @@ from common import fix_console_encoding, log, setup_matplotlib_chinese
 
 _EVAL_MODES = (
     "corrupt_img_only", "corrupt_aud_only", "corrupt_both",
+    "clean_img_corrupt_aud", "corrupt_img_clean_aud",
     "clean_img_only", "clean_aud_only", "clean_both",
 )
 _FULL_ROW_RE = re.compile(
     r"(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
     r"clean_img_only|clean_aud_only|clean_both)\s+"
     r"(\d+\.\d+)%\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
@@ -38,6 +40,7 @@ _FULL_ROW_RE = re.compile(
 # v10b+ 全量评估日志含 audSSIM / maskMSE 两列（在 audMSE 与像素方差之间）
 _FULL_ROW_V10B_RE = re.compile(
     r"(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
     r"clean_img_only|clean_aud_only|clean_both)\s+"
     r"(\d+\.\d+)%\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"   # imgMSE PSNR imgSSIM
@@ -49,6 +52,7 @@ _FULL_ROW_V10B_RE = re.compile(
 # v10e+ 全量评估日志同时含 imgMaskMSE / audMaskMSE
 _FULL_ROW_V10E_RE = re.compile(
     r"(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
     r"clean_img_only|clean_aud_only|clean_both)\s+"
     r"(\d+\.\d+)%\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"   # imgMSE PSNR imgSSIM
@@ -66,6 +70,7 @@ _AUD_DIAG_ROW_RE = re.compile(
 )
 _ATTR_ROW_RE = re.compile(
     r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
     r"clean_img_only|clean_aud_only|clean_both)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
@@ -74,6 +79,7 @@ _ATTR_ROW_RE = re.compile(
 )
 _ATTR_ROW_RE_LEGACY = re.compile(
     r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
     r"clean_img_only|clean_aud_only|clean_both)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
@@ -92,7 +98,7 @@ def _order_eval_rows(by_mode):
 
 
 def _parse_full_rows_from_text(text):
-    """从日志片段解析 6 种 cue 模式主评估行。"""
+    """从日志片段解析当前 cue 模式主评估行。"""
     by_mode = {}
     for line in text.splitlines():
         m = _FULL_ROW_V10E_RE.search(line)
@@ -662,7 +668,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("input", nargs="?",
-                    default="outputs/outputs_v10f/tables/demo_eval_table.txt")
+                    default="outputs/outputs_v11a/tables/demo_eval_table.txt")
     ap.add_argument("--out", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--diag-out", default=None, help="音频塌缩诊断表输出路径")

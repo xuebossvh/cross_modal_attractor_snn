@@ -59,7 +59,7 @@ def format_table_row(values, widths, aligns):
     )
 
 
-def load_config(path="configs/v10f.yaml"):
+def load_config(path="configs/v11a.yaml"):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
@@ -70,33 +70,46 @@ def set_seed(seed):
     torch.manual_seed(seed)
 
 
-# 6 种 cue 模式（残缺/干净 × 图像/音频/双模态）
+# 8 种 cue 模式：原 6 种 + 两种 clean/corrupt 非对称双模态对照。
 CUE_MODES = [
     "corrupt_img_only", "corrupt_aud_only", "corrupt_both",
+    "clean_img_corrupt_aud", "corrupt_img_clean_aud",
     "clean_img_only", "clean_aud_only", "clean_both",
+]
+
+CUE_MODE_PROB_KEYS = {
+    "corrupt_img_only": "p_corrupt_img_only",
+    "corrupt_aud_only": "p_corrupt_aud_only",
+    "corrupt_both": "p_corrupt_both",
+    "clean_img_corrupt_aud": "p_clean_img_corrupt_aud",
+    "corrupt_img_clean_aud": "p_corrupt_img_clean_aud",
+    "clean_img_only": "p_clean_img_only",
+    "clean_aud_only": "p_clean_aud_only",
+    "clean_both": "p_clean_both",
+}
+
+BIMODAL_CUE_MODES = [
+    "corrupt_both", "clean_img_corrupt_aud",
+    "corrupt_img_clean_aud", "clean_both",
 ]
 
 
 def sample_cue_mode(cfg):
     """按 cue_modes 概率采样一个 cue 模式。
 
-    若 ablation.use_modality_dropout=False，则只在「双模态」模式中采样
-    （corrupt_both / clean_both），即不做单模态屏蔽。
+    若 ablation.use_modality_dropout=False，则只在双模态模式中采样，
+    包括两种非对称 clean/corrupt 对照。
     """
     use_md = cfg.get("ablation", {}).get("use_modality_dropout", True)
     cm = cfg["cue_modes"]
     if not use_md:
-        # 仅双模态：按 corrupt_both / clean_both 的相对比例
-        pc = cm["p_corrupt_both"]
-        pcl = cm["p_clean_both"]
-        r = random.random() * (pc + pcl)
-        return "corrupt_both" if r < pc else "clean_both"
-
-    weights = [
-        cm["p_corrupt_img_only"], cm["p_corrupt_aud_only"], cm["p_corrupt_both"],
-        cm["p_clean_img_only"], cm["p_clean_aud_only"], cm["p_clean_both"],
-    ]
-    return random.choices(CUE_MODES, weights=weights, k=1)[0]
+        modes = BIMODAL_CUE_MODES
+    else:
+        modes = CUE_MODES
+    weights = [float(cm.get(CUE_MODE_PROB_KEYS[m], 0.0)) for m in modes]
+    if sum(weights) <= 0:
+        raise ValueError("cue_modes probabilities must contain a positive weight")
+    return random.choices(modes, weights=weights, k=1)[0]
 
 
 def sample_train_severity(cfg, epoch):
@@ -159,11 +172,21 @@ def resolve_train_corrupt_modes(cfg, epoch, step=None):
     else:
         pool = cc.get("aud_train_modes", AUD_TRAIN_MODES)
 
-    aud_mode = choose(
-        pool,
-        cc.get("aud_family_sampling", cc.get("family_sampling", "random")),
-        cc.get("aud_mode", "random"),
-    )
+    finetune = cc.get("aud_time_mask_finetune") or {}
+    if (finetune.get("enabled", False)
+            and epoch >= int(finetune.get("start_epoch", 0))):
+        weights_cfg = finetune.get("weights") or {"time_mask": 1.0}
+        ft_modes = list(weights_cfg)
+        ft_weights = [float(weights_cfg[m]) for m in ft_modes]
+        if not ft_modes or sum(ft_weights) <= 0:
+            raise ValueError("aud_time_mask_finetune.weights must be positive")
+        aud_mode = _r.choices(ft_modes, weights=ft_weights, k=1)[0]
+    else:
+        aud_mode = choose(
+            pool,
+            cc.get("aud_family_sampling", cc.get("family_sampling", "random")),
+            cc.get("aud_mode", "random"),
+        )
     return img_mode, aud_mode
 
 
@@ -211,6 +234,10 @@ def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
         return pack(None, ca(clean_aud))
     if mode == "corrupt_both":
         return pack(ci(clean_img), ca(clean_aud))
+    if mode == "clean_img_corrupt_aud":
+        return pack(clean_img, ca(clean_aud))
+    if mode == "corrupt_img_clean_aud":
+        return pack(ci(clean_img), clean_aud)
     if mode == "clean_img_only":
         return pack(clean_img, None)
     if mode == "clean_aud_only":
@@ -229,7 +256,7 @@ def cue_modalities(mode):
         return True, False
     if mode in ("corrupt_aud_only", "clean_aud_only"):
         return False, True
-    return True, True   # corrupt_both / clean_both
+    return True, True   # 双模态：both 或非对称 clean/corrupt
 
 
 def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels):
@@ -240,7 +267,7 @@ def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
 
       * audio-only : 图像目标 = 类别代表原型(medoid)   音频目标 = 本样本 clean
       * image-only : 图像目标 = 本样本 clean           音频目标 = 类别代表原型(medoid)
-      * both       : 图像/音频目标均 = 本样本 clean
+      * 双模态（含非对称 clean/corrupt）: 图像/音频目标均 = 本样本 clean
 
     返回 (x_img_target, x_aud_target, img_kind, aud_kind)，kind ∈ {"sample","category"}。
     """

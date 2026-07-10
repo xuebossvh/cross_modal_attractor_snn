@@ -1,9 +1,10 @@
 """评估跨模态 SNN 联想记忆网络。
 
-对 6 种 cue 模式分别评估（推理时禁用 target，decoder 的 Value 主输入来自
+对 8 种 cue 模式分别评估（推理时禁用 target，decoder 的 Value 主输入来自
 v_*_from_A；v10a 可额外融合当前 cue 的 detail state）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
-    clean_img_only   / clean_aud_only   / clean_both
+    clean_img_corrupt_aud / corrupt_img_clean_aud
+    clean_img_only / clean_aud_only / clean_both
 
 指标：
     分类   accuracy
@@ -18,12 +19,12 @@ v_*_from_A；v10a 可额外融合当前 cue 的 detail state）：
     legacy_random  旧随机协议：family 随机、不固定 seed，用于鲁棒性抽查。
 
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
-可选：--family_breakdown 按音频腐蚀 family 拆解 corrupt_aud_only/corrupt_both。
+可选：--family_breakdown 按音频腐蚀 family 拆解 audio-only、clean-image assist 与 corrupt-both。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v10f.yaml --protocol fixed_mask
-    python -u scripts/evaluate.py --config configs/v10f.yaml --protocol legacy_random
-    python -u scripts/evaluate.py --config configs/v10f.yaml --protocol fixed_mask --family_breakdown
+    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask
+    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask --family_breakdown
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -50,7 +51,13 @@ from data.dataset import build_loaders
 from models.network import CrossModalSNN
 
 EVAL_MODES = ["corrupt_img_only", "corrupt_aud_only", "corrupt_both",
+              "clean_img_corrupt_aud", "corrupt_img_clean_aud",
               "clean_img_only", "clean_aud_only", "clean_both"]
+
+_MASK_SEED_ALIAS = {
+    "clean_img_corrupt_aud": "corrupt_aud_only",
+    "corrupt_img_clean_aud": "corrupt_img_only",
+}
 
 
 def _reseed(seed):
@@ -168,7 +175,7 @@ def _log_audio_diag(diag_rows):
     近黑图（能量塌缩）一眼可辨：rec_std / rec_max 远小于 target，topk 召回偏低。
     单独打印（不混入主表），不影响 plot_eval_summary 解析主表。
     """
-    dw = [18, 9, 9, 9, 9, 9, 9, 10]
+    dw = [24, 9, 9, 9, 9, 9, 9, 10]
     da = ["l", "r", "r", "r", "r", "r", "r", "r"]
     hdr = ["cue模式", "rec均值", "rec标准差", "rec最大",
            "tgt均值", "tgt标准差", "tgt最大", "top15%召回"]
@@ -196,7 +203,7 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     图像/音频指标均对照 select_targets 选出的 target（区分样本级/类别级）：
         audio-only : 图像 vs 类别代表原型      音频 vs 本样本 clean
         image-only : 图像 vs 本样本 clean       音频 vs 类别代表原型
-        both       : 图像/音频均 vs 本样本 clean
+        双模态（含非对称 clean/corrupt）: 图像/音频均 vs 本样本 clean
 
     protocol=fixed_mask：每个 batch 用确定性 seed 重置 RNG，并使用固定 family，
         使任意模型在同一套 mask 上评估（masks 与模型无关，可跨版本对比）。
@@ -342,15 +349,16 @@ def eval_audio_family_breakdown(model, loader, cfg, device, severity,
     """固定 seed/mask，逐个音频 corruption family 评估随机协议的薄弱环节。"""
     rows = []
     fixed_img_mode, _ = _fixed_eval_families(cfg)
-    modes = ["corrupt_aud_only", "corrupt_both"]
+    modes = ["corrupt_aud_only", "clean_img_corrupt_aud", "corrupt_both"]
     ef = cfg["corruption"].get("eval_fixed", {}) or {}
     aud_families = _as_list(ef.get("aud_modes"), AUD_TRAIN_MODES)
     for mode_idx, mode in enumerate(modes):
         for fam_idx, aud_family in enumerate(aud_families):
+            seed_mode = EVAL_MODES.index(_MASK_SEED_ALIAS.get(mode, mode))
             r = eval_mode(
                 model, loader, cfg, mode, device, severity,
                 proto_img, proto_aud, max_batches=max_batches,
-                protocol="fixed_mask", mode_idx=100 + mode_idx * 10 + fam_idx,
+                protocol="fixed_mask", mode_idx=100 + seed_mode * 10 + fam_idx,
                 fixed_img_mode_override=fixed_img_mode,
                 fixed_aud_mode_override=aud_family)
             d = r["diag"]
@@ -381,7 +389,7 @@ def eval_audio_family_breakdown(model, loader, cfg, device, severity,
         writer.writeheader()
         writer.writerows(rows)
 
-    bw = [18, 18, 24, 8, 9, 9, 11, 10]
+    bw = [24, 18, 24, 8, 9, 9, 11, 10]
     ba = ["l", "l", "l", "r", "r", "r", "r", "r"]
     log("=" * sum(bw))
     log(f"[音频 family breakdown] fixed seed/mask -> {out_path}")
@@ -402,7 +410,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v10f.yaml")
+    ap.add_argument("--config", default="configs/v11a.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--severity", type=float, default=0.5)
@@ -411,7 +419,7 @@ def main():
                     choices=["fixed_mask", "legacy_random"],
                     help="fixed_mask=论文主对照(固定mask) | legacy_random=旧随机协议")
     ap.add_argument("--family_breakdown", action="store_true",
-                    help="按音频 corruption family 评估 corrupt_aud_only/corrupt_both")
+                    help="按音频 family 评估 audio-only/clean-image assist/corrupt-both")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -435,7 +443,7 @@ def main():
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
-    eval_w = [18, 7, 9, 8, 7, 10, 9, 8, 10, 10, 9, 16]
+    eval_w = [24, 7, 9, 8, 7, 10, 9, 8, 10, 10, 9, 16]
     eval_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
     eval_hdr = ["cue模式", "acc", "imgMSE", "PSNR", "SSIM", "imgMaskMSE",
                 "audMSE", "audSSIM", "audMaskMSE", "像素方差", "样本L2",
@@ -444,7 +452,7 @@ def main():
                     if args.protocol == "fixed_mask"
                     else [_fixed_eval_families(cfg)])
     log("=" * sum(eval_w))
-    log(f"[评估] 6 种 cue 模式  (corrupt severity={args.severity})  "
+    log(f"[评估] 8 种 cue 模式  (corrupt severity={args.severity})  "
         f"协议={args.protocol}")
     if args.protocol == "fixed_mask":
         fam_text = ", ".join(
@@ -463,10 +471,11 @@ def main():
         diag_rows = []
         attr_rows = []
         for mi, mode in enumerate(EVAL_MODES):
+            seed_mode = EVAL_MODES.index(_MASK_SEED_ALIAS.get(mode, mode))
             r = eval_mode(
                 model, test_loader, cfg, mode, device,
                 args.severity, proto_img, proto_aud, args.max_batches,
-                protocol=args.protocol, mode_idx=fam_idx * 100 + mi,
+                protocol=args.protocol, mode_idx=fam_idx * 100 + seed_mode,
                 fixed_img_mode_override=fixed_img_mode,
                 fixed_aud_mode_override=fixed_aud_mode)
             tgt = f"{r['img_kind']}/{r['aud_kind']}"
@@ -485,7 +494,7 @@ def main():
 
         _log_audio_diag(diag_rows)
 
-        attr_w = [18, 10, 10, 10, 10, 10, 10, 10, 10]
+        attr_w = [24, 10, 10, 10, 10, 10, 10, 10, 10]
         attr_a = ["l"] + ["r"] * 8
         log("=" * sum(attr_w))
         log("[归因] coarse/final masked/visible MSE（主看 mask coarse->final；"

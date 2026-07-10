@@ -1,10 +1,7 @@
-# v10f: v10e + attribution tooling (refiner-aware pretrain, lr_mult, pasteback ablations).
-# Compared with v10e:
-#   - decoder_pretrain can train refiner modules; loss on final (not coarse only)
-#   - refiner param groups use lr_mult=0.5 in main training
-#   - evaluate reports coarse/final masked MSE for attribution
-#   - pasteback_only ablation configs isolate paste-back vs delta refinement
-# Inherited from v10e: symmetric image/audio refiner + visible paste-back.
+# v11a: v10f baseline + asymmetric clean/corrupt cue controls.
+# Training keeps five corruption families, then uses a time-mask-heavy final stage.
+# partial_temporal is active-speech aligned; masked audio loss adds energy weighting.
+# Cross-modal refiner conditioning is intentionally deferred to the next design step.
 
 seed: 1234
 device: "cuda"
@@ -81,7 +78,7 @@ decoder_pretrain:
   lambda_aud: 4.0
   lambda_aud_active: 1.0
   save_ckpt: true
-  ckpt_path: "outputs/checkpoints/cross_modal_snn_v10f_decoder_pretrain.pt"
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11a_decoder_pretrain.pt"
 
 dims:
   img_in: 784
@@ -142,12 +139,14 @@ audio:
   encoder_local_mix: 0.5
 
 cue_modes:
-  p_corrupt_img_only: 0.15
-  p_corrupt_aud_only: 0.20
-  p_corrupt_both: 0.25
-  p_clean_img_only: 0.10
-  p_clean_aud_only: 0.15
-  p_clean_both: 0.15
+  p_corrupt_img_only: 0.10
+  p_corrupt_aud_only: 0.15
+  p_corrupt_both: 0.20
+  p_clean_img_corrupt_aud: 0.15
+  p_corrupt_img_clean_aud: 0.15
+  p_clean_img_only: 0.05
+  p_clean_aud_only: 0.10
+  p_clean_both: 0.10
 
 corruption:
   train_severity: 0.4
@@ -167,6 +166,15 @@ corruption:
     early: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
     mid: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
     late: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+  aud_time_mask_finetune:
+    enabled: true
+    start_epoch: 95
+    weights:
+      time_mask: 0.60
+      freq_mask: 0.10
+      feature_dropout: 0.10
+      partial_temporal: 0.05
+      time_freq_block: 0.15
   eval_fixed:
     img_mode: "occlusion"
     aud_mode: "time_mask"
@@ -186,6 +194,8 @@ loss:
   aud_foreground_top_fraction: 0.15
   lambda_aud_marginal: 0.15
   lambda_aud_masked: 1.0
+  lambda_aud_masked_weighted: 1.0
+  aud_masked_weight_gamma: 5.0
   aud_masked_families: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
   lambda_aud_active: 1.0
   lambda_aud_ssim: 0.0
@@ -202,19 +212,19 @@ loss:
   lambda_index_cons: 0.5
   lambda_soft_cls: 0.5
   soft_cls_temperature: 2.0
-  align_teacher_modes: ["corrupt_both", "corrupt_aud_only"]
+  align_teacher_modes: ["corrupt_both", "corrupt_aud_only", "clean_img_corrupt_aud", "corrupt_img_clean_aud"]
   align_teacher_match_modality: true
   lambda_key_align: 0.2
   key_align_temperature: 0.1
-  key_align_modes: ["corrupt_both", "clean_both"]
+  key_align_modes: ["corrupt_both", "clean_img_corrupt_aud", "corrupt_img_clean_aud", "clean_both"]
   lambda_aud_detail_cons: 0.0
-  aud_detail_cons_modes: ["corrupt_aud_only", "corrupt_both"]
+  aud_detail_cons_modes: ["corrupt_aud_only", "clean_img_corrupt_aud", "corrupt_both"]
 
   aud_sample_curriculum:
     enabled: true
     modes: ["corrupt_both"]
     start_epoch: 0
-    end_epoch: 35
+    end_epoch: 10
     max_sample_mix: 1.0
 
 data:
@@ -225,8 +235,8 @@ data:
   train_subset: 0
 
 train:
-  output_version: v10f
-  epochs: 70
+  output_version: v11a
+  epochs: 120
   lr: 0.001
   weight_decay: 0.0
   grad_clip: 1.0
@@ -237,4 +247,4 @@ train:
   lr_gamma: 0.5
   init_ckpt_path: ""
   init_strict: false
-  ckpt_path: "outputs/checkpoints/cross_modal_snn_v10f.pt"
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11a.pt"

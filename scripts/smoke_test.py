@@ -12,7 +12,7 @@ from data.corruption import corrupt_image, corrupt_audio
 from models.network import CrossModalSNN
 from train import compute_losses
 
-cfg = load_config("configs/v10f.yaml")
+cfg = load_config("configs/v11a.yaml")
 cfg["device"] = "cpu"
 model = CrossModalSNN(cfg)
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -29,7 +29,7 @@ C = cfg["dims"]["num_classes"]
 proto_img = torch.rand(C, 1, 28, 28)
 proto_aud = torch.rand(C, n_mels, n_frames)
 
-print("--- 6 种 cue 模式 binding+readout 前向/反向 ---")
+print("--- 8 种 cue 模式 binding+readout 前向/反向 ---")
 for mode in CUE_MODES:
     loss, logs = compute_losses(model, x_img, x_aud, labels, mode, cfg,
                                 proto_img, proto_aud, epoch=0)
