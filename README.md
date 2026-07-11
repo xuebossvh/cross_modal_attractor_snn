@@ -67,13 +67,19 @@ cross_modal_attractor_snn/
 
 ## 3. 训练
 
-当前官方配置为 **v11a**（`configs/v11a.yaml`）。`configs/` 仅保留当前版本主配置；v10f 主配置与归因消融保留在 main/v10f 分支（见 `docs/dev_log.md` F 阶段规则第 6 条）。
+当前官方配置为 **v11a**：`configs/v11a.yaml` 启用对侧 Key 条件化，
+`configs/v11a_control.yaml` 是同预算、关闭条件路径但保留同构模块的公平对照。v10f 主配置与归因消融
+保留在 main/v10f 分支（见 `docs/dev_log.md` F 阶段规则第 6 条）。
 
 ```bash
 pip install -r requirements.txt
 python scripts/mkdir_outputs.py --config configs/v11a.yaml
 nohup env OMP_NUM_THREADS=1 PYTHONUNBUFFERED=1 python -u scripts/train.py --config configs/v11a.yaml > outputs/outputs_v11a/logs/train_v11a_120ep.log 2>&1 < /dev/null &
 tail -f outputs/outputs_v11a/logs/train_v11a_120ep.log
+
+# 同预算 control（独立 checkpoint / output_version）
+python scripts/mkdir_outputs.py --config configs/v11a_control.yaml
+python -u scripts/train.py --config configs/v11a_control.yaml
 ```
 
 每个 batch 采样一种 cue 模式，并分两阶段计算损失：
@@ -81,15 +87,16 @@ tail -f outputs/outputs_v11a/logs/train_v11a_120ep.log
 - **binding 阶段**（可关）：cue 驱动 Index A 收敛；干净 target 经 Encoder 写入
   target Value（可延迟若干步）。`bind loss` 让 **A 驱动的 Value** 对齐
   **target Value（stop-grad）**，从而学习 `A→V` 绑定。此阶段不走 decoder。
-- **readout 阶段**：关闭 target，decoder 的 Value 主输入只来自
-  `v_*_from_A`（A 驱动的 Value）；v10a 额外融合对应 cue 的 detail state，
-  计算分类 / 图像恢复 / 音频恢复 / 脉冲正则损失。
+- **readout 阶段**：关闭 target。v11a 先把对侧 cue 的 Key rate 投影为 Value 空间
+  residual，与 `v_*_from_A` 相加；再与对应 cue 的同模态 detail state 拼接后送入
+  Decoder。缺少对侧 cue 时 residual 严格为 0。随后计算分类 / 图像恢复 / 音频恢复 /
+  脉冲正则损失。
 
 每个 epoch 保存 checkpoint 至 `outputs/checkpoints/cross_modal_snn_v11a.pt`（由 yaml 指定）。
 日志 / 图表 / 表格写入 `outputs/outputs_v11a/{logs,figures,tables}/`。
 
-> 注意：若你曾用旧架构训练过，旧 checkpoint 结构不兼容，evaluate/demo 会自动
-> 检测并回退到随机权重并给出警告——重新训练即可。
+> 注意：旧架构 checkpoint 与 v11a 不兼容。evaluate 遇到缺失或结构不匹配的
+> checkpoint 会直接报错，不会用随机权重生成伪评估结果。
 
 快速冒烟（小子集、1 epoch）：编辑 `configs/v11a.yaml` 设 `data.train_subset: 512`、
 `train.epochs: 1`，再运行 `python -u scripts/train.py`。
@@ -98,6 +105,7 @@ tail -f outputs/outputs_v11a/logs/train_v11a_120ep.log
 
 ```bash
 python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask --family_breakdown | tee outputs/outputs_v11a/tables/full_eval_v11a_fixed.txt
+python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask --severity 0.4 --family_breakdown --cross_key sweep 2>&1 | tee outputs/outputs_v11a/logs/eval_v11a_cross_key_sweep.log
 python -u scripts/evaluate.py --config configs/v11a.yaml --protocol legacy_random | tee outputs/outputs_v11a/tables/full_eval_v11a_random.txt
 python -u scripts/demo_inference.py --config configs/v11a.yaml --num 10 --severity 0.4
 python -u scripts/demo_inference.py --config configs/v11a.yaml --num 10 --severity 0.4 --protocol legacy_random
@@ -106,7 +114,7 @@ python -u scripts/smoke_test.py
 
 - `evaluate.py`：8 种 cue 模式下的 acc / 图像 MSE·PSNR·SSIM / **log-mel MSE** 等；新增两种非对称 clean/corrupt 双模态对照。
   指标按各 cue 模式对应的**恢复粒度 target**计算（表尾 `tgt(img/aud)` 列标注
-  `smp`=样本级 / `cat`=类别代表原型）。快速试跑：`python -u evaluate.py --max_batches 5`。
+  `smp`=样本级 / `cat`=类别代表原型）。快速试跑：`python -u scripts/evaluate.py --config configs/v11a.yaml --max_batches 5`。
 - `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注
   cue type / target type / true label / pred label / confidence：
   - `outputs/outputs_v11a/figures/demo_aud_only.png`：audio-only cue → **category** image + **sample** audio
@@ -140,6 +148,20 @@ python -u scripts/smoke_test.py
 I_A = alpha_img * W_img_to_A(K_img) + alpha_aud * W_aud_to_A(K_aud)
       + [use_recurrent] W_rec(prev_spikes) - [use_kwta] 竞争抑制
 ```
+
+**对侧 Key 条件化 Decoder**（不修改 Memory、Decoder 和 Refiner 内部结构）：
+
+```
+image Decoder: (V_img_from_A + gate(K_aud) * P_aud_to_img(K_aud))
+               concat same-modal image detail -> Image Decoder
+audio Decoder: (V_aud_from_A + gate(K_img) * P_img_to_aud(K_img))
+               concat same-modal audio detail -> Audio Decoder
+```
+
+`P_*` 零初始化，因此新模块初始行为与 control 一致。对侧 Key 默认 detach，重建梯度
+只训练投影器、门控和下游重建模块，不通过这条捷径改写 Key/Index。`--cross_key sweep`
+在同一批样本上配对比较 correct / zero / wrong-class Key，并检查共享 Index 不变。
+control 仍构造相同 projector/gate 以保持参数规模和后续模块初始化一致，但前向严格旁路。
 
 ### 关键设计：杜绝答案泄漏
 - decoder 的 **Value 主输入永远来自 `v_*_from_A`**（Index 驱动的 Value），

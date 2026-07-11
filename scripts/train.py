@@ -239,12 +239,10 @@ def _pretrain_decoder_states(model, x_img, x_aud, detail_dropout,
         else:
             img_detail = aud_detail = None
 
-    if model.use_detail_conditioning:
-        img_state = model._fuse_decoder_state(img_state, img_detail, "img")
-        aud_state = model._fuse_decoder_state(aud_state, aud_detail, "aud")
-    elif model.detach_value_for_recon:
-        img_state = img_state.detach()
-        aud_state = aud_state.detach()
+    img_state = model._fuse_decoder_state(
+        img_state, img_detail, "img", cross_key_rate=None)
+    aud_state = model._fuse_decoder_state(
+        aud_state, aud_detail, "aud", cross_key_rate=None)
     return img_state, aud_state
 
 
@@ -299,6 +297,10 @@ def pretrain_decoders(model, train_loader, cfg, device):
     epochs = int(pc.get("epochs", 0))
     if not pc.get("enabled", False) or epochs <= 0:
         return
+    if pc.get("train_cross_key_conditioning", False):
+        raise ValueError(
+            "v11a first-stage decoder pretrain requires "
+            "decoder_pretrain.train_cross_key_conditioning=false")
 
     lc = cfg["loss"]
     lam_img = pc.get("lambda_img", lc.get("lambda_img", 1.0))
@@ -369,6 +371,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
         f"freeze_non_decoders={pc.get('freeze_non_decoders', True)} "
         f"train_image_refiner={train_img_refiner} "
         f"train_audio_refiner={train_aud_refiner} "
+        f"train_cross_key_conditioning=False "
         f"img_final_path={'helper' if use_img_final_helper else 'coarse'} "
         f"aud_final_path={'helper' if use_aud_final_helper else 'coarse'} "
         f"lambda_coarse_aux={lam_coarse_aux:.3f}")
@@ -513,18 +516,27 @@ def pretrain_decoders(model, train_loader, cfg, device):
 
 
 def _build_train_optimizer(model, cfg):
-    """Adam with optional lr_mult for refiner param groups."""
+    """Adam with optional lr_mult for refiner/cross-key parameter groups."""
     base_lr = cfg["train"]["lr"]
     wd = cfg["train"]["weight_decay"]
     img_mult = float(cfg.get("image_refiner", {}).get("lr_mult", 1.0))
     aud_mult = float(cfg.get("audio_refiner", {}).get("lr_mult", 1.0))
+    cross_mult = float(
+        cfg.get("cross_key_conditioning", {}).get("lr_mult", 1.0))
+    cross_prefixes = (
+        "aud_to_img_cross_proj.", "img_to_aud_cross_proj.",
+        "aud_to_img_cross_gate.", "img_to_aud_cross_gate.",
+    )
     base_params = []
     img_refiner_params = []
     aud_refiner_params = []
+    cross_params = []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if name.startswith("image_refiner."):
+        if name.startswith(cross_prefixes):
+            cross_params.append(param)
+        elif name.startswith("image_refiner."):
             img_refiner_params.append(param)
         elif name.startswith("audio_refiner."):
             aud_refiner_params.append(param)
@@ -535,6 +547,8 @@ def _build_train_optimizer(model, cfg):
         groups.append({"params": img_refiner_params, "lr": base_lr * img_mult})
     if aud_refiner_params:
         groups.append({"params": aud_refiner_params, "lr": base_lr * aud_mult})
+    if cross_params:
+        groups.append({"params": cross_params, "lr": base_lr * cross_mult})
     return torch.optim.Adam(groups, lr=base_lr, weight_decay=wd)
 
 
@@ -853,6 +867,7 @@ def main():
     real = train_loader.dataset.use_real_audio
     cc = cfg["corruption"]
     dc = cfg.get("detail_conditioning", {})
+    xc = cfg.get("cross_key_conditioning", {})
     log(f"[启动] 训练集 {len(train_loader.dataset)} 样本，"
         f"每 epoch {steps_per_epoch} step，共 {total_epochs} epoch")
     log(f"[启动] 音频: {'FSDD+log-mel' if real else 'toy'}  "
@@ -861,6 +876,9 @@ def main():
         f"index_schedule={cfg['index'].get('input_schedule', 'simultaneous')}  "
         f"detail_cond={dc.get('enabled', False)}  "
         f"detail_detach={dc.get('detach', True)}  "
+        f"cross_key={xc.get('enabled', False)} "
+        f"cross_modules={xc.get('enabled', False) or xc.get('build_modules', False)} "
+        f"cross_lr_mult={xc.get('lr_mult', 1.0)}  "
         f"curriculum={cc.get('curriculum_mode', 'fixed')}  "
         f"binding={cfg['ablation']['use_binding_phase']}")
 

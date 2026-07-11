@@ -1,15 +1,16 @@
 """将评估结果转为表格图 + CSV。
 
-支持两种输入（自动识别）：
+支持以下输入（自动识别）：
   1. demo_eval_table.txt  — 【汇总】段（10 列，含 img/aud mask MSE）
   2. eval_*.log           — evaluate.py 全量评估日志；多 family 时写入 tables/<family_slug>/
   3. 上述日志若含 [音频塌缩诊断] 段，自动生成 aud_diag 表格（PNG+CSV）
+  4. 上述日志若含 [Cross-Key归因] 段，按 family 生成独立 PNG+CSV
 
 用法：
-    python scripts/plot_eval_summary.py outputs/outputs_v10a/tables/demo_eval_table.txt
-    python scripts/plot_eval_summary.py outputs/outputs_v10a/logs/eval_v10a_fixed_mask.log
-    python scripts/plot_eval_summary.py eval_v10a_full.log --title "v10a full eval"
-    python scripts/plot_eval_summary.py eval_v10a_fixed_mask.log --diag-only
+    python scripts/plot_eval_summary.py outputs/outputs_v11a/tables/demo_eval_table.txt
+    python scripts/plot_eval_summary.py outputs/outputs_v11a/logs/eval_v11a_cross_key_sweep.log
+    python scripts/plot_eval_summary.py eval_v11a_full.log --title "v11a full eval"
+    python scripts/plot_eval_summary.py eval_v11a_fixed_mask.log --diag-only
 """
 
 import argparse
@@ -84,13 +85,22 @@ _ATTR_ROW_RE_LEGACY = re.compile(
     r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
 )
+_CROSS_KEY_ROW_RE = re.compile(
+    r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"(img->aud|aud->img)\s+"
+    r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s+"
+    r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s+"
+    r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s*$",
+)
 _FAMILY_HDR_RE = re.compile(
     r"\[评估 family (\d+)/(\d+)\] img=(\S+)\s+aud=(\S+)",
 )
 
 
 def _maybe_float(text):
-    return None if text == "nan" else float(text)
+    return None if text in ("nan", "N/A") else float(text)
 
 
 def _order_eval_rows(by_mode):
@@ -248,6 +258,43 @@ def _parse_attribution_from_text(text):
     return rows
 
 
+def _parse_cross_key_attribution_from_text(text):
+    """Parse the paired normal/zero/wrong Cross-Key attribution block."""
+    rows = []
+    in_block = False
+    past_hdr = False
+    for line in text.splitlines():
+        if "[Cross-Key归因]" in line:
+            in_block = True
+            past_hdr = False
+            continue
+        if not in_block:
+            continue
+        stripped = line.strip()
+        if not stripped:
+            if rows:
+                break
+            continue
+        if stripped.startswith("=") or stripped.startswith("-"):
+            continue
+        if "Cgain" in stripped and "Fdamage" in stripped:
+            past_hdr = True
+            continue
+        match = _CROSS_KEY_ROW_RE.match(stripped)
+        if match and past_hdr:
+            rows.append({
+                "mode": match.group(1),
+                "direction": match.group(2),
+                "gate": _maybe_float(match.group(3)),
+                "residual_ratio": _maybe_float(match.group(4)),
+                "coarse_gain": _maybe_float(match.group(5)),
+                "final_gain": _maybe_float(match.group(6)),
+                "coarse_damage": _maybe_float(match.group(7)),
+                "final_damage": _maybe_float(match.group(8)),
+            })
+    return rows
+
+
 def _split_family_blocks(text):
     """按 [评估 family i/n] 切分多 family 日志。"""
     parts = re.split(r"(?=\[评估 family \d+/\d+\])", text)
@@ -370,6 +417,7 @@ def parse_eval_full_log(path):
                 "rows": rows,
                 "aud_diag": _parse_aud_diag_from_text(block["text"]),
                 "attribution": _parse_attribution_from_text(block["text"]),
+                "cross_key": _parse_cross_key_attribution_from_text(block["text"]),
             })
         if not families:
             raise ValueError(f"未在 {path} 中找到 evaluate.py 结果行。")
@@ -387,6 +435,7 @@ def parse_eval_full_log(path):
         "rows": rows,
         "aud_diag": _parse_aud_diag_from_text(text),
         "attribution": _parse_attribution_from_text(text),
+        "cross_key": _parse_cross_key_attribution_from_text(text),
     }
     return [family], "full_families", meta
 
@@ -457,6 +506,14 @@ def _render_full_family_tables(families, base_out, base_title, meta=None):
                 attr_out)
             log(f"[plot] 归因表 -> {a_png}")
             log(f"[plot] 归因 CSV -> {a_csv}")
+
+        if family.get("cross_key"):
+            cross_out = _family_artifact_path(
+                base_out, family, "cross_key_attribution")
+            c_png, c_csv = render_cross_key_attribution_table(
+                family["cross_key"], "Cross-Key Paired Attribution", cross_out)
+            log(f"[plot] Cross-Key attribution -> {c_png}")
+            log(f"[plot] Cross-Key attribution CSV -> {c_csv}")
 
     return outputs
 
@@ -645,6 +702,23 @@ def render_attribution_table(rows, title, path):
     ] for r in rows]
     col_w = [0.14] + [0.095] * 8
     return _render_table(headers, cell, col_w, title, path, font_size=8.5)
+
+
+def render_cross_key_attribution_table(rows, title, path):
+    headers = ["cue mode", "direction", "gate", "res/V", "coarse gain",
+               "final gain", "coarse damage", "final damage"]
+
+    def fmt(value):
+        return "N/A" if value is None else f"{value:.5f}"
+
+    cell = [[
+        r["mode"], r["direction"], fmt(r.get("gate")),
+        fmt(r.get("residual_ratio")), fmt(r.get("coarse_gain")),
+        fmt(r.get("final_gain")), fmt(r.get("coarse_damage")),
+        fmt(r.get("final_damage")),
+    ] for r in rows]
+    col_w = [0.18, 0.10] + [0.105] * 6
+    return _render_table(headers, cell, col_w, title, path, font_size=8.2)
 
 
 def _parse_n_samples(path):

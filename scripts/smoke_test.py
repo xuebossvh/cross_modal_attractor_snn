@@ -29,6 +29,87 @@ C = cfg["dims"]["num_classes"]
 proto_img = torch.rand(C, 1, 28, 28)
 proto_aud = torch.rand(C, n_mels, n_frames)
 
+
+def _grad_sum(parameters):
+    return sum(p.grad.abs().sum().item() for p in parameters
+               if p.grad is not None)
+
+
+print("--- Cross-Key 零初始化、梯度与 Decoder-only 路径检查 ---")
+dims = cfg["dims"]
+cross_model = CrossModalSNN(cfg)
+base_img = torch.rand(B, dims["N_value_img"])
+base_aud = torch.rand(B, dims["N_value_aud"])
+detail_img = torch.rand(B, dims["D_img"])
+detail_aud = torch.rand(B, dims["D_aud"])
+key_img = torch.rand(B, dims["N_key_img"])
+key_aud = torch.rand(B, dims["N_key_aud"])
+
+fused_img, img_stats = cross_model._fuse_decoder_state(
+    base_img, detail_img, "img", cross_key_rate=key_aud,
+    return_cross_stats=True)
+fused_img_zero, _ = cross_model._fuse_decoder_state(
+    base_img, detail_img, "img", cross_key_rate=key_aud,
+    disable_cross_key=True, return_cross_stats=True)
+fused_aud, aud_stats = cross_model._fuse_decoder_state(
+    base_aud, detail_aud, "aud", cross_key_rate=key_img,
+    return_cross_stats=True)
+fused_aud_zero, _ = cross_model._fuse_decoder_state(
+    base_aud, detail_aud, "aud", cross_key_rate=key_img,
+    disable_cross_key=True, return_cross_stats=True)
+assert torch.allclose(fused_img, fused_img_zero, atol=1e-7)
+assert torch.allclose(fused_aud, fused_aud_zero, atol=1e-7)
+assert img_stats["residual_norm"].max().item() == 0.0
+assert aud_stats["residual_norm"].max().item() == 0.0
+
+cross_projectors = list(cross_model.aud_to_img_cross_proj.parameters()) + list(
+    cross_model.img_to_aud_cross_proj.parameters())
+cross_gates = list(cross_model.aud_to_img_cross_gate.parameters()) + list(
+    cross_model.img_to_aud_cross_gate.parameters())
+cross_opt = torch.optim.Adam(cross_projectors + cross_gates, lr=1e-2)
+cross_opt.zero_grad()
+(fused_img.square().mean() + fused_aud.square().mean()).backward()
+first_proj_grad = _grad_sum(cross_projectors)
+first_gate_grad = _grad_sum(cross_gates)
+assert first_proj_grad > 0.0
+assert first_gate_grad == 0.0
+cross_opt.step()
+
+cross_opt.zero_grad()
+fused_img_2 = cross_model._fuse_decoder_state(
+    base_img, detail_img, "img", cross_key_rate=key_aud)
+fused_aud_2 = cross_model._fuse_decoder_state(
+    base_aud, detail_aud, "aud", cross_key_rate=key_img)
+(fused_img_2.square().mean() + fused_aud_2.square().mean()).backward()
+second_gate_grad = _grad_sum(cross_gates)
+assert second_gate_grad > 0.0
+
+cross_model.eval()
+with torch.no_grad():
+    normal = cross_model(x_img_cue=x_img, x_aud_cue=x_aud)
+    conditioned = cross_model(
+        x_img_cue=x_img, x_aud_cue=x_aud,
+        cross_key_img_rate_override=key_img,
+        cross_key_aud_rate_override=key_aud)
+    wrong = cross_model(
+        x_img_cue=x_img, x_aud_cue=x_aud,
+        cross_key_img_rate_override=key_img.roll(1, 0),
+        cross_key_aud_rate_override=key_aud.roll(1, 0))
+    zero = cross_model(
+        x_img_cue=x_img, x_aud_cue=x_aud,
+        disable_img_to_aud_cross=True, disable_aud_to_img_cross=True)
+assert torch.allclose(normal["index_state"], conditioned["index_state"], atol=1e-7)
+assert torch.allclose(conditioned["index_state"], wrong["index_state"], atol=1e-7)
+assert (not torch.allclose(conditioned["recovered_img_coarse"],
+                           wrong["recovered_img_coarse"], atol=1e-7)
+        or not torch.allclose(conditioned["recovered_aud_coarse"],
+                              wrong["recovered_aud_coarse"], atol=1e-7))
+assert zero["aud_to_img_cross_ratio"].max().item() == 0.0
+assert zero["img_to_aud_cross_ratio"].max().item() == 0.0
+print(f"first projector grad={first_proj_grad:.6f}, "
+      f"first gate grad={first_gate_grad:.6f}, "
+      f"second gate grad={second_gate_grad:.6f}")
+
 print("--- 8 种 cue 模式 binding+readout 前向/反向 ---")
 for mode in CUE_MODES:
     loss, logs = compute_losses(model, x_img, x_aud, labels, mode, cfg,

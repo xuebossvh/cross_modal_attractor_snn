@@ -1,7 +1,7 @@
 """评估跨模态 SNN 联想记忆网络。
 
-对 8 种 cue 模式分别评估（推理时禁用 target，decoder 的 Value 主输入来自
-v_*_from_A；v10a 可额外融合当前 cue 的 detail state）：
+对 8 种 cue 模式分别评估（推理时禁用 target；v11a Decoder 输入由
+v_*_from_A、对侧 Key residual 与当前 cue 的同模态 detail state 构成）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
     clean_img_corrupt_aud / corrupt_img_clean_aud
     clean_img_only / clean_aud_only / clean_both
@@ -20,11 +20,13 @@ v_*_from_A；v10a 可额外融合当前 cue 的 detail state）：
 
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
 可选：--family_breakdown 按音频腐蚀 family 拆解 audio-only、clean-image assist 与 corrupt-both。
+可选：--cross_key sweep 在同一 cue/mask 下比较 correct/zero/wrong-class Key。
 
 用法：
     python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask
     python -u scripts/evaluate.py --config configs/v11a.yaml --protocol legacy_random
     python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask --family_breakdown
+    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask --cross_key sweep
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -49,6 +51,7 @@ from data.corruption import (AUD_MODES, AUD_FAMILY_GROUPS,
                              AUD_TRAIN_MODES, IMG_TRAIN_MODES)
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
+from models.lif import rate
 
 EVAL_MODES = ["corrupt_img_only", "corrupt_aud_only", "corrupt_both",
               "clean_img_corrupt_aud", "corrupt_img_clean_aud",
@@ -113,6 +116,118 @@ def _region_error(rec, target, region, power=2):
     return per_sample[valid].mean().item()
 
 
+def _region_error_per_sample(rec, target, region, power=2):
+    """返回逐样本 region error 与有效 mask，供 paired cross-key 归因。"""
+    if region is None:
+        return None, None
+    region = region.to(device=rec.device, dtype=rec.dtype)
+    denom = region.flatten(1).sum(dim=1)
+    valid = denom > 0
+    err = (rec - target).abs() if power == 1 else (rec - target).pow(2)
+    values = (err * region).flatten(1).sum(dim=1) / denom.clamp_min(1.0)
+    return values, valid
+
+
+def _wrong_class_indices(labels):
+    """构造一对一的 batch 内异类索引；无法匹配的样本 valid=False。"""
+    n = labels.numel()
+    labels_cpu = labels.detach().cpu().tolist()
+    perm_cpu = list(range(n))
+    valid_cpu = [False] * n
+    groups = {}
+    for idx, label in enumerate(labels_cpu):
+        groups.setdefault(label, []).append(idx)
+    if len(groups) > 1:
+        ordered_groups = sorted(groups.values(), key=len, reverse=True)
+        majority = ordered_groups[0]
+        others = [idx for group in ordered_groups[1:] for idx in group]
+        if len(majority) <= n - len(majority):
+            ordered = [idx for group in ordered_groups for idx in group]
+            shift = len(majority)
+            targets = ordered[shift:] + ordered[:shift]
+            for source, target in zip(ordered, targets):
+                perm_cpu[source] = target
+                valid_cpu[source] = True
+        else:
+            # 完全异类置换不存在时，最大可用子集为 2 * 非多数类样本数。
+            for major_idx, other_idx in zip(majority, others):
+                perm_cpu[major_idx] = other_idx
+                perm_cpu[other_idx] = major_idx
+                valid_cpu[major_idx] = True
+                valid_cpu[other_idx] = True
+    perm = torch.tensor(perm_cpu, dtype=torch.long, device=labels.device)
+    valid = torch.tensor(valid_cpu, dtype=torch.bool, device=labels.device)
+    if valid.any() and torch.any(labels[perm[valid]] == labels[valid]):
+        raise RuntimeError("wrong-class permutation contains a same-class pair")
+    selected = perm[valid]
+    if selected.unique().numel() != selected.numel():
+        raise RuntimeError("wrong-class permutation reuses a Key index")
+    return perm, valid
+
+
+def _sum_paired_metric(sums, counts, key, values, valid):
+    if values is None or valid is None:
+        return
+    valid = valid & torch.isfinite(values)
+    if not valid.any():
+        return
+    sums[key] = sums.get(key, 0.0) + values[valid].sum().item()
+    counts[key] = counts.get(key, 0) + int(valid.sum().item())
+
+
+def _paired_cross_metrics(normal_out, zero_out, wrong_out,
+                          tgt_img, tgt_aud, img_mask, aud_mask,
+                          wrong_valid):
+    """同 cue/mask 下计算 normal/zero/wrong 的方向化 paired 指标。"""
+    result = {}
+
+    def add_direction(prefix, normal_final, zero_final, wrong_final,
+                      normal_coarse, zero_coarse, wrong_coarse,
+                      target, mask, gate_key, ratio_key, source_key):
+        if mask is None or normal_out.get(source_key) is None:
+            return
+        triplets = {
+            "final": (normal_final, zero_final, wrong_final),
+            "coarse": (normal_coarse, zero_coarse, wrong_coarse),
+        }
+        for stage, (normal_rec, zero_rec, wrong_rec) in triplets.items():
+            n_err, region_valid = _region_error_per_sample(
+                normal_rec, target, mask, power=2)
+            z_err, _ = _region_error_per_sample(zero_rec, target, mask, power=2)
+            w_err, _ = _region_error_per_sample(wrong_rec, target, mask, power=2)
+            valid = region_valid & wrong_valid
+            result[f"{prefix}_{stage}_correct_gain"] = (z_err - n_err, valid)
+            result[f"{prefix}_{stage}_wrong_damage"] = (w_err - n_err, valid)
+
+        gate = normal_out.get(gate_key)
+        if gate is not None:
+            result[f"{prefix}_gate"] = (gate.flatten(), wrong_valid)
+        ratio = normal_out.get(ratio_key)
+        if ratio is not None:
+            result[f"{prefix}_ratio"] = (ratio.flatten(), wrong_valid)
+
+    add_direction(
+        "img2aud",
+        normal_out["recovered_aud"], zero_out["recovered_aud"],
+        wrong_out["recovered_aud"],
+        normal_out["recovered_aud_coarse"],
+        zero_out["recovered_aud_coarse"],
+        wrong_out["recovered_aud_coarse"],
+        tgt_aud, aud_mask, "img_to_aud_cross_gate",
+        "img_to_aud_cross_ratio", "key_img")
+    add_direction(
+        "aud2img",
+        torch.sigmoid(normal_out["recovered_img"]),
+        torch.sigmoid(zero_out["recovered_img"]),
+        torch.sigmoid(wrong_out["recovered_img"]),
+        torch.sigmoid(normal_out["recovered_img_coarse"]),
+        torch.sigmoid(zero_out["recovered_img_coarse"]),
+        torch.sigmoid(wrong_out["recovered_img_coarse"]),
+        tgt_img, img_mask, "aud_to_img_cross_gate",
+        "aud_to_img_cross_ratio", "key_aud")
+    return result
+
+
 def _audio_masked_metrics(rec, target, mask):
     if mask is None:
         return {
@@ -169,6 +284,12 @@ def _fmt_float(value, digits=4):
     return f"{float(value):.{digits}f}"
 
 
+def _fmt_na(value, digits=4):
+    if value is None or not math.isfinite(float(value)):
+        return "N/A"
+    return f"{float(value):.{digits}f}"
+
+
 def _log_audio_diag(diag_rows):
     """音频塌缩诊断块：rec/target 的 mean/std/max + top-k 能量召回。
 
@@ -197,7 +318,8 @@ def _log_audio_diag(diag_rows):
 @torch.no_grad()
 def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
               max_batches=None, protocol="fixed_mask", mode_idx=0,
-              fixed_img_mode_override=None, fixed_aud_mode_override=None):
+              fixed_img_mode_override=None, fixed_aud_mode_override=None,
+              cross_key_mode="normal"):
     """按 cue 模式对应的恢复粒度 target 计算指标。
 
     图像/音频指标均对照 select_targets 选出的 target（区分样本级/类别级）：
@@ -224,6 +346,8 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     all_rec = []
     img_kind = aud_kind = "?"
     diag_sum = {}
+    cross_metric_sums = {}
+    cross_metric_counts = {}
 
     base_seed = int(cfg.get("seed", 0))
     fixed_img_mode, fixed_aud_mode = _fixed_eval_families(cfg)
@@ -259,9 +383,62 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
 
         tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
             mode, x_img, x_aud, proto_img, proto_aud, labels)
-        out = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
-                    training_mode=False, phase="readout",
-                    img_cue_mask=img_mask, aud_cue_mask=aud_mask)
+        def run_model(**cross_kwargs):
+            return model(
+                x_img_cue=img_cue, x_aud_cue=aud_cue,
+                training_mode=False, phase="readout",
+                img_cue_mask=img_mask, aud_cue_mask=aud_mask,
+                **cross_kwargs)
+
+        normal_out = run_model()
+        out = normal_out
+        if cross_key_mode == "zero":
+            out = run_model(
+                disable_img_to_aud_cross=True,
+                disable_aud_to_img_cross=True)
+            if not torch.equal(normal_out["index_state"], out["index_state"]):
+                raise RuntimeError("cross-key zero intervention changed index_state")
+        elif cross_key_mode in ("shuffle_wrong", "sweep"):
+            wrong_perm, wrong_valid = _wrong_class_indices(labels)
+            img_rate = (rate(normal_out["key_img"]).detach()
+                        if normal_out.get("key_img") is not None else None)
+            aud_rate = (rate(normal_out["key_aud"]).detach()
+                        if normal_out.get("key_aud") is not None else None)
+            wrong_kwargs = {}
+            if img_rate is not None:
+                wrong_kwargs["cross_key_img_rate_override"] = img_rate[wrong_perm]
+            if aud_rate is not None:
+                wrong_kwargs["cross_key_aud_rate_override"] = aud_rate[wrong_perm]
+
+            if cross_key_mode == "sweep":
+                zero_out = run_model(
+                    disable_img_to_aud_cross=True,
+                    disable_aud_to_img_cross=True)
+                wrong_out = run_model(**wrong_kwargs)
+                for label, candidate in (("zero", zero_out),
+                                         ("wrong", wrong_out)):
+                    if not torch.equal(normal_out["index_state"],
+                                       candidate["index_state"]):
+                        raise RuntimeError(
+                            f"cross-key {label} intervention changed index_state")
+                    if not torch.equal(
+                            normal_out["logits"].argmax(dim=1),
+                            candidate["logits"].argmax(dim=1)):
+                        raise RuntimeError(
+                            f"cross-key {label} intervention changed ACC path")
+                paired = _paired_cross_metrics(
+                    normal_out, zero_out, wrong_out,
+                    tgt_img, tgt_aud, img_mask, aud_mask, wrong_valid)
+                for key, (values, valid) in paired.items():
+                    _sum_paired_metric(
+                        cross_metric_sums, cross_metric_counts,
+                        key, values, valid)
+            else:
+                out = run_model(**wrong_kwargs)
+                if not torch.equal(normal_out["index_state"],
+                                   out["index_state"]):
+                    raise RuntimeError(
+                        "cross-key wrong intervention changed index_state")
 
         pred = out["logits"].argmax(dim=1)
         correct += (pred == labels).sum().item()
@@ -303,6 +480,10 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     rec_all = torch.cat(all_rec, dim=0) if all_rec else torch.zeros(1, 1, 28, 28)
     pix_var, pair_l2 = batch_reconstruction_variance(rec_all)
     diag = {kk: vv / max(nb, 1) for kk, vv in diag_sum.items()}
+    cross_attr = {
+        key: _mean_metric(cross_metric_sums, cross_metric_counts, key)
+        for key in sorted(cross_metric_sums)
+    }
     return {
         "acc": acc,
         "img_mse": sum_img_mse / max(nb, 1),
@@ -340,6 +521,7 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         "img_kind": img_kind,
         "aud_kind": aud_kind,
         "diag": diag,
+        "cross_attr": cross_attr,
     }
 
 
@@ -420,6 +602,10 @@ def main():
                     help="fixed_mask=论文主对照(固定mask) | legacy_random=旧随机协议")
     ap.add_argument("--family_breakdown", action="store_true",
                     help="按音频 family 评估 audio-only/clean-image assist/corrupt-both")
+    ap.add_argument(
+        "--cross_key", default="normal",
+        choices=["normal", "zero", "shuffle_wrong", "sweep"],
+        help="Decoder cross-Key 条件干预；sweep 同 cue/mask 对比 normal/zero/wrong")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -434,10 +620,11 @@ def main():
     try:
         state = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(state["model"])
-    except FileNotFoundError:
-        log(f"[警告] 未找到 checkpoint {ckpt_path}，使用随机初始化权重评估。")
+    except FileNotFoundError as e:
+        raise SystemExit(f"[错误] 未找到 checkpoint: {ckpt_path}") from e
     except RuntimeError as e:
-        log(f"[警告] checkpoint 结构不匹配（可能是旧架构），使用随机权重评估。\n  {e}")
+        raise SystemExit(
+            f"[错误] checkpoint 结构不匹配，禁止使用随机权重继续评估。\n{e}") from e
 
     _, test_loader = build_loaders(cfg)
     proto_img = test_loader.dataset.prototype_img.to(device)
@@ -453,7 +640,7 @@ def main():
                     else [_fixed_eval_families(cfg)])
     log("=" * sum(eval_w))
     log(f"[评估] 8 种 cue 模式  (corrupt severity={args.severity})  "
-        f"协议={args.protocol}")
+        f"协议={args.protocol}  cross_key={args.cross_key}")
     if args.protocol == "fixed_mask":
         fam_text = ", ".join(
             f"{i + 1}:{im}/{am}" for i, (im, am) in enumerate(family_pairs))
@@ -470,6 +657,7 @@ def main():
         log(format_table_row(eval_hdr, eval_w, eval_a))
         diag_rows = []
         attr_rows = []
+        cross_rows = []
         for mi, mode in enumerate(EVAL_MODES):
             seed_mode = EVAL_MODES.index(_MASK_SEED_ALIAS.get(mode, mode))
             r = eval_mode(
@@ -477,7 +665,8 @@ def main():
                 args.severity, proto_img, proto_aud, args.max_batches,
                 protocol=args.protocol, mode_idx=fam_idx * 100 + seed_mode,
                 fixed_img_mode_override=fixed_img_mode,
-                fixed_aud_mode_override=fixed_aud_mode)
+                fixed_aud_mode_override=fixed_aud_mode,
+                cross_key_mode=args.cross_key)
             tgt = f"{r['img_kind']}/{r['aud_kind']}"
             log(format_table_row([
                 mode, f"{r['acc']*100:.1f}%",
@@ -491,6 +680,7 @@ def main():
             ], eval_w, eval_a))
             diag_rows.append((mode, r["diag"]))
             attr_rows.append((mode, r))
+            cross_rows.append((mode, r.get("cross_attr", {})))
 
         _log_audio_diag(diag_rows)
 
@@ -515,6 +705,32 @@ def main():
                 _fmt_float(r["aud_coarse_visible_mse"]),
                 _fmt_float(r["aud_visible_mse"]),
             ], attr_w, attr_a))
+
+        if args.cross_key == "sweep":
+            cross_w = [24, 12, 9, 9, 11, 11, 11, 11]
+            cross_a = ["l", "l"] + ["r"] * 6
+            log("=" * sum(cross_w))
+            log("[Cross-Key归因] 同 cue/mask 的 normal/zero/wrong；"
+                "gain=zero-normal，damage=wrong-normal（masked MSE）")
+            log(format_table_row(
+                ["cue模式", "方向", "gate", "res/V", "Cgain", "Fgain",
+                 "Cdamage", "Fdamage"], cross_w, cross_a))
+            for mode, values in cross_rows:
+                for prefix, direction in (("img2aud", "img->aud"),
+                                          ("aud2img", "aud->img")):
+                    log(format_table_row([
+                        mode, direction,
+                        _fmt_na(values.get(f"{prefix}_gate")),
+                        _fmt_na(values.get(f"{prefix}_ratio")),
+                        _fmt_na(values.get(
+                            f"{prefix}_coarse_correct_gain")),
+                        _fmt_na(values.get(
+                            f"{prefix}_final_correct_gain")),
+                        _fmt_na(values.get(
+                            f"{prefix}_coarse_wrong_damage")),
+                        _fmt_na(values.get(
+                            f"{prefix}_final_wrong_damage")),
+                    ], cross_w, cross_a))
 
     if args.family_breakdown:
         eval_audio_family_breakdown(model, test_loader, cfg, device,
