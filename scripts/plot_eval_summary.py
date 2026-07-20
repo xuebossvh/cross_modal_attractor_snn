@@ -9,8 +9,8 @@
 用法：
     python scripts/plot_eval_summary.py outputs/outputs_v11b/tables/demo_eval_table.txt
     python scripts/plot_eval_summary.py outputs/outputs_v11b/logs/eval_v11b_cross_key_sweep_sev04.log
-    python scripts/plot_eval_summary.py eval_v11a_full.log --title "v11a full eval"
-    python scripts/plot_eval_summary.py eval_v11a_fixed_mask.log --diag-only
+    python scripts/plot_eval_summary.py eval_v11b_full.log --title "v11b full eval"
+    python scripts/plot_eval_summary.py eval_v11b_fixed_mask.log --diag-only
 """
 
 import argparse

@@ -358,7 +358,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
         return
     if pc.get("train_cross_key_conditioning", False):
         raise ValueError(
-            "v11a first-stage decoder pretrain requires "
+            "v11b first-stage decoder pretrain requires "
             "decoder_pretrain.train_cross_key_conditioning=false")
 
     lc = cfg["loss"]

@@ -13,7 +13,7 @@ DOCS_DIR = PROJECT_ROOT / "docs"
 DATA_ROOT = PROJECT_ROOT / "_data"
 
 DEFAULT_CKPT = CHECKPOINTS_DIR / "cross_modal_snn.pt"
-DEFAULT_CONFIG = CONFIGS_DIR / "v11a.yaml"
+DEFAULT_CONFIG = CONFIGS_DIR / "v11b_recovery.yaml"
 
 
 def _normalize_version_folder(tag):

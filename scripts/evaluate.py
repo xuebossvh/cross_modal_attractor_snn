@@ -1,6 +1,6 @@
 """评估跨模态 SNN 联想记忆网络。
 
-对 8 种 cue 模式分别评估（推理时禁用 target；v11a Decoder 输入由
+对 8 种 cue 模式分别评估（推理时禁用 target；v11b Decoder 输入由
 v_*_from_A、对侧 Key residual 与当前 cue 的同模态 detail state 构成）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
     clean_img_corrupt_aud / corrupt_img_clean_aud
