@@ -7,8 +7,8 @@
   4. 上述日志若含 [Cross-Key归因] 段，按 family 生成独立 PNG+CSV
 
 用法：
-    python scripts/plot_eval_summary.py outputs/outputs_v11a/tables/demo_eval_table.txt
-    python scripts/plot_eval_summary.py outputs/outputs_v11a/logs/eval_v11a_cross_key_sweep.log
+    python scripts/plot_eval_summary.py outputs/outputs_v11b/tables/demo_eval_table.txt
+    python scripts/plot_eval_summary.py outputs/outputs_v11b/logs/eval_v11b_cross_key_sweep_sev04.log
     python scripts/plot_eval_summary.py eval_v11a_full.log --title "v11a full eval"
     python scripts/plot_eval_summary.py eval_v11a_fixed_mask.log --diag-only
 """
@@ -92,7 +92,8 @@ _CROSS_KEY_ROW_RE = re.compile(
     r"(img->aud|aud->img)\s+"
     r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s+"
     r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s+"
-    r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s*$",
+    r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)"
+    r"(?:\s+(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan))?\s*$",
 )
 _FAMILY_HDR_RE = re.compile(
     r"\[评估 family (\d+)/(\d+)\] img=(\S+)\s+aud=(\S+)",
@@ -259,7 +260,7 @@ def _parse_attribution_from_text(text):
 
 
 def _parse_cross_key_attribution_from_text(text):
-    """Parse the paired normal/zero/wrong Cross-Key attribution block."""
+    """Parse paired normal/zero/wrong/same-class Cross-Key attribution."""
     rows = []
     in_block = False
     past_hdr = False
@@ -277,7 +278,7 @@ def _parse_cross_key_attribution_from_text(text):
             continue
         if stripped.startswith("=") or stripped.startswith("-"):
             continue
-        if "Cgain" in stripped and "Fdamage" in stripped:
+        if "Cgain" in stripped and ("Fdamage" in stripped or "Fsame" in stripped):
             past_hdr = True
             continue
         match = _CROSS_KEY_ROW_RE.match(stripped)
@@ -291,6 +292,10 @@ def _parse_cross_key_attribution_from_text(text):
                 "final_gain": _maybe_float(match.group(6)),
                 "coarse_damage": _maybe_float(match.group(7)),
                 "final_damage": _maybe_float(match.group(8)),
+                "coarse_same_damage": (
+                    _maybe_float(match.group(9)) if match.group(9) else None),
+                "final_same_damage": (
+                    _maybe_float(match.group(10)) if match.group(10) else None),
             })
     return rows
 
@@ -706,7 +711,8 @@ def render_attribution_table(rows, title, path):
 
 def render_cross_key_attribution_table(rows, title, path):
     headers = ["cue mode", "direction", "gate", "res/V", "coarse gain",
-               "final gain", "coarse damage", "final damage"]
+               "final gain", "coarse wrong", "final wrong",
+               "coarse same", "final same"]
 
     def fmt(value):
         return "N/A" if value is None else f"{value:.5f}"
@@ -715,10 +721,11 @@ def render_cross_key_attribution_table(rows, title, path):
         r["mode"], r["direction"], fmt(r.get("gate")),
         fmt(r.get("residual_ratio")), fmt(r.get("coarse_gain")),
         fmt(r.get("final_gain")), fmt(r.get("coarse_damage")),
-        fmt(r.get("final_damage")),
+        fmt(r.get("final_damage")), fmt(r.get("coarse_same_damage")),
+        fmt(r.get("final_same_damage")),
     ] for r in rows]
-    col_w = [0.18, 0.10] + [0.105] * 6
-    return _render_table(headers, cell, col_w, title, path, font_size=8.2)
+    col_w = [0.16, 0.09] + [0.085] * 8
+    return _render_table(headers, cell, col_w, title, path, font_size=7.8)
 
 
 def _parse_n_samples(path):
@@ -742,7 +749,7 @@ def main():
 
     ap = argparse.ArgumentParser()
     ap.add_argument("input", nargs="?",
-                    default="outputs/outputs_v11a/tables/demo_eval_table.txt")
+        default="outputs/outputs_v11b/tables/demo_eval_table.txt")
     ap.add_argument("--out", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--diag-out", default=None, help="音频塌缩诊断表输出路径")

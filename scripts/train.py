@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v11a.yaml
+    python -u scripts/train.py --config configs/v11b_recovery.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -115,11 +115,70 @@ def _masked_audio_weighted_mse(rec, target, mask, gamma=5.0):
     """缺失区能量加权 MSE；高能语音位置比静音位置权重更高。"""
     mask = mask.to(device=rec.device, dtype=rec.dtype)
     weight = 1.0 + float(gamma) * target.clamp_min(0.0)
-    denom = mask.flatten(1).sum(dim=1).clamp_min(1.0)
+    weighted_mask = weight * mask
+    denom = weighted_mask.flatten(1).sum(dim=1).clamp_min(1e-8)
     per_sample = (
-        weight * (rec - target).pow(2) * mask
+        (rec - target).pow(2) * weighted_mask
     ).flatten(1).sum(dim=1) / denom
     return per_sample.mean()
+
+
+def _audio_coarse_loss(rec, target, mask=None):
+    """直接监督 AudioDecoder 输出，不经过 refiner 或 paste-back。"""
+    if mask is not None:
+        return (
+            _masked_audio_error(rec, target, mask, power=1)
+            + _masked_audio_error(rec, target, mask, power=2)
+        )
+    return F.l1_loss(rec, target) + F.mse_loss(rec, target)
+
+
+def _masked_mse_per_sample(rec, target, mask):
+    """逐样本 masked MSE；同时返回 mask 非空的样本标记。"""
+    mask = mask.to(device=rec.device, dtype=rec.dtype)
+    denom = mask.flatten(1).sum(dim=1)
+    valid = denom > 0
+    values = ((rec - target).pow(2) * mask).flatten(1).sum(dim=1)
+    values = values / denom.clamp_min(1.0)
+    return values, valid
+
+
+def _wrong_class_indices(labels):
+    """构造不复用索引的异类置换；不可完全置换时返回最大有效子集。"""
+    labels_cpu = labels.detach().cpu().tolist()
+    n = len(labels_cpu)
+    groups = {}
+    for idx, label in enumerate(labels_cpu):
+        groups.setdefault(int(label), []).append(idx)
+
+    perm_cpu = list(range(n))
+    valid_cpu = [False] * n
+    if len(groups) > 1:
+        ordered_groups = sorted(groups.values(), key=len, reverse=True)
+        majority = ordered_groups[0]
+        others = [idx for group in ordered_groups[1:] for idx in group]
+        if len(majority) <= n - len(majority):
+            ordered = [idx for group in ordered_groups for idx in group]
+            shift = len(majority)
+            targets = ordered[shift:] + ordered[:shift]
+            for source, target in zip(ordered, targets):
+                perm_cpu[source] = target
+                valid_cpu[source] = True
+        else:
+            for major_idx, other_idx in zip(majority, others):
+                perm_cpu[major_idx] = other_idx
+                perm_cpu[other_idx] = major_idx
+                valid_cpu[major_idx] = True
+                valid_cpu[other_idx] = True
+
+    perm = torch.tensor(perm_cpu, dtype=torch.long, device=labels.device)
+    valid = torch.tensor(valid_cpu, dtype=torch.bool, device=labels.device)
+    if valid.any() and torch.any(labels[perm[valid]] == labels[valid]):
+        raise RuntimeError("wrong-class permutation contains a same-class pair")
+    selected = perm[valid]
+    if selected.unique().numel() != selected.numel():
+        raise RuntimeError("wrong-class permutation reuses a Key index")
+    return perm, valid
 
 
 def _masked_tf_grad_loss(rec, target, mask):
@@ -552,6 +611,38 @@ def _build_train_optimizer(model, cfg):
     return torch.optim.Adam(groups, lr=base_lr, weight_decay=wd)
 
 
+def _apply_trainable_prefixes(model, cfg):
+    """可选地冻结除指定前缀外的参数，用于同父 checkpoint 的低风险微调。"""
+    prefixes = cfg.get("train", {}).get("trainable_prefixes", [])
+    if not prefixes:
+        return None
+    prefixes = tuple(str(prefix) for prefix in prefixes)
+    trainable = []
+    for name, param in model.named_parameters():
+        param.requires_grad = name.startswith(prefixes)
+        if param.requires_grad:
+            trainable.append(name)
+    if not trainable:
+        raise RuntimeError(
+            f"train.trainable_prefixes matched no parameters: {prefixes}")
+    return trainable
+
+
+def _checkpoint_payload(model, opt, scheduler, cfg, epoch):
+    return {
+        "model": model.state_dict(),
+        "opt": opt.state_dict(),
+        "sched": scheduler.state_dict() if scheduler is not None else None,
+        "cfg": cfg,
+        "epoch": epoch,
+    }
+
+
+def _milestone_checkpoint_path(ckpt_path, completed_epochs):
+    stem, ext = os.path.splitext(ckpt_path)
+    return f"{stem}_ep{completed_epochs}{ext or '.pt'}"
+
+
 def _select_family_mode(pool, fallback, step, strategy="balanced"):
     if pool:
         if str(strategy).lower() == "balanced":
@@ -696,6 +787,104 @@ def _apply_audio_target_curriculum(tgt_aud, labels, cue_mode, aud_kind,
     return mixed.clamp(0.0, 1.0), sample_w
 
 
+def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
+                           tgt_img, tgt_aud, img_mask, aud_mask,
+                           labels, cue_mode, cfg):
+    """用 detached zero/wrong reference 强制正确对侧 Key 改善 coarse 洞内误差。"""
+    causal = cfg.get("cross_key_conditioning", {}).get(
+        "causal_training", {})
+    if not causal.get("enabled", False):
+        return out_correct["logits"].new_tensor(0.0), {}
+    probability = float(causal.get("batch_probability", 0.25))
+    if probability <= 0 or random.random() >= probability:
+        return out_correct["logits"].new_tensor(0.0), {}
+
+    use_img2aud = (
+        cue_mode in ("clean_img_corrupt_aud", "corrupt_both")
+        and aud_mask is not None
+        and out_correct.get("key_img") is not None
+    )
+    use_aud2img = (
+        cue_mode in ("corrupt_img_clean_aud", "corrupt_both")
+        and img_mask is not None
+        and out_correct.get("key_aud") is not None
+    )
+    if not (use_img2aud or use_aud2img):
+        return out_correct["logits"].new_tensor(0.0), {}
+
+    wrong_perm, wrong_valid = _wrong_class_indices(labels)
+    if not wrong_valid.any():
+        return out_correct["logits"].new_tensor(0.0), {}
+
+    def run_reference(**cross_kwargs):
+        return model(
+            x_img_cue=img_cue, x_aud_cue=aud_cue,
+            training_mode=True, phase="readout",
+            img_cue_mask=img_mask, aud_cue_mask=aud_mask,
+            **cross_kwargs)
+
+    with torch.no_grad():
+        zero_out = run_reference(
+            disable_img_to_aud_cross=True,
+            disable_aud_to_img_cross=True)
+        wrong_kwargs = {}
+        if out_correct.get("key_img") is not None:
+            img_rate = rate(out_correct["key_img"]).detach()
+            wrong_kwargs["cross_key_img_rate_override"] = img_rate[wrong_perm]
+        if out_correct.get("key_aud") is not None:
+            aud_rate = rate(out_correct["key_aud"]).detach()
+            wrong_kwargs["cross_key_aud_rate_override"] = aud_rate[wrong_perm]
+        wrong_out = run_reference(**wrong_kwargs)
+
+    margin_ratio = float(causal.get("margin_ratio", 0.05))
+    direction_losses = []
+    logs = {}
+
+    def add_direction(name, correct, zero, wrong, target, mask):
+        correct_err, region_valid = _masked_mse_per_sample(
+            correct, target, mask)
+        zero_err, _ = _masked_mse_per_sample(zero, target, mask)
+        wrong_err, _ = _masked_mse_per_sample(wrong, target, mask)
+        valid = wrong_valid & region_valid
+        if not valid.any():
+            return
+        correct_sel = correct_err[valid]
+        zero_sel = zero_err[valid].detach()
+        wrong_sel = wrong_err[valid].detach()
+        margin = margin_ratio * zero_sel
+        pair_loss = (
+            F.relu(correct_sel - zero_sel + margin)
+            + F.relu(correct_sel - wrong_sel + margin)
+        ).mean()
+        direction_losses.append(pair_loss)
+        logs[f"cross_{name}"] = pair_loss.item()
+        logs[f"{name}_correct"] = correct_sel.detach().mean().item()
+        logs[f"{name}_zero"] = zero_sel.mean().item()
+        logs[f"{name}_wrong"] = wrong_sel.mean().item()
+        logs[f"{name}_n"] = float(valid.sum().item())
+
+    if use_img2aud:
+        add_direction(
+            "img2aud",
+            out_correct["recovered_aud_coarse"],
+            zero_out["recovered_aud_coarse"],
+            wrong_out["recovered_aud_coarse"],
+            tgt_aud, aud_mask)
+    if use_aud2img:
+        add_direction(
+            "aud2img",
+            torch.sigmoid(out_correct["recovered_img_coarse"]),
+            torch.sigmoid(zero_out["recovered_img_coarse"]),
+            torch.sigmoid(wrong_out["recovered_img_coarse"]),
+            tgt_img, img_mask)
+
+    if not direction_losses:
+        return out_correct["logits"].new_tensor(0.0), {}
+    loss = torch.stack(direction_losses).mean()
+    logs["cross_pair"] = loss.item()
+    return loss, logs
+
+
 def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
                    proto_img, proto_aud, epoch=0, step=0):
     """返回 (总损失, 日志字典)。"""
@@ -797,13 +986,25 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
         and aud_kind == "sample"
         and aud_mode in masked_families
         and aud_mask is not None
-        and lc.get("lambda_aud_masked", 0.0) > 0
     )
     mask_for_loss = aud_mask if use_aud_mask else None
     loss_aud = _aud_recon_loss(out_r["recovered_aud"], tgt_aud, lc,
                                mask=mask_for_loss)
     total = total + lc["lambda_aud"] * loss_aud
     logs[f"aud({aud_kind[:3]})"] = loss_aud.item()
+
+    lam_aud_coarse = float(lc.get("lambda_aud_coarse", 0.0))
+    if lam_aud_coarse > 0:
+        coarse_aud = out_r["recovered_aud_coarse"]
+        loss_aud_coarse = _audio_coarse_loss(
+            coarse_aud, tgt_aud, mask=mask_for_loss)
+        total = total + lam_aud_coarse * loss_aud_coarse
+        logs["aud_coarse"] = loss_aud_coarse.item()
+        logs["aud_coarse_mse"] = F.mse_loss(
+            coarse_aud, tgt_aud).item()
+        if mask_for_loss is not None:
+            logs["aud_coarse_mask_mse"] = _masked_audio_error(
+                coarse_aud, tgt_aud, mask_for_loss, power=2).item()
     if use_aud_mask:
         logs["aud_mask_l1"] = _masked_audio_error(
             out_r["recovered_aud"], tgt_aud, aud_mask, power=1).item()
@@ -833,6 +1034,18 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             total = total + lam_act * loss_act
             logs["aud_act"] = loss_act.item()
 
+    causal_cfg = cfg.get("cross_key_conditioning", {}).get(
+        "causal_training", {})
+    causal_weight = float(causal_cfg.get("loss_weight", 0.0))
+    if causal_weight > 0:
+        loss_cross, cross_logs = _cross_key_causal_loss(
+            model, out_r, img_cue, aud_cue,
+            tgt_img, tgt_aud, img_mask, aud_mask,
+            labels, cue_mode, cfg)
+        if cross_logs:
+            total = total + causal_weight * loss_cross
+            logs.update(cross_logs)
+
     total = total + lc["lambda_reg"] * spike_reg(out_r)
 
     return total, logs
@@ -842,7 +1055,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11a.yaml")
+    ap.add_argument("--config", default="configs/v11b_recovery.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -883,20 +1096,31 @@ def main():
         f"binding={cfg['ablation']['use_binding_phase']}")
 
     model = CrossModalSNN(cfg).to(device)
+    init_state = None
+    init_source = None
     init_ckpt = cfg["train"].get("init_ckpt_path", "")
     if init_ckpt and not args.resume:
         init_ckpt = str(resolve_from_root(init_ckpt))
         if os.path.isfile(init_ckpt):
             state = torch.load(init_ckpt, map_location=device)
             state_dict = state.get("model", state)
-            strict = cfg["train"].get("init_strict", False)
+            strict = cfg["train"].get("init_strict", True)
             incompatible = model.load_state_dict(state_dict, strict=strict)
             missing = getattr(incompatible, "missing_keys", [])
             unexpected = getattr(incompatible, "unexpected_keys", [])
+            if missing or unexpected:
+                raise RuntimeError(
+                    "[init] incompatible parent checkpoint: "
+                    f"missing={missing} unexpected={unexpected}")
+            init_state = state if isinstance(state, dict) else None
+            init_source = init_ckpt
             log(f"[init] loaded weights from {init_ckpt} strict={strict} "
                 f"missing={len(missing)} unexpected={len(unexpected)}")
         else:
-            log(f"[init] init_ckpt_path not found: {init_ckpt}; training from scratch.")
+            message = f"[init] init_ckpt_path not found: {init_ckpt}"
+            if cfg["train"].get("init_required", False):
+                raise FileNotFoundError(message)
+            log(f"{message}; training from scratch.")
 
     if args.skip_decoder_pretrain:
         log("[decoder-pretrain] skipped by --skip_decoder_pretrain")
@@ -905,6 +1129,9 @@ def main():
     else:
         pretrain_decoders(model, train_loader, cfg, device)
 
+    trainable = _apply_trainable_prefixes(model, cfg)
+    if trainable is not None:
+        log(f"[启动] trainable_prefixes matched {len(trainable)} tensors")
     opt = _build_train_optimizer(model, cfg)
 
     sched_name = cfg["train"].get("lr_scheduler", "none")
@@ -922,6 +1149,41 @@ def main():
     log(f"[启动] grad_clip={cfg['train'].get('grad_clip', 0.0)}")
 
     start_epoch = 0
+    if init_source is not None:
+        configured_start = cfg["train"].get("start_epoch")
+        saved_start = None
+        if init_state is not None and "epoch" in init_state:
+            saved_start = int(init_state["epoch"]) + 1
+        if cfg["train"].get("init_load_optimizer", False):
+            if init_state is None or "opt" not in init_state:
+                raise RuntimeError(
+                    "train.init_load_optimizer=true but parent checkpoint "
+                    "does not contain optimizer state")
+            opt.load_state_dict(init_state["opt"])
+            parent_sched = init_state.get("sched")
+            if parent_sched is not None:
+                if scheduler is None:
+                    raise RuntimeError(
+                        "parent checkpoint has scheduler state but child "
+                        "configuration disables the scheduler")
+                scheduler.load_state_dict(parent_sched)
+            if saved_start is None:
+                raise RuntimeError(
+                    "optimizer continuation requires parent epoch metadata")
+            start_epoch = saved_start
+            if (configured_start is not None
+                    and int(configured_start) != start_epoch):
+                raise RuntimeError(
+                    "train.start_epoch does not match parent checkpoint: "
+                    f"configured={configured_start} parent={start_epoch}")
+            log(f"[init] restored optimizer/scheduler; start_epoch={start_epoch}")
+        else:
+            if configured_start is not None:
+                start_epoch = int(configured_start)
+            elif saved_start is not None:
+                start_epoch = saved_start
+            log(f"[init] model-only branch; start_epoch={start_epoch}")
+
     ckpt = str(resolve_from_root(cfg["train"]["ckpt_path"]))
     if args.resume and os.path.isfile(ckpt):
         state = torch.load(ckpt, map_location=device)
@@ -942,6 +1204,10 @@ def main():
 
     log_every = cfg["train"]["log_every"]
     grad_clip = float(cfg["train"].get("grad_clip", 0.0))
+    milestone_epochs = {
+        int(value) for value in cfg["train"].get(
+            "save_milestone_epochs", [])
+    }
     for epoch in range(start_epoch, total_epochs):
         model.train()
         epoch_loss = 0.0
@@ -982,13 +1248,14 @@ def main():
 
         avg_loss = epoch_loss / max(steps_per_epoch, 1)
         os.makedirs(os.path.dirname(ckpt), exist_ok=True)
-        torch.save({
-            "model": model.state_dict(),
-            "opt": opt.state_dict(),
-            "sched": scheduler.state_dict() if scheduler is not None else None,
-            "cfg": cfg,
-            "epoch": epoch,
-        }, ckpt)
+        payload = _checkpoint_payload(model, opt, scheduler, cfg, epoch)
+        torch.save(payload, ckpt)
+        completed_epochs = epoch + 1
+        if completed_epochs in milestone_epochs:
+            milestone_path = _milestone_checkpoint_path(
+                ckpt, completed_epochs)
+            torch.save(payload, milestone_path)
+            log(f"[epoch {epoch}] milestone 已保存 -> {milestone_path}")
         log(f"[epoch {epoch}] 平均 loss={avg_loss:.4f}  lr={cur_lr:.6f}  "
             f"checkpoint 已保存 -> {ckpt}")
 

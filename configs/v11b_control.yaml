@@ -1,0 +1,268 @@
+# v11b same-parent control: Cross-Key modules exist but the forward path is off.
+# By default it branches from v11b_recovery; switch all three final branches
+# to v11b_weighted together if the preregistered recovery criteria prefer it.
+
+seed: 1234
+device: "cuda"
+
+snn:
+  T: 20
+  beta: 0.9
+  v_threshold: 1.0
+  surrogate_alpha: 2.0
+  encoding: "current"
+  img_encoding: "first_spike_trace"
+  trace_decay: 0.9
+  aud_encoder: "conv"
+  aud_conv_ch1: 32
+  aud_conv_ch2: 64
+  aud_decoder_base_ch: 192
+  aud_decoder_start_hw: 8
+  aud_decoder_refine_blocks: 2
+  aud_refine_type: "gated_dilated"
+
+audio_refiner:
+  enabled: true
+  hidden_ch: 32
+  blocks: 4
+  max_dilation: 16
+  delta_scale: 1.0
+  visible_paste_back: true
+  pasteback_only: false
+  lr_mult: 0.5
+
+image_refiner:
+  enabled: true
+  hidden_ch: 32
+  blocks: 3
+  max_dilation: 4
+  delta_scale: 1.0
+  visible_paste_back: true
+  pasteback_only: false
+  lr_mult: 0.5
+
+detail_conditioning:
+  enabled: true
+  detach: false
+  detach_value_for_recon: true
+  zero_missing: true
+  fusion: "gated_concat"
+  img_detail_dim: 128
+  aud_detail_dim: 256
+
+cross_key_conditioning:
+  enabled: false
+  build_modules: true
+  detach_key: true
+  lr_mult: 10.0
+  causal_training:
+    enabled: false
+    loss_weight: 0.0
+    batch_probability: 0.25
+    margin_ratio: 0.05
+
+decoder_pretrain:
+  enabled: false
+  epochs: 25
+  lr: 0.0002
+  weight_decay: 0.0
+  grad_clip: 1.0
+  log_every: 50
+  freeze_non_decoders: true
+  resume: false
+  save_every_epoch: true
+  detail_dropout: 0.25
+  corrupt_detail: true
+  corrupt_severity: 0.4
+  img_mode: "occlusion"
+  aud_mode: "time_mask"
+  img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
+  aud_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+  family_sampling: "balanced"
+  use_masked_audio_loss: true
+  use_masked_image_loss: true
+  train_audio_refiner: true
+  train_image_refiner: true
+  train_cross_key_conditioning: false
+  lambda_coarse_aux: 0.5
+  lambda_img: 1.0
+  lambda_aud: 4.0
+  lambda_aud_active: 1.0
+  save_ckpt: true
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11b_decoder_pretrain.pt"
+
+dims:
+  img_in: 784
+  img_hidden: 256
+  D_img: 128
+  N_key_img: 128
+  aud_in: 4096
+  aud_hidden: 256
+  D_aud: 128
+  N_key_aud: 128
+  N_index: 512
+  N_value_img: 384
+  N_value_aud: 768
+  num_classes: 10
+
+index:
+  alpha_img: 1.0
+  alpha_aud: 1.0
+  input_schedule: "simultaneous"
+  phase_split: 0.5
+  phase_current_scale: 1.0
+  phase_on_bimodal_only: true
+  recurrent_scale: 0.2
+  wta_mode: "kwta"
+  k_wta: 96
+  inhibition_strength: 1.0
+
+value:
+  binding_delay: 2
+
+ablation:
+  use_recurrent: true
+  use_kwta: true
+  use_delayed_value_target: true
+  use_binding_phase: true
+  use_modality_dropout: true
+  use_audio_aux_cls: true
+
+audio:
+  use_real_audio: true
+  feature: "log_mel"
+  n_mels: 64
+  n_frames: 64
+  sample_rate: 8000
+  duration_sec: 1.0
+  fsdd_root: "_data/fsdd/recordings"
+  auto_download: true
+  toy_audio_prototype: false
+  noise_std: 0.3
+  norm_mode: "global"
+  norm_stats_path: "_data/audio_norm_stats.pt"
+  norm_percentile_lo: 1.0
+  norm_percentile_hi: 99.0
+  encoder_norm_mode: "hybrid"
+  encoder_local_mix: 0.5
+
+cue_modes:
+  p_corrupt_img_only: 0.10
+  p_corrupt_aud_only: 0.15
+  p_corrupt_both: 0.20
+  p_clean_img_corrupt_aud: 0.15
+  p_corrupt_img_clean_aud: 0.15
+  p_clean_img_only: 0.05
+  p_clean_aud_only: 0.10
+  p_clean_both: 0.10
+
+corruption:
+  train_severity: 0.4
+  img_mode: "occlusion"
+  aud_mode: "time_mask"
+  img_family_sampling: "balanced"
+  aud_family_sampling: "balanced"
+  curriculum_mode: "staged"
+  severity_min: 0.1
+  severity_max: 0.4
+  stage1_end: 20
+  stage2_end: 35
+  img_train_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
+  aud_train_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+  aud_family_curriculum:
+    enabled: false
+    early: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+    mid: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+    late: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+  aud_time_mask_finetune:
+    enabled: true
+    start_epoch: 95
+    weights:
+      time_mask: 0.60
+      freq_mask: 0.10
+      feature_dropout: 0.10
+      partial_temporal: 0.05
+      time_freq_block: 0.15
+  eval_fixed:
+    img_mode: "occlusion"
+    aud_mode: "time_mask"
+    img_modes: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
+    aud_modes: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+
+loss:
+  lambda_cls: 1.0
+  lambda_cls_aud_only_mult: 2.0
+  lambda_img: 1.0
+  lambda_img_masked: 1.0
+  img_masked_families: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
+  lambda_aud: 4.0
+  lambda_aud_coarse: 0.5
+  aud_weight_gamma: 5.0
+  lambda_aud_grad: 1.0
+  lambda_aud_foreground: 0.5
+  aud_foreground_top_fraction: 0.15
+  lambda_aud_marginal: 0.15
+  lambda_aud_masked: 1.0
+  lambda_aud_masked_weighted: 0.0
+  aud_masked_weight_gamma: 5.0
+  aud_masked_families: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
+  lambda_aud_active: 1.0
+  lambda_aud_ssim: 0.0
+  lambda_aud_masked_grad: 0.0
+  lambda_aud_feat: 0.0
+  lambda_audio_aux: 1.0
+  lambda_bind_img: 1.0
+  lambda_bind_aud: 1.0
+  lambda_reg: 0.0005
+  img_recon: "bce"
+  lambda_img_l1: 0.5
+  lambda_img_edge: 0.5
+  lambda_index_cons: 0.5
+  lambda_soft_cls: 0.5
+  soft_cls_temperature: 2.0
+  align_teacher_modes: ["corrupt_both", "corrupt_aud_only", "clean_img_corrupt_aud", "corrupt_img_clean_aud"]
+  align_teacher_match_modality: true
+  lambda_key_align: 0.2
+  key_align_temperature: 0.1
+  key_align_modes: ["corrupt_both", "clean_img_corrupt_aud", "corrupt_img_clean_aud", "clean_both"]
+  lambda_aud_detail_cons: 0.0
+  aud_detail_cons_modes: ["corrupt_aud_only", "clean_img_corrupt_aud", "corrupt_both"]
+  aud_sample_curriculum:
+    enabled: true
+    modes: ["corrupt_both"]
+    start_epoch: 0
+    end_epoch: 10
+    max_sample_mix: 1.0
+
+data:
+  root: "_data"
+  use_mnist: true
+  batch_size: 128
+  num_workers: 4
+  train_subset: 0
+
+train:
+  output_version: v11b_control
+  epochs: 150
+  lr: 0.0001
+  weight_decay: 0.0
+  grad_clip: 1.0
+  log_every: 50
+  lr_scheduler: "none"
+  lr_min: 0.00005
+  lr_step_size: 15
+  lr_gamma: 0.5
+  init_ckpt_path: "outputs/checkpoints/cross_modal_snn_v11b_recovery.pt"
+  init_strict: true
+  init_required: true
+  init_load_optimizer: false
+  start_epoch: 120
+  trainable_prefixes:
+    - "image_decoder."
+    - "audio_decoder."
+    - "aud_to_img_cross_proj."
+    - "img_to_aud_cross_proj."
+    - "aud_to_img_cross_gate."
+    - "img_to_aud_cross_gate."
+  save_milestone_epochs: []
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11b_control.pt"

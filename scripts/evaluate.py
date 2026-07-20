@@ -23,10 +23,10 @@ v_*_from_A、对侧 Key residual 与当前 cue 的同模态 detail state 构成�
 可选：--cross_key sweep 在同一 cue/mask 下比较 correct/zero/wrong-class Key。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask
-    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol legacy_random
-    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask --family_breakdown
-    python -u scripts/evaluate.py --config configs/v11a.yaml --protocol fixed_mask --cross_key sweep
+    python -u scripts/evaluate.py --config configs/v11b.yaml --protocol fixed_mask
+    python -u scripts/evaluate.py --config configs/v11b.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v11b.yaml --protocol fixed_mask --family_breakdown
+    python -u scripts/evaluate.py --config configs/v11b.yaml --protocol fixed_mask --cross_key sweep
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -165,6 +165,32 @@ def _wrong_class_indices(labels):
     return perm, valid
 
 
+def _same_class_indices(labels):
+    """构造同类不同样本置换；batch 内单例类别 valid=False。"""
+    labels_cpu = labels.detach().cpu().tolist()
+    groups = {}
+    for idx, label in enumerate(labels_cpu):
+        groups.setdefault(int(label), []).append(idx)
+    perm_cpu = list(range(len(labels_cpu)))
+    valid_cpu = [False] * len(labels_cpu)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        shifted = group[1:] + group[:1]
+        for source, target in zip(group, shifted):
+            perm_cpu[source] = target
+            valid_cpu[source] = True
+    perm = torch.tensor(perm_cpu, dtype=torch.long, device=labels.device)
+    valid = torch.tensor(valid_cpu, dtype=torch.bool, device=labels.device)
+    if valid.any():
+        if torch.any(perm[valid] == torch.arange(
+                labels.numel(), device=labels.device)[valid]):
+            raise RuntimeError("same-class permutation contains an identity pair")
+        if torch.any(labels[perm[valid]] != labels[valid]):
+            raise RuntimeError("same-class permutation contains a wrong-class pair")
+    return perm, valid
+
+
 def _sum_paired_metric(sums, counts, key, values, valid):
     if values is None or valid is None:
         return
@@ -175,44 +201,50 @@ def _sum_paired_metric(sums, counts, key, values, valid):
     counts[key] = counts.get(key, 0) + int(valid.sum().item())
 
 
-def _paired_cross_metrics(normal_out, zero_out, wrong_out,
+def _paired_cross_metrics(normal_out, zero_out, wrong_out, same_out,
                           tgt_img, tgt_aud, img_mask, aud_mask,
-                          wrong_valid):
-    """同 cue/mask 下计算 normal/zero/wrong 的方向化 paired 指标。"""
+                          wrong_valid, same_valid):
+    """同 cue/mask 下计算 normal/zero/wrong/same-class 配对指标。"""
     result = {}
 
-    def add_direction(prefix, normal_final, zero_final, wrong_final,
-                      normal_coarse, zero_coarse, wrong_coarse,
+    def add_direction(prefix, normal_final, zero_final, wrong_final, same_final,
+                      normal_coarse, zero_coarse, wrong_coarse, same_coarse,
                       target, mask, gate_key, ratio_key, source_key):
         if mask is None or normal_out.get(source_key) is None:
             return
-        triplets = {
-            "final": (normal_final, zero_final, wrong_final),
-            "coarse": (normal_coarse, zero_coarse, wrong_coarse),
+        quartets = {
+            "final": (normal_final, zero_final, wrong_final, same_final),
+            "coarse": (normal_coarse, zero_coarse, wrong_coarse, same_coarse),
         }
-        for stage, (normal_rec, zero_rec, wrong_rec) in triplets.items():
+        for stage, (normal_rec, zero_rec, wrong_rec, same_rec) in quartets.items():
             n_err, region_valid = _region_error_per_sample(
                 normal_rec, target, mask, power=2)
             z_err, _ = _region_error_per_sample(zero_rec, target, mask, power=2)
             w_err, _ = _region_error_per_sample(wrong_rec, target, mask, power=2)
-            valid = region_valid & wrong_valid
-            result[f"{prefix}_{stage}_correct_gain"] = (z_err - n_err, valid)
-            result[f"{prefix}_{stage}_wrong_damage"] = (w_err - n_err, valid)
+            s_err, _ = _region_error_per_sample(same_rec, target, mask, power=2)
+            result[f"{prefix}_{stage}_correct_gain"] = (
+                z_err - n_err, region_valid)
+            result[f"{prefix}_{stage}_wrong_damage"] = (
+                w_err - n_err, region_valid & wrong_valid)
+            result[f"{prefix}_{stage}_same_damage"] = (
+                s_err - n_err, region_valid & same_valid)
 
         gate = normal_out.get(gate_key)
         if gate is not None:
-            result[f"{prefix}_gate"] = (gate.flatten(), wrong_valid)
+            result[f"{prefix}_gate"] = (
+                gate.flatten(), torch.ones_like(wrong_valid))
         ratio = normal_out.get(ratio_key)
         if ratio is not None:
-            result[f"{prefix}_ratio"] = (ratio.flatten(), wrong_valid)
+            result[f"{prefix}_ratio"] = (
+                ratio.flatten(), torch.ones_like(wrong_valid))
 
     add_direction(
         "img2aud",
         normal_out["recovered_aud"], zero_out["recovered_aud"],
-        wrong_out["recovered_aud"],
+        wrong_out["recovered_aud"], same_out["recovered_aud"],
         normal_out["recovered_aud_coarse"],
         zero_out["recovered_aud_coarse"],
-        wrong_out["recovered_aud_coarse"],
+        wrong_out["recovered_aud_coarse"], same_out["recovered_aud_coarse"],
         tgt_aud, aud_mask, "img_to_aud_cross_gate",
         "img_to_aud_cross_ratio", "key_img")
     add_direction(
@@ -220,9 +252,11 @@ def _paired_cross_metrics(normal_out, zero_out, wrong_out,
         torch.sigmoid(normal_out["recovered_img"]),
         torch.sigmoid(zero_out["recovered_img"]),
         torch.sigmoid(wrong_out["recovered_img"]),
+        torch.sigmoid(same_out["recovered_img"]),
         torch.sigmoid(normal_out["recovered_img_coarse"]),
         torch.sigmoid(zero_out["recovered_img_coarse"]),
         torch.sigmoid(wrong_out["recovered_img_coarse"]),
+        torch.sigmoid(same_out["recovered_img_coarse"]),
         tgt_img, img_mask, "aud_to_img_cross_gate",
         "aud_to_img_cross_ratio", "key_aud")
     return result
@@ -398,8 +432,9 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                 disable_aud_to_img_cross=True)
             if not torch.equal(normal_out["index_state"], out["index_state"]):
                 raise RuntimeError("cross-key zero intervention changed index_state")
-        elif cross_key_mode in ("shuffle_wrong", "sweep"):
+        elif cross_key_mode in ("shuffle_wrong", "same_class", "sweep"):
             wrong_perm, wrong_valid = _wrong_class_indices(labels)
+            same_perm, same_valid = _same_class_indices(labels)
             img_rate = (rate(normal_out["key_img"]).detach()
                         if normal_out.get("key_img") is not None else None)
             aud_rate = (rate(normal_out["key_aud"]).detach()
@@ -409,14 +444,21 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                 wrong_kwargs["cross_key_img_rate_override"] = img_rate[wrong_perm]
             if aud_rate is not None:
                 wrong_kwargs["cross_key_aud_rate_override"] = aud_rate[wrong_perm]
+            same_kwargs = {}
+            if img_rate is not None:
+                same_kwargs["cross_key_img_rate_override"] = img_rate[same_perm]
+            if aud_rate is not None:
+                same_kwargs["cross_key_aud_rate_override"] = aud_rate[same_perm]
 
             if cross_key_mode == "sweep":
                 zero_out = run_model(
                     disable_img_to_aud_cross=True,
                     disable_aud_to_img_cross=True)
                 wrong_out = run_model(**wrong_kwargs)
+                same_out = run_model(**same_kwargs)
                 for label, candidate in (("zero", zero_out),
-                                         ("wrong", wrong_out)):
+                                         ("wrong", wrong_out),
+                                         ("same", same_out)):
                     if not torch.equal(normal_out["index_state"],
                                        candidate["index_state"]):
                         raise RuntimeError(
@@ -427,18 +469,25 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                         raise RuntimeError(
                             f"cross-key {label} intervention changed ACC path")
                 paired = _paired_cross_metrics(
-                    normal_out, zero_out, wrong_out,
-                    tgt_img, tgt_aud, img_mask, aud_mask, wrong_valid)
+                    normal_out, zero_out, wrong_out, same_out,
+                    tgt_img, tgt_aud, img_mask, aud_mask,
+                    wrong_valid, same_valid)
                 for key, (values, valid) in paired.items():
                     _sum_paired_metric(
                         cross_metric_sums, cross_metric_counts,
                         key, values, valid)
-            else:
+            elif cross_key_mode == "shuffle_wrong":
                 out = run_model(**wrong_kwargs)
                 if not torch.equal(normal_out["index_state"],
                                    out["index_state"]):
                     raise RuntimeError(
                         "cross-key wrong intervention changed index_state")
+            else:
+                out = run_model(**same_kwargs)
+                if not torch.equal(normal_out["index_state"],
+                                   out["index_state"]):
+                    raise RuntimeError(
+                        "cross-key same-class intervention changed index_state")
 
         pred = out["logits"].argmax(dim=1)
         correct += (pred == labels).sum().item()
@@ -592,7 +641,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11a.yaml")
+    ap.add_argument("--config", default="configs/v11b.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--severity", type=float, default=0.5)
@@ -604,8 +653,9 @@ def main():
                     help="按音频 family 评估 audio-only/clean-image assist/corrupt-both")
     ap.add_argument(
         "--cross_key", default="normal",
-        choices=["normal", "zero", "shuffle_wrong", "sweep"],
-        help="Decoder cross-Key 条件干预；sweep 同 cue/mask 对比 normal/zero/wrong")
+        choices=["normal", "zero", "shuffle_wrong", "same_class", "sweep"],
+        help=("Decoder cross-Key 条件干预；sweep 同 cue/mask 对比 "
+              "normal/zero/wrong/same-class"))
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -707,14 +757,14 @@ def main():
             ], attr_w, attr_a))
 
         if args.cross_key == "sweep":
-            cross_w = [24, 12, 9, 9, 11, 11, 11, 11]
-            cross_a = ["l", "l"] + ["r"] * 6
+            cross_w = [24, 12, 9, 9, 11, 11, 11, 11, 11, 11]
+            cross_a = ["l", "l"] + ["r"] * 8
             log("=" * sum(cross_w))
-            log("[Cross-Key归因] 同 cue/mask 的 normal/zero/wrong；"
-                "gain=zero-normal，damage=wrong-normal（masked MSE）")
+            log("[Cross-Key归因] 同 cue/mask 的 normal/zero/wrong/same-class；"
+                "gain=zero-normal，damage=替换条件-normal（masked MSE）")
             log(format_table_row(
                 ["cue模式", "方向", "gate", "res/V", "Cgain", "Fgain",
-                 "Cdamage", "Fdamage"], cross_w, cross_a))
+                 "Cwrong", "Fwrong", "Csame", "Fsame"], cross_w, cross_a))
             for mode, values in cross_rows:
                 for prefix, direction in (("img2aud", "img->aud"),
                                           ("aud2img", "aud->img")):
@@ -730,6 +780,10 @@ def main():
                             f"{prefix}_coarse_wrong_damage")),
                         _fmt_na(values.get(
                             f"{prefix}_final_wrong_damage")),
+                        _fmt_na(values.get(
+                            f"{prefix}_coarse_same_damage")),
+                        _fmt_na(values.get(
+                            f"{prefix}_final_same_damage")),
                     ], cross_w, cross_a))
 
     if args.family_breakdown:

@@ -10,10 +10,12 @@ import torch
 from common import load_config, CUE_MODES
 from data.corruption import corrupt_image, corrupt_audio
 from models.network import CrossModalSNN
-from train import compute_losses
+from train import (compute_losses, _masked_audio_weighted_mse,
+                   _audio_coarse_loss)
 
-cfg = load_config("configs/v11a.yaml")
+cfg = load_config("configs/v11b.yaml")
 cfg["device"] = "cpu"
+cfg["cross_key_conditioning"]["causal_training"]["batch_probability"] = 1.0
 model = CrossModalSNN(cfg)
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 
@@ -22,7 +24,7 @@ n_mels = cfg["audio"]["n_mels"]
 n_frames = cfg["audio"]["n_frames"]
 x_img = torch.rand(B, 1, 28, 28)
 x_aud = torch.rand(B, n_mels, n_frames)
-labels = torch.randint(0, cfg["dims"]["num_classes"], (B,))
+labels = torch.arange(B) % cfg["dims"]["num_classes"]
 
 # 类别代表原型（dummy，仅冒烟用）：测试单/双模态 cue 的 target 选择路径
 C = cfg["dims"]["num_classes"]
@@ -110,10 +112,24 @@ print(f"first projector grad={first_proj_grad:.6f}, "
       f"first gate grad={first_gate_grad:.6f}, "
       f"second gate grad={second_gate_grad:.6f}")
 
+print("--- v11b weighted normalization 与 coarse loss 检查 ---")
+mask = torch.ones_like(x_aud)
+constant_rec = x_aud + 0.2
+wmse_0 = _masked_audio_weighted_mse(
+    constant_rec, x_aud, mask, gamma=0.0)
+wmse_5 = _masked_audio_weighted_mse(
+    constant_rec, x_aud, mask, gamma=5.0)
+assert torch.allclose(wmse_0, wmse_5, atol=1e-6)
+assert _audio_coarse_loss(constant_rec, x_aud, mask).item() > 0.0
+
 print("--- 8 种 cue 模式 binding+readout 前向/反向 ---")
 for mode in CUE_MODES:
     loss, logs = compute_losses(model, x_img, x_aud, labels, mode, cfg,
                                 proto_img, proto_aud, epoch=0)
+    assert "aud_coarse" in logs
+    if mode in ("clean_img_corrupt_aud", "corrupt_img_clean_aud",
+                "corrupt_both"):
+        assert "cross_pair" in logs
     opt.zero_grad()
     loss.backward()
     gnorm = sum(p.grad.abs().sum().item() for p in model.parameters()
