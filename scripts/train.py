@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v11b_recovery.yaml
+    python -u scripts/train.py --config configs/v11c.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -318,6 +318,7 @@ def _set_decoder_pretrain_requires_grad(model, cfg, freeze_non_decoders=True):
     train_aud_refiner = (
         pc.get("train_audio_refiner", False)
         and aud_cfg.get("enabled", False)
+        and not aud_cfg.get("bypass", False)
         and not aud_cfg.get("pasteback_only", False)
     )
     decoder_prefixes = (
@@ -358,7 +359,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
         return
     if pc.get("train_cross_key_conditioning", False):
         raise ValueError(
-            "v11b first-stage decoder pretrain requires "
+            "first-stage decoder pretrain requires "
             "decoder_pretrain.train_cross_key_conditioning=false")
 
     lc = cfg["loss"]
@@ -412,6 +413,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
     train_aud_refiner = (
         pc.get("train_audio_refiner", False)
         and cfg.get("audio_refiner", {}).get("enabled", False)
+        and not cfg.get("audio_refiner", {}).get("bypass", False)
         and not cfg.get("audio_refiner", {}).get("pasteback_only", False)
     )
     use_img_final_helper = (
@@ -1055,7 +1057,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11b_recovery.yaml")
+    ap.add_argument("--config", default="configs/v11c.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)

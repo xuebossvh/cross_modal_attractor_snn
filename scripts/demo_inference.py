@@ -604,7 +604,7 @@ def main():
     setup_matplotlib_chinese()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11b.yaml")
+    ap.add_argument("--config", default="configs/v11c.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--num", type=int, default=10,
                     help="可视化样本数（fixed_mask 默认 10；5 family × 2）")

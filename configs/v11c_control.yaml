@@ -1,5 +1,5 @@
-# v11b main: Cross-Key conditioning with detached zero/wrong causal references.
-# Uses the same parent checkpoint and fine-tune budget as both final controls.
+# v11c same-parent control: AudioRefiner is bypassed exactly as in v11c, while
+# Cross-Key modules exist but their forward path is disabled.
 
 seed: 1234
 device: "cuda"
@@ -22,12 +22,13 @@ snn:
 
 audio_refiner:
   enabled: true
+  bypass: true
   hidden_ch: 32
   blocks: 4
   max_dilation: 16
   delta_scale: 1.0
   visible_paste_back: true
-  pasteback_only: false
+  pasteback_only: true
   lr_mult: 0.5
 
 image_refiner:
@@ -50,13 +51,13 @@ detail_conditioning:
   aud_detail_dim: 256
 
 cross_key_conditioning:
-  enabled: true
+  enabled: false
   build_modules: true
   detach_key: true
   lr_mult: 10.0
   causal_training:
-    enabled: true
-    loss_weight: 0.1
+    enabled: false
+    loss_weight: 0.0
     batch_probability: 0.25
     margin_ratio: 0.05
 
@@ -80,15 +81,15 @@ decoder_pretrain:
   family_sampling: "balanced"
   use_masked_audio_loss: true
   use_masked_image_loss: true
-  train_audio_refiner: true
+  train_audio_refiner: false
   train_image_refiner: true
   train_cross_key_conditioning: false
-  lambda_coarse_aux: 0.5
+  lambda_coarse_aux: 0.0
   lambda_img: 1.0
   lambda_aud: 4.0
   lambda_aud_active: 1.0
   save_ckpt: true
-  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11b_decoder_pretrain.pt"
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11c_control_decoder_pretrain.pt"
 
 dims:
   img_in: 784
@@ -195,7 +196,7 @@ loss:
   lambda_img_masked: 1.0
   img_masked_families: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
   lambda_aud: 4.0
-  lambda_aud_coarse: 0.5
+  lambda_aud_coarse: 0.0
   aud_weight_gamma: 5.0
   lambda_aud_grad: 1.0
   lambda_aud_foreground: 0.5
@@ -241,7 +242,7 @@ data:
   train_subset: 0
 
 train:
-  output_version: v11b
+  output_version: v11c_control
   epochs: 150
   lr: 0.0001
   weight_decay: 0.0
@@ -264,4 +265,4 @@ train:
     - "aud_to_img_cross_gate."
     - "img_to_aud_cross_gate."
   save_milestone_epochs: []
-  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11b.pt"
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11c_control.pt"

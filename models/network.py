@@ -131,6 +131,7 @@ class CrossModalSNN(nn.Module):
 
         refiner_cfg = cfg.get("audio_refiner", {})
         self.use_audio_refiner = refiner_cfg.get("enabled", False)
+        self.audio_refiner_bypass = bool(refiner_cfg.get("bypass", False))
         self.audio_refiner_pasteback_only = refiner_cfg.get(
             "pasteback_only", False)
         self.refiner_visible_paste_back = refiner_cfg.get(
@@ -144,6 +145,9 @@ class CrossModalSNN(nn.Module):
                 max_dilation=int(refiner_cfg.get("max_dilation", 16)))
         else:
             self.audio_refiner = None
+        if self.audio_refiner is not None and self.audio_refiner_bypass:
+            for param in self.audio_refiner.parameters():
+                param.requires_grad_(False)
 
         self.use_audio_aux = ab.get("use_audio_aux_cls", True)
         if self.use_audio_aux:
@@ -290,6 +294,10 @@ class CrossModalSNN(nn.Module):
         if aud_cue is None or aud_mask is None:
             return coarse_aud
         mask = aud_mask.to(device=coarse_aud.device, dtype=coarse_aud.dtype)
+        if self.audio_refiner_bypass:
+            if self.audio_refiner_pasteback_only:
+                return mask * coarse_aud + (1.0 - mask) * aud_cue
+            return coarse_aud
         if self.audio_refiner is not None:
             delta = self.audio_refiner(coarse_aud, aud_cue, mask)
             if self.refiner_visible_paste_back:

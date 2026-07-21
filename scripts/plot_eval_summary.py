@@ -7,10 +7,10 @@
   4. 上述日志若含 [Cross-Key归因] 段，按 family 生成独立 PNG+CSV
 
 用法：
-    python scripts/plot_eval_summary.py outputs/outputs_v11b/tables/demo_eval_table.txt
-    python scripts/plot_eval_summary.py outputs/outputs_v11b/logs/eval_v11b_cross_key_sweep_sev04.log
-    python scripts/plot_eval_summary.py eval_v11b_full.log --title "v11b full eval"
-    python scripts/plot_eval_summary.py eval_v11b_fixed_mask.log --diag-only
+    python scripts/plot_eval_summary.py outputs/outputs_v11c/tables/demo_eval_table.txt
+    python scripts/plot_eval_summary.py outputs/outputs_v11c/logs/eval_v11c_cross_key_sweep_sev04.log
+    python scripts/plot_eval_summary.py eval_v11c_full.log --title "v11c full eval"
+    python scripts/plot_eval_summary.py eval_v11c_fixed_mask.log --diag-only
 """
 
 import argparse
@@ -748,8 +748,9 @@ def main():
     setup_matplotlib_chinese()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("input", nargs="?",
-        default="outputs/outputs_v11b/tables/demo_eval_table.txt")
+    ap.add_argument(
+        "input", nargs="?",
+        default="outputs/outputs_v11c/tables/demo_eval_table.txt")
     ap.add_argument("--out", default=None)
     ap.add_argument("--title", default=None)
     ap.add_argument("--diag-out", default=None, help="音频塌缩诊断表输出路径")
