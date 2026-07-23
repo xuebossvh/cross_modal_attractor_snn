@@ -68,8 +68,9 @@ cross_modal_attractor_snn/
 ## 3. 训练
 
 当前官方配置族为 **v11c**。它从训练完成的 `v11b_recovery` 第120轮 checkpoint
-分叉，保留 AudioRefiner 参数以 strict 加载，但前向 bypass 该模块；音频 final
-使用 `mask*coarse + (1-mask)*cue`。`v11c_control` 与 `v11c` 只训练
+分叉，保留 AudioRefiner 参数以 strict 加载，但前向 bypass 该模块；AudioDecoder
+预测就是唯一的最终音频输出 `recovered_aud`，不再产生 coarse/paste-back 第二版本。
+`v11c_control` 与 `v11c` 只训练
 Decoder/Cross-Key adapter，使用相同30轮预算，区别仅为 Cross-Key causal 路径。
 
 ```bash
@@ -89,7 +90,7 @@ python -u scripts/train.py --config configs/v11c.yaml
 - **readout 阶段**：关闭 target。v11c 先把对侧 cue 的 Key rate 投影为 Value 空间
   residual，与 `v_*_from_A` 相加；再与对应 cue 的同模态 detail state 拼接后送入
   Decoder。缺少对侧 cue 时 residual 严格为 0。AudioDecoder 后不再执行外置
-  AudioRefiner；有 mask 时只贴回可见 cue。随后计算分类 / 图像恢复 / 音频恢复 /
+  AudioRefiner，也不贴回可见 cue。随后计算分类 / 图像恢复 / 音频恢复 /
   脉冲正则损失。
 
 每个配置使用独立 checkpoint/output_version。两份配置均 strict 加载
@@ -110,7 +111,9 @@ python -u scripts/demo_inference.py --config configs/v11c.yaml --num 10 --severi
 python -u scripts/smoke_test.py
 ```
 
-- `evaluate.py`：8 种 cue 模式下的 acc / 图像 MSE·PSNR·SSIM / **log-mel MSE** 等；Cross-Key sweep 同时比较 correct/zero/wrong-class/same-class different-sample Key。
+- `evaluate.py`：8 种 cue 模式下的 acc / 图像 MSE·PSNR·SSIM / **log-mel MSE** 等；
+  指标按样本数加权，完全缺失的模态按 100% missing mask 评估。Cross-Key sweep
+  同时比较 correct/zero/wrong-class/same-class different-sample Key。
   指标按各 cue 模式对应的**恢复粒度 target**计算（表尾 `tgt(img/aud)` 列标注
   `smp`=样本级 / `cat`=类别代表原型）。快速试跑：`python -u scripts/evaluate.py --config configs/v11c.yaml --max_batches 1`。
 - `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注

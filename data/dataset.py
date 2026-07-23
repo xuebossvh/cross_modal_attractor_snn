@@ -6,6 +6,7 @@ Audio Encoder 输入、Audio Decoder 输出、audio recovery loss 均使用此�
 
 import glob
 import os
+import random
 
 import numpy as np
 import torch
@@ -251,20 +252,47 @@ class PairedAudioVisualDataset(Dataset):
             protos[c] = self.audio_protos[c]
         return protos
 
-    def _make_audio(self, label):
+    def _make_audio(self, label, item_index):
         if self.use_real_audio:
             pool = self._fsdd[label]
-            j = int(self._rng.integers(0, len(pool)))
+            if self.train:
+                j = int(self._rng.integers(0, len(pool)))
+            else:
+                # Evaluation pairing is a pure function of the dataset item.
+                j = (int(item_index) * 104729 + int(label) * 1009) % len(pool)
             return pool[j].clone()
         proto = self.audio_protos[label]
-        return (proto + self.noise_std * torch.randn(self.n_mels, self.n_frames)).clamp(0, 1)
+        if self.train:
+            noise = torch.randn(self.n_mels, self.n_frames)
+        else:
+            generator = torch.Generator().manual_seed(
+                2_000_003 + int(item_index))
+            noise = torch.randn(
+                self.n_mels, self.n_frames, generator=generator)
+        return (proto + self.noise_std * noise).clamp(0, 1)
 
     def __getitem__(self, idx):
         i = self._indices[idx]
         img, label = self._base[i]
         label = int(label)
-        aud = self._make_audio(label)
+        aud = self._make_audio(label, i)
         return img.float(), aud.float(), label
+
+
+def _seed_worker(_worker_id):
+    """Give every training worker an independent, reproducible RNG stream."""
+    from torch.utils.data import get_worker_info
+
+    info = get_worker_info()
+    if info is None:
+        return
+    worker_seed = int(info.seed % (2 ** 32))
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    info.dataset._rng = np.random.default_rng(worker_seed)
+    base = getattr(info.dataset, "_base", None)
+    if hasattr(base, "_rng"):
+        base._rng = np.random.default_rng(worker_seed + 1)
 
 
 def build_loaders(cfg):
@@ -284,8 +312,13 @@ def build_loaders(cfg):
 
     bs = cfg["data"]["batch_size"]
     nw = cfg["data"]["num_workers"]
+    train_generator = torch.Generator().manual_seed(int(cfg.get("seed", 0)))
+    test_generator = torch.Generator().manual_seed(int(cfg.get("seed", 0)) + 1)
     train_loader = DataLoader(train_set, batch_size=bs, shuffle=True,
-                              num_workers=nw, drop_last=True)
+                              num_workers=nw, drop_last=True,
+                              worker_init_fn=_seed_worker,
+                              generator=train_generator)
     test_loader = DataLoader(test_set, batch_size=bs, shuffle=False,
-                             num_workers=nw)
+                             num_workers=nw, worker_init_fn=_seed_worker,
+                             generator=test_generator)
     return train_loader, test_loader

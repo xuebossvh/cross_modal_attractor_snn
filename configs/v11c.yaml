@@ -1,5 +1,5 @@
-# v11c main: bypass the external AudioRefiner while retaining strict v11b
-# checkpoint compatibility; keep Cross-Key causal conditioning at Decoder input.
+# v11c main: AudioDecoder prediction is the single final audio output.
+# AudioRefiner parameters exist only for strict v11b checkpoint compatibility.
 
 seed: 1234
 device: "cuda"
@@ -27,9 +27,6 @@ audio_refiner:
   blocks: 4
   max_dilation: 16
   delta_scale: 1.0
-  visible_paste_back: true
-  pasteback_only: true
-  lr_mult: 0.5
 
 image_refiner:
   enabled: true
@@ -54,11 +51,11 @@ cross_key_conditioning:
   enabled: true
   build_modules: true
   detach_key: true
-  lr_mult: 10.0
+  lr_mult: 3.0
   causal_training:
     enabled: true
-    loss_weight: 0.1
-    batch_probability: 0.25
+    loss_weight: 0.5
+    batch_probability: 1.0
     margin_ratio: 0.05
 
 decoder_pretrain:
@@ -81,7 +78,6 @@ decoder_pretrain:
   family_sampling: "balanced"
   use_masked_audio_loss: true
   use_masked_image_loss: true
-  train_audio_refiner: false
   train_image_refiner: true
   train_cross_key_conditioning: false
   lambda_coarse_aux: 0.0
@@ -175,14 +171,7 @@ corruption:
     mid: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
     late: ["time_mask", "freq_mask", "feature_dropout", "partial_temporal", "time_freq_block"]
   aud_time_mask_finetune:
-    enabled: true
-    start_epoch: 95
-    weights:
-      time_mask: 0.60
-      freq_mask: 0.10
-      feature_dropout: 0.10
-      partial_temporal: 0.05
-      time_freq_block: 0.15
+    enabled: false
   eval_fixed:
     img_mode: "occlusion"
     aud_mode: "time_mask"
@@ -196,7 +185,6 @@ loss:
   lambda_img_masked: 1.0
   img_masked_families: ["occlusion", "pixel_delete", "mask_vertical", "mask_horizontal", "salt_mask"]
   lambda_aud: 4.0
-  lambda_aud_coarse: 0.0
   aud_weight_gamma: 5.0
   lambda_aud_grad: 1.0
   lambda_aud_foreground: 0.5

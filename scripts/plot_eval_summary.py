@@ -78,6 +78,14 @@ _ATTR_ROW_RE = re.compile(
     r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
     r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
 )
+_ATTR_ROW_SINGLE_AUD_RE = re.compile(
+    r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s+"
+    r"([\d.]+|nan)\s+([\d.]+|nan)\s*$",
+)
 _ATTR_ROW_RE_LEGACY = re.compile(
     r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
     r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
@@ -94,6 +102,15 @@ _CROSS_KEY_ROW_RE = re.compile(
     r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s+"
     r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)"
     r"(?:\s+(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan))?\s*$",
+)
+_CROSS_KEY_SINGLE_OUTPUT_ROW_RE = re.compile(
+    r"^(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"(img->aud|aud->img)\s+"
+    r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s+"
+    r"(-?[\d.]+|N/A|nan)\s+(-?[\d.]+|N/A|nan)\s+"
+    r"(-?[\d.]+|N/A|nan)\s*$",
 )
 _FAMILY_HDR_RE = re.compile(
     r"\[评估 family (\d+)/(\d+)\] img=(\S+)\s+aud=(\S+)",
@@ -229,6 +246,18 @@ def _parse_attribution_from_text(text):
         if "imgCmask" in stripped or "imgCoarse" in stripped or "cue模式" in stripped:
             past_hdr = True
             continue
+        m = _ATTR_ROW_SINGLE_AUD_RE.match(stripped)
+        if m and past_hdr:
+            rows.append({
+                "mode": m.group(1),
+                "img_coarse_masked_mse": _maybe_float(m.group(2)),
+                "img_final_masked_mse": _maybe_float(m.group(3)),
+                "img_coarse_visible_mse": _maybe_float(m.group(4)),
+                "img_final_visible_mse": _maybe_float(m.group(5)),
+                "aud_masked_mse": _maybe_float(m.group(6)),
+                "aud_visible_mse": _maybe_float(m.group(7)),
+            })
+            continue
         m = _ATTR_ROW_RE.match(stripped)
         if m and past_hdr:
             rows.append({
@@ -237,10 +266,8 @@ def _parse_attribution_from_text(text):
                 "img_final_masked_mse": _maybe_float(m.group(3)),
                 "img_coarse_visible_mse": _maybe_float(m.group(4)),
                 "img_final_visible_mse": _maybe_float(m.group(5)),
-                "aud_coarse_masked_mse": _maybe_float(m.group(6)),
-                "aud_final_masked_mse": _maybe_float(m.group(7)),
-                "aud_coarse_visible_mse": _maybe_float(m.group(8)),
-                "aud_final_visible_mse": _maybe_float(m.group(9)),
+                "aud_masked_mse": _maybe_float(m.group(7)),
+                "aud_visible_mse": _maybe_float(m.group(9)),
             })
             continue
         m = _ATTR_ROW_RE_LEGACY.match(stripped)
@@ -251,10 +278,8 @@ def _parse_attribution_from_text(text):
                 "img_final_masked_mse": _maybe_float(m.group(3)),
                 "img_coarse_visible_mse": None,
                 "img_final_visible_mse": None,
-                "aud_coarse_masked_mse": _maybe_float(m.group(4)),
-                "aud_final_masked_mse": _maybe_float(m.group(5)),
-                "aud_coarse_visible_mse": None,
-                "aud_final_visible_mse": None,
+                "aud_masked_mse": _maybe_float(m.group(5)),
+                "aud_visible_mse": None,
             })
     return rows
 
@@ -278,8 +303,22 @@ def _parse_cross_key_attribution_from_text(text):
             continue
         if stripped.startswith("=") or stripped.startswith("-"):
             continue
-        if "Cgain" in stripped and ("Fdamage" in stripped or "Fsame" in stripped):
+        if (("gain" in stripped and "wrong" in stripped)
+                or ("Cgain" in stripped
+                    and ("Fdamage" in stripped or "Fsame" in stripped))):
             past_hdr = True
+            continue
+        match = _CROSS_KEY_SINGLE_OUTPUT_ROW_RE.match(stripped)
+        if match and past_hdr:
+            rows.append({
+                "mode": match.group(1),
+                "direction": match.group(2),
+                "gate": _maybe_float(match.group(3)),
+                "residual_ratio": _maybe_float(match.group(4)),
+                "gain": _maybe_float(match.group(5)),
+                "wrong_damage": _maybe_float(match.group(6)),
+                "same_damage": _maybe_float(match.group(7)),
+            })
             continue
         match = _CROSS_KEY_ROW_RE.match(stripped)
         if match and past_hdr:
@@ -288,13 +327,9 @@ def _parse_cross_key_attribution_from_text(text):
                 "direction": match.group(2),
                 "gate": _maybe_float(match.group(3)),
                 "residual_ratio": _maybe_float(match.group(4)),
-                "coarse_gain": _maybe_float(match.group(5)),
-                "final_gain": _maybe_float(match.group(6)),
-                "coarse_damage": _maybe_float(match.group(7)),
-                "final_damage": _maybe_float(match.group(8)),
-                "coarse_same_damage": (
-                    _maybe_float(match.group(9)) if match.group(9) else None),
-                "final_same_damage": (
+                "gain": _maybe_float(match.group(6)),
+                "wrong_damage": _maybe_float(match.group(8)),
+                "same_damage": (
                     _maybe_float(match.group(10)) if match.group(10) else None),
             })
     return rows
@@ -685,7 +720,7 @@ def render_full_eval_table(rows, title, path):
 
 def render_attribution_table(rows, title, path):
     headers = ["", "img C mask", "img F mask", "img C vis", "img F vis",
-               "aud C mask", "aud F mask", "aud C vis", "aud F vis"]
+               "aud mask", "aud vis"]
     cell = [[
         r["mode"],
         f"{r['img_coarse_masked_mse']:.4f}"
@@ -696,35 +731,28 @@ def render_attribution_table(rows, title, path):
         if r.get("img_coarse_visible_mse") is not None else "nan",
         f"{r['img_final_visible_mse']:.4f}"
         if r.get("img_final_visible_mse") is not None else "nan",
-        f"{r['aud_coarse_masked_mse']:.4f}"
-        if r.get("aud_coarse_masked_mse") is not None else "nan",
-        f"{r['aud_final_masked_mse']:.4f}"
-        if r.get("aud_final_masked_mse") is not None else "nan",
-        f"{r['aud_coarse_visible_mse']:.4f}"
-        if r.get("aud_coarse_visible_mse") is not None else "nan",
-        f"{r['aud_final_visible_mse']:.4f}"
-        if r.get("aud_final_visible_mse") is not None else "nan",
+        f"{r['aud_masked_mse']:.4f}"
+        if r.get("aud_masked_mse") is not None else "nan",
+        f"{r['aud_visible_mse']:.4f}"
+        if r.get("aud_visible_mse") is not None else "nan",
     ] for r in rows]
-    col_w = [0.14] + [0.095] * 8
+    col_w = [0.16] + [0.12] * 6
     return _render_table(headers, cell, col_w, title, path, font_size=8.5)
 
 
 def render_cross_key_attribution_table(rows, title, path):
-    headers = ["cue mode", "direction", "gate", "res/V", "coarse gain",
-               "final gain", "coarse wrong", "final wrong",
-               "coarse same", "final same"]
+    headers = ["cue mode", "direction", "gate", "res/V", "gain",
+               "wrong", "same"]
 
     def fmt(value):
         return "N/A" if value is None else f"{value:.5f}"
 
     cell = [[
         r["mode"], r["direction"], fmt(r.get("gate")),
-        fmt(r.get("residual_ratio")), fmt(r.get("coarse_gain")),
-        fmt(r.get("final_gain")), fmt(r.get("coarse_damage")),
-        fmt(r.get("final_damage")), fmt(r.get("coarse_same_damage")),
-        fmt(r.get("final_same_damage")),
+        fmt(r.get("residual_ratio")), fmt(r.get("gain")),
+        fmt(r.get("wrong_damage")), fmt(r.get("same_damage")),
     ] for r in rows]
-    col_w = [0.16, 0.09] + [0.085] * 8
+    col_w = [0.18, 0.12] + [0.12] * 5
     return _render_table(headers, cell, col_w, title, path, font_size=7.8)
 
 

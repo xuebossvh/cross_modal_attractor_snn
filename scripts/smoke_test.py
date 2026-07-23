@@ -10,8 +10,7 @@ import torch
 from common import load_config, CUE_MODES
 from data.corruption import corrupt_image, corrupt_audio
 from models.network import CrossModalSNN
-from train import (compute_losses, _masked_audio_weighted_mse,
-                   _audio_coarse_loss)
+from train import compute_losses, _masked_audio_weighted_mse
 
 cfg = load_config("configs/v11c.yaml")
 cfg["device"] = "cpu"
@@ -31,22 +30,20 @@ C = cfg["dims"]["num_classes"]
 proto_img = torch.rand(C, 1, 28, 28)
 proto_aud = torch.rand(C, n_mels, n_frames)
 
-print("--- v11c AudioRefiner bypass + paste-back 检查 ---")
+print("--- v11c 单一 audio 输出与旧检查点兼容模块检查 ---")
 assert model.audio_refiner is not None
 assert model.audio_refiner_bypass
 assert all(not p.requires_grad for p in model.audio_refiner.parameters())
-bypass_coarse = torch.rand_like(x_aud)
+bypass_decoder = torch.rand_like(x_aud)
 bypass_cue = torch.rand_like(x_aud)
 bypass_mask = torch.zeros_like(x_aud)
 bypass_mask[..., :n_frames // 2] = 1.0
-bypass_final = model._apply_audio_refiner(
-    bypass_coarse, bypass_cue, bypass_mask)
-bypass_expected = (
-    bypass_mask * bypass_coarse + (1.0 - bypass_mask) * bypass_cue)
-assert torch.allclose(bypass_final, bypass_expected, atol=1e-7)
+bypass_final = model._finalize_audio(
+    bypass_decoder, bypass_cue, bypass_mask)
+assert torch.allclose(bypass_final, bypass_decoder, atol=1e-7)
 assert torch.allclose(
-    model._apply_audio_refiner(bypass_coarse, bypass_cue, None),
-    bypass_coarse, atol=1e-7)
+    model._finalize_audio(bypass_decoder, bypass_cue, None),
+    bypass_decoder, atol=1e-7)
 
 
 def _grad_sum(parameters):
@@ -121,15 +118,16 @@ assert torch.allclose(normal["index_state"], conditioned["index_state"], atol=1e
 assert torch.allclose(conditioned["index_state"], wrong["index_state"], atol=1e-7)
 assert (not torch.allclose(conditioned["recovered_img_coarse"],
                            wrong["recovered_img_coarse"], atol=1e-7)
-        or not torch.allclose(conditioned["recovered_aud_coarse"],
-                              wrong["recovered_aud_coarse"], atol=1e-7))
+        or not torch.allclose(conditioned["recovered_aud"],
+                              wrong["recovered_aud"], atol=1e-7))
+assert "recovered_aud_coarse" not in conditioned
 assert zero["aud_to_img_cross_ratio"].max().item() == 0.0
 assert zero["img_to_aud_cross_ratio"].max().item() == 0.0
 print(f"first projector grad={first_proj_grad:.6f}, "
       f"first gate grad={first_gate_grad:.6f}, "
       f"second gate grad={second_gate_grad:.6f}")
 
-print("--- weighted normalization 与 coarse loss 检查 ---")
+print("--- weighted normalization 检查 ---")
 mask = torch.ones_like(x_aud)
 constant_rec = x_aud + 0.2
 wmse_0 = _masked_audio_weighted_mse(
@@ -137,18 +135,13 @@ wmse_0 = _masked_audio_weighted_mse(
 wmse_5 = _masked_audio_weighted_mse(
     constant_rec, x_aud, mask, gamma=5.0)
 assert torch.allclose(wmse_0, wmse_5, atol=1e-6)
-assert _audio_coarse_loss(constant_rec, x_aud, mask).item() > 0.0
 
 print("--- 8 种 cue 模式 binding+readout 前向/反向 ---")
 for mode in CUE_MODES:
     loss, logs = compute_losses(model, x_img, x_aud, labels, mode, cfg,
                                 proto_img, proto_aud, epoch=0)
-    if float(cfg["loss"].get("lambda_aud_coarse", 0.0)) > 0.0:
-        assert "aud_coarse" in logs
-    else:
-        assert "aud_coarse" not in logs
-    if mode in ("clean_img_corrupt_aud", "corrupt_img_clean_aud",
-                "corrupt_both"):
+    assert "aud_coarse" not in logs
+    if mode != "clean_both":
         assert "cross_pair" in logs
     opt.zero_grad()
     loss.backward()

@@ -68,6 +68,8 @@ def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # 8 种 cue 模式：原 6 种 + 两种 clean/corrupt 非对称双模态对照。

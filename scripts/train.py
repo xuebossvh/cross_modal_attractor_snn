@@ -123,16 +123,6 @@ def _masked_audio_weighted_mse(rec, target, mask, gamma=5.0):
     return per_sample.mean()
 
 
-def _audio_coarse_loss(rec, target, mask=None):
-    """直接监督 AudioDecoder 输出，不经过 refiner 或 paste-back。"""
-    if mask is not None:
-        return (
-            _masked_audio_error(rec, target, mask, power=1)
-            + _masked_audio_error(rec, target, mask, power=2)
-        )
-    return F.l1_loss(rec, target) + F.mse_loss(rec, target)
-
-
 def _masked_mse_per_sample(rec, target, mask):
     """逐样本 masked MSE；同时返回 mask 非空的样本标记。"""
     mask = mask.to(device=rec.device, dtype=rec.dtype)
@@ -477,14 +467,14 @@ def pretrain_decoders(model, train_loader, cfg, device):
                     x_img_detail=x_img_detail, x_aud_detail=x_aud_detail)
 
                 coarse_img = model.image_decoder(img_state)
-                coarse_aud = model.audio_decoder(aud_state)
+                decoder_aud = model.audio_decoder(aud_state)
                 rec_img = (
                     model._apply_image_refiner(coarse_img, x_img_detail, img_mask)
                     if use_img_final_helper else coarse_img
                 )
                 rec_aud = (
-                    model._apply_audio_refiner(coarse_aud, x_aud_detail, aud_mask)
-                    if use_aud_final_helper else coarse_aud
+                    model._finalize_audio(decoder_aud, x_aud_detail, aud_mask)
+                    if use_aud_final_helper else decoder_aud
                 )
 
                 mask_for_img_loss = None
@@ -508,7 +498,7 @@ def pretrain_decoders(model, train_loader, cfg, device):
                                            mask=mask_for_loss)
                 if lam_coarse_aux > 0:
                     loss_aud = loss_aud + lam_coarse_aux * _aud_recon_loss(
-                        coarse_aud, x_aud, lc, mask=mask_for_loss)
+                        decoder_aud, x_aud, lc, mask=mask_for_loss)
                 loss = lam_img * loss_img + lam_aud * loss_aud
                 logs = {
                     "img": loss_img.item(),
@@ -791,24 +781,31 @@ def _apply_audio_target_curriculum(tgt_aud, labels, cue_mode, aud_kind,
 
 def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
                            tgt_img, tgt_aud, img_mask, aud_mask,
-                           labels, cue_mode, cfg):
-    """用 detached zero/wrong reference 强制正确对侧 Key 改善 coarse 洞内误差。"""
+                           labels, cue_mode, cfg, epoch=0, step=0):
+    """用 detached zero/wrong reference 强制正确对侧 Key 改善最终输出误差。"""
     causal = cfg.get("cross_key_conditioning", {}).get(
         "causal_training", {})
     if not causal.get("enabled", False):
         return out_correct["logits"].new_tensor(0.0), {}
     probability = float(causal.get("batch_probability", 0.25))
-    if probability <= 0 or random.random() >= probability:
+    # Do not perturb the global cue/corruption RNG stream in the main run.
+    decision_seed = (
+        (int(cfg.get("seed", 0)) + 1) * 1_000_003
+        + int(epoch) * 10_007
+        + int(step)
+    )
+    if (probability <= 0
+            or random.Random(decision_seed).random() >= probability):
         return out_correct["logits"].new_tensor(0.0), {}
 
     use_img2aud = (
-        cue_mode in ("clean_img_corrupt_aud", "corrupt_both")
-        and aud_mask is not None
+        cue_mode in ("corrupt_img_only", "corrupt_both",
+                     "clean_img_corrupt_aud", "clean_img_only")
         and out_correct.get("key_img") is not None
     )
     use_aud2img = (
-        cue_mode in ("corrupt_img_clean_aud", "corrupt_both")
-        and img_mask is not None
+        cue_mode in ("corrupt_aud_only", "corrupt_both",
+                     "corrupt_img_clean_aud", "clean_aud_only")
         and out_correct.get("key_aud") is not None
     )
     if not (use_img2aud or use_aud2img):
@@ -825,7 +822,15 @@ def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
             img_cue_mask=img_mask, aud_cue_mask=aud_mask,
             **cross_kwargs)
 
-    with torch.no_grad():
+    rng_devices = []
+    if labels.device.type == "cuda":
+        rng_devices = [
+            labels.device.index
+            if labels.device.index is not None
+            else torch.cuda.current_device()
+        ]
+    # Reference interventions must not advance the main/control Torch RNG.
+    with torch.random.fork_rng(devices=rng_devices), torch.no_grad():
         zero_out = run_reference(
             disable_img_to_aud_cross=True,
             disable_aud_to_img_cross=True)
@@ -841,8 +846,14 @@ def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
     margin_ratio = float(causal.get("margin_ratio", 0.05))
     direction_losses = []
     logs = {}
+    effective_aud_mask = (
+        torch.ones_like(tgt_aud) if aud_cue is None else aud_mask)
+    effective_img_mask = (
+        torch.ones_like(tgt_img) if img_cue is None else img_mask)
 
     def add_direction(name, correct, zero, wrong, target, mask):
+        if mask is None:
+            return
         correct_err, region_valid = _masked_mse_per_sample(
             correct, target, mask)
         zero_err, _ = _masked_mse_per_sample(zero, target, mask)
@@ -853,32 +864,36 @@ def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
         correct_sel = correct_err[valid]
         zero_sel = zero_err[valid].detach()
         wrong_sel = wrong_err[valid].detach()
-        margin = margin_ratio * zero_sel
+        scale = zero_sel.clamp_min(1e-6)
+        correct_rel = correct_sel / scale
+        wrong_rel = wrong_sel / scale
         pair_loss = (
-            F.relu(correct_sel - zero_sel + margin)
-            + F.relu(correct_sel - wrong_sel + margin)
+            F.relu(correct_rel - 1.0 + margin_ratio)
+            + F.relu(correct_rel - wrong_rel + margin_ratio)
         ).mean()
         direction_losses.append(pair_loss)
         logs[f"cross_{name}"] = pair_loss.item()
         logs[f"{name}_correct"] = correct_sel.detach().mean().item()
         logs[f"{name}_zero"] = zero_sel.mean().item()
         logs[f"{name}_wrong"] = wrong_sel.mean().item()
+        logs[f"{name}_correct_rel"] = correct_rel.detach().mean().item()
+        logs[f"{name}_wrong_rel"] = wrong_rel.mean().item()
         logs[f"{name}_n"] = float(valid.sum().item())
 
     if use_img2aud:
         add_direction(
             "img2aud",
-            out_correct["recovered_aud_coarse"],
-            zero_out["recovered_aud_coarse"],
-            wrong_out["recovered_aud_coarse"],
-            tgt_aud, aud_mask)
+            out_correct["recovered_aud"],
+            zero_out["recovered_aud"],
+            wrong_out["recovered_aud"],
+            tgt_aud, effective_aud_mask)
     if use_aud2img:
         add_direction(
             "aud2img",
-            torch.sigmoid(out_correct["recovered_img_coarse"]),
-            torch.sigmoid(zero_out["recovered_img_coarse"]),
-            torch.sigmoid(wrong_out["recovered_img_coarse"]),
-            tgt_img, img_mask)
+            torch.sigmoid(out_correct["recovered_img"]),
+            torch.sigmoid(zero_out["recovered_img"]),
+            torch.sigmoid(wrong_out["recovered_img"]),
+            tgt_img, effective_img_mask)
 
     if not direction_losses:
         return out_correct["logits"].new_tensor(0.0), {}
@@ -995,18 +1010,6 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     total = total + lc["lambda_aud"] * loss_aud
     logs[f"aud({aud_kind[:3]})"] = loss_aud.item()
 
-    lam_aud_coarse = float(lc.get("lambda_aud_coarse", 0.0))
-    if lam_aud_coarse > 0:
-        coarse_aud = out_r["recovered_aud_coarse"]
-        loss_aud_coarse = _audio_coarse_loss(
-            coarse_aud, tgt_aud, mask=mask_for_loss)
-        total = total + lam_aud_coarse * loss_aud_coarse
-        logs["aud_coarse"] = loss_aud_coarse.item()
-        logs["aud_coarse_mse"] = F.mse_loss(
-            coarse_aud, tgt_aud).item()
-        if mask_for_loss is not None:
-            logs["aud_coarse_mask_mse"] = _masked_audio_error(
-                coarse_aud, tgt_aud, mask_for_loss, power=2).item()
     if use_aud_mask:
         logs["aud_mask_l1"] = _masked_audio_error(
             out_r["recovered_aud"], tgt_aud, aud_mask, power=1).item()
@@ -1043,7 +1046,7 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
         loss_cross, cross_logs = _cross_key_causal_loss(
             model, out_r, img_cue, aud_cue,
             tgt_img, tgt_aud, img_mask, aud_mask,
-            labels, cue_mode, cfg)
+            labels, cue_mode, cfg, epoch=epoch, step=step)
         if cross_logs:
             total = total + causal_weight * loss_cross
             logs.update(cross_logs)

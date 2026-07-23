@@ -207,27 +207,21 @@ def _paired_cross_metrics(normal_out, zero_out, wrong_out, same_out,
     """同 cue/mask 下计算 normal/zero/wrong/same-class 配对指标。"""
     result = {}
 
-    def add_direction(prefix, normal_final, zero_final, wrong_final, same_final,
-                      normal_coarse, zero_coarse, wrong_coarse, same_coarse,
+    def add_direction(prefix, normal_rec, zero_rec, wrong_rec, same_rec,
                       target, mask, gate_key, ratio_key, source_key):
         if mask is None or normal_out.get(source_key) is None:
             return
-        quartets = {
-            "final": (normal_final, zero_final, wrong_final, same_final),
-            "coarse": (normal_coarse, zero_coarse, wrong_coarse, same_coarse),
-        }
-        for stage, (normal_rec, zero_rec, wrong_rec, same_rec) in quartets.items():
-            n_err, region_valid = _region_error_per_sample(
-                normal_rec, target, mask, power=2)
-            z_err, _ = _region_error_per_sample(zero_rec, target, mask, power=2)
-            w_err, _ = _region_error_per_sample(wrong_rec, target, mask, power=2)
-            s_err, _ = _region_error_per_sample(same_rec, target, mask, power=2)
-            result[f"{prefix}_{stage}_correct_gain"] = (
-                z_err - n_err, region_valid)
-            result[f"{prefix}_{stage}_wrong_damage"] = (
-                w_err - n_err, region_valid & wrong_valid)
-            result[f"{prefix}_{stage}_same_damage"] = (
-                s_err - n_err, region_valid & same_valid)
+        n_err, region_valid = _region_error_per_sample(
+            normal_rec, target, mask, power=2)
+        z_err, _ = _region_error_per_sample(zero_rec, target, mask, power=2)
+        w_err, _ = _region_error_per_sample(wrong_rec, target, mask, power=2)
+        s_err, _ = _region_error_per_sample(same_rec, target, mask, power=2)
+        result[f"{prefix}_correct_gain"] = (
+            z_err - n_err, region_valid)
+        result[f"{prefix}_wrong_damage"] = (
+            w_err - n_err, region_valid & wrong_valid)
+        result[f"{prefix}_same_damage"] = (
+            s_err - n_err, region_valid & same_valid)
 
         gate = normal_out.get(gate_key)
         if gate is not None:
@@ -242,9 +236,6 @@ def _paired_cross_metrics(normal_out, zero_out, wrong_out, same_out,
         "img2aud",
         normal_out["recovered_aud"], zero_out["recovered_aud"],
         wrong_out["recovered_aud"], same_out["recovered_aud"],
-        normal_out["recovered_aud_coarse"],
-        zero_out["recovered_aud_coarse"],
-        wrong_out["recovered_aud_coarse"], same_out["recovered_aud_coarse"],
         tgt_aud, aud_mask, "img_to_aud_cross_gate",
         "img_to_aud_cross_ratio", "key_img")
     add_direction(
@@ -253,10 +244,6 @@ def _paired_cross_metrics(normal_out, zero_out, wrong_out, same_out,
         torch.sigmoid(zero_out["recovered_img"]),
         torch.sigmoid(wrong_out["recovered_img"]),
         torch.sigmoid(same_out["recovered_img"]),
-        torch.sigmoid(normal_out["recovered_img_coarse"]),
-        torch.sigmoid(zero_out["recovered_img_coarse"]),
-        torch.sigmoid(wrong_out["recovered_img_coarse"]),
-        torch.sigmoid(same_out["recovered_img_coarse"]),
         tgt_img, img_mask, "aud_to_img_cross_gate",
         "aud_to_img_cross_ratio", "key_aud")
     return result
@@ -298,11 +285,11 @@ def _image_masked_metrics(rec_img_prob, target, mask):
     }
 
 
-def _add_metric(sums, counts, key, value):
+def _add_metric(sums, counts, key, value, weight=1):
     if value is None or not math.isfinite(float(value)):
         return
-    sums[key] = sums.get(key, 0.0) + float(value)
-    counts[key] = counts.get(key, 0) + 1
+    sums[key] = sums.get(key, 0.0) + float(value) * int(weight)
+    counts[key] = counts.get(key, 0) + int(weight)
 
 
 def _mean_metric(sums, counts, key):
@@ -376,7 +363,6 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     image_metric_counts = {}
     audio_metric_sums = {}
     audio_metric_counts = {}
-    nb = 0
     all_rec = []
     img_kind = aud_kind = "?"
     diag_sum = {}
@@ -417,6 +403,13 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
 
         tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
             mode, x_img, x_aud, proto_img, proto_aud, labels)
+        # A completely absent modality is a 100% missing region, not "no mask".
+        # Keep the model input mask unchanged; this mask is for metrics only.
+        eval_img_mask = (
+            torch.ones_like(tgt_img) if img_cue is None else img_mask)
+        eval_aud_mask = (
+            torch.ones_like(tgt_aud) if aud_cue is None else aud_mask)
+
         def run_model(**cross_kwargs):
             return model(
                 x_img_cue=img_cue, x_aud_cue=aud_cue,
@@ -470,7 +463,7 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                             f"cross-key {label} intervention changed ACC path")
                 paired = _paired_cross_metrics(
                     normal_out, zero_out, wrong_out, same_out,
-                    tgt_img, tgt_aud, img_mask, aud_mask,
+                    tgt_img, tgt_aud, eval_img_mask, eval_aud_mask,
                     wrong_valid, same_valid)
                 for key, (values, valid) in paired.items():
                     _sum_paired_metric(
@@ -491,53 +484,56 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
 
         pred = out["logits"].argmax(dim=1)
         correct += (pred == labels).sum().item()
-        n += labels.size(0)
+        batch_size = labels.size(0)
+        n += batch_size
 
         rec_img = torch.sigmoid(out["recovered_img"])
         rec_img_coarse = torch.sigmoid(out["recovered_img_coarse"])
-        sum_img_mse += F.mse_loss(rec_img, tgt_img).item()
-        sum_psnr += batch_psnr(rec_img, tgt_img).item()
-        sum_ssim += batch_ssim(rec_img, tgt_img).item()
-        for mk, mv in _image_masked_metrics(rec_img, tgt_img, img_mask).items():
-            _add_metric(image_metric_sums, image_metric_counts, mk, mv)
+        sum_img_mse += F.mse_loss(rec_img, tgt_img).item() * batch_size
+        sum_psnr += batch_psnr(rec_img, tgt_img).item() * batch_size
+        sum_ssim += batch_ssim(rec_img, tgt_img).item() * batch_size
         for mk, mv in _image_masked_metrics(
-                rec_img_coarse, tgt_img, img_mask).items():
+                rec_img, tgt_img, eval_img_mask).items():
+            _add_metric(
+                image_metric_sums, image_metric_counts, mk, mv, batch_size)
+        for mk, mv in _image_masked_metrics(
+                rec_img_coarse, tgt_img, eval_img_mask).items():
             key = mk.replace("img_", "img_coarse_")
-            _add_metric(image_metric_sums, image_metric_counts, key, mv)
+            _add_metric(
+                image_metric_sums, image_metric_counts, key, mv, batch_size)
 
         rec_aud = out["recovered_aud"]
-        rec_aud_coarse = out["recovered_aud_coarse"]
-        sum_aud_mse += F.mse_loss(rec_aud, tgt_aud).item()   # log-mel [B,M,T]
+        sum_aud_mse += (
+            F.mse_loss(rec_aud, tgt_aud).item() * batch_size
+        )  # log-mel [B,M,T]
         _add_metric(
             audio_metric_sums, audio_metric_counts, "aud_ssim",
-            batch_ssim(rec_aud.unsqueeze(1), tgt_aud.unsqueeze(1)).item())
-        for mk, mv in _audio_masked_metrics(rec_aud, tgt_aud, aud_mask).items():
-            _add_metric(audio_metric_sums, audio_metric_counts, mk, mv)
+            batch_ssim(rec_aud.unsqueeze(1), tgt_aud.unsqueeze(1)).item(),
+            batch_size)
         for mk, mv in _audio_masked_metrics(
-                rec_aud_coarse, tgt_aud, aud_mask).items():
-            key = mk.replace("aud_", "aud_coarse_")
-            _add_metric(audio_metric_sums, audio_metric_counts, key, mv)
+                rec_aud, tgt_aud, eval_aud_mask).items():
+            _add_metric(
+                audio_metric_sums, audio_metric_counts, mk, mv, batch_size)
 
         d = aud_collapse_stats(rec_aud, tgt_aud)
         for kk, vv in d.items():
-            diag_sum[kk] = diag_sum.get(kk, 0.0) + vv
+            diag_sum[kk] = diag_sum.get(kk, 0.0) + vv * batch_size
 
         all_rec.append(rec_img.cpu())
-        nb += 1
 
     acc = correct / max(n, 1)
     rec_all = torch.cat(all_rec, dim=0) if all_rec else torch.zeros(1, 1, 28, 28)
     pix_var, pair_l2 = batch_reconstruction_variance(rec_all)
-    diag = {kk: vv / max(nb, 1) for kk, vv in diag_sum.items()}
+    diag = {kk: vv / max(n, 1) for kk, vv in diag_sum.items()}
     cross_attr = {
         key: _mean_metric(cross_metric_sums, cross_metric_counts, key)
         for key in sorted(cross_metric_sums)
     }
     return {
         "acc": acc,
-        "img_mse": sum_img_mse / max(nb, 1),
-        "psnr": sum_psnr / max(nb, 1),
-        "ssim": sum_ssim / max(nb, 1),
+        "img_mse": sum_img_mse / max(n, 1),
+        "psnr": sum_psnr / max(n, 1),
+        "ssim": sum_ssim / max(n, 1),
         "img_masked_mse": _mean_metric(image_metric_sums, image_metric_counts,
                                        "img_masked_mse"),
         "img_masked_l1": _mean_metric(image_metric_sums, image_metric_counts,
@@ -550,7 +546,7 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
             image_metric_sums, image_metric_counts, "img_coarse_masked_mse"),
         "img_coarse_visible_mse": _mean_metric(
             image_metric_sums, image_metric_counts, "img_coarse_visible_mse"),
-        "aud_mse": sum_aud_mse / max(nb, 1),
+        "aud_mse": sum_aud_mse / max(n, 1),
         "aud_ssim": _mean_metric(audio_metric_sums, audio_metric_counts,
                                  "aud_ssim"),
         "aud_masked_mse": _mean_metric(audio_metric_sums, audio_metric_counts,
@@ -561,10 +557,6 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                                        "aud_visible_mse"),
         "aud_visible_l1": _mean_metric(audio_metric_sums, audio_metric_counts,
                                       "aud_visible_l1"),
-        "aud_coarse_masked_mse": _mean_metric(
-            audio_metric_sums, audio_metric_counts, "aud_coarse_masked_mse"),
-        "aud_coarse_visible_mse": _mean_metric(
-            audio_metric_sums, audio_metric_counts, "aud_coarse_visible_mse"),
         "pix_var": pix_var,
         "pair_l2": pair_l2,
         "img_kind": img_kind,
@@ -734,14 +726,13 @@ def main():
 
         _log_audio_diag(diag_rows)
 
-        attr_w = [24, 10, 10, 10, 10, 10, 10, 10, 10]
-        attr_a = ["l"] + ["r"] * 8
+        attr_w = [24, 10, 10, 10, 10, 10, 10]
+        attr_a = ["l"] + ["r"] * 6
         log("=" * sum(attr_w))
-        log("[归因] coarse/final masked/visible MSE（主看 mask coarse->final；"
-            "final visible≈0 是 paste-back 机制，不代表可见区学习）")
+        log("[归因] 图像 decoder/final 与单一音频输出的 masked/visible MSE")
         log(format_table_row(
             ["cue模式", "imgCmask", "imgFmask", "imgCvis", "imgFvis",
-             "audCmask", "audFmask", "audCvis", "audFvis"],
+             "audMask", "audVis"],
             attr_w, attr_a))
         for mode, r in attr_rows:
             log(format_table_row([
@@ -750,21 +741,19 @@ def main():
                 _fmt_float(r["img_masked_mse"]),
                 _fmt_float(r["img_coarse_visible_mse"]),
                 _fmt_float(r["img_visible_mse"]),
-                _fmt_float(r["aud_coarse_masked_mse"]),
                 _fmt_float(r["aud_masked_mse"]),
-                _fmt_float(r["aud_coarse_visible_mse"]),
                 _fmt_float(r["aud_visible_mse"]),
             ], attr_w, attr_a))
 
         if args.cross_key == "sweep":
-            cross_w = [24, 12, 9, 9, 11, 11, 11, 11, 11, 11]
-            cross_a = ["l", "l"] + ["r"] * 8
+            cross_w = [24, 12, 9, 9, 11, 11, 11]
+            cross_a = ["l", "l"] + ["r"] * 5
             log("=" * sum(cross_w))
             log("[Cross-Key归因] 同 cue/mask 的 normal/zero/wrong/same-class；"
                 "gain=zero-normal，damage=替换条件-normal（masked MSE）")
             log(format_table_row(
-                ["cue模式", "方向", "gate", "res/V", "Cgain", "Fgain",
-                 "Cwrong", "Fwrong", "Csame", "Fsame"], cross_w, cross_a))
+                ["cue模式", "方向", "gate", "res/V", "gain",
+                 "wrong", "same"], cross_w, cross_a))
             for mode, values in cross_rows:
                 for prefix, direction in (("img2aud", "img->aud"),
                                           ("aud2img", "aud->img")):
@@ -772,18 +761,9 @@ def main():
                         mode, direction,
                         _fmt_na(values.get(f"{prefix}_gate")),
                         _fmt_na(values.get(f"{prefix}_ratio")),
-                        _fmt_na(values.get(
-                            f"{prefix}_coarse_correct_gain")),
-                        _fmt_na(values.get(
-                            f"{prefix}_final_correct_gain")),
-                        _fmt_na(values.get(
-                            f"{prefix}_coarse_wrong_damage")),
-                        _fmt_na(values.get(
-                            f"{prefix}_final_wrong_damage")),
-                        _fmt_na(values.get(
-                            f"{prefix}_coarse_same_damage")),
-                        _fmt_na(values.get(
-                            f"{prefix}_final_same_damage")),
+                        _fmt_na(values.get(f"{prefix}_correct_gain")),
+                        _fmt_na(values.get(f"{prefix}_wrong_damage")),
+                        _fmt_na(values.get(f"{prefix}_same_damage")),
                     ], cross_w, cross_a))
 
     if args.family_breakdown:

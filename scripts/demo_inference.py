@@ -115,7 +115,7 @@ def _rec_col_title(is_mel, kind):
 def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred,
                    img_kind="sample", aud_kind="sample", retrieval_img=None,
                    proto_aud=None, img_mask=None, rec_img_coarse=None,
-                   aud_mask=None, rec_aud_coarse=None,
+                   aud_mask=None,
                    img_family_labels=None, aud_family_labels=None):
     """input_specs: [(tensor, is_mel, col_title), ...]"""
     cols = []
@@ -162,13 +162,6 @@ def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred
             "foot_fn": lambda i, fam=aud_family_labels: (
                 f"{fam[i]} | 1=missing" if fam is not None else "1=missing"),
         })
-    if rec_aud_coarse is not None:
-        cols.append({
-            "title": "coarse audio",
-            "is_mel": True,
-            "data": lambda i, c=rec_aud_coarse: c[i],
-            "foot_fn": lambda i, y=labels: _foot(True, y[i]),
-        })
     pa = proto_aud
     cols.extend([
         {
@@ -197,7 +190,7 @@ def _build_columns(input_specs, rec_img, rec_aud, tgt_img, tgt_aud, labels, pred
 def _plot_demo(k, labels, tgt_img, tgt_aud, pred, out_path, suptitle,
                input_specs, outputs, img_kind="sample", aud_kind="sample",
                retrieval_img=None, img_mask=None, rec_img_coarse=None,
-               aud_mask=None, rec_aud_coarse=None,
+               aud_mask=None,
                img_family_labels=None, aud_family_labels=None):
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec
@@ -213,7 +206,7 @@ def _plot_demo(k, labels, tgt_img, tgt_aud, pred, out_path, suptitle,
                           proto_aud=outputs.get("proto_aud"),
                           img_mask=img_mask,
                           rec_img_coarse=rec_img_coarse,
-                          aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse,
+                          aud_mask=aud_mask,
                           img_family_labels=img_family_labels,
                           aud_family_labels=aud_family_labels)
     ncols = len(cols)
@@ -549,7 +542,7 @@ def _save_eval_table(text, path):
 
 def _plot_aud_only(k, labels, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
                    pred, img_kind, aud_kind, out_path, retrieval_img=None,
-                   proto_aud=None, aud_mask=None, rec_aud_coarse=None,
+                   proto_aud=None, aud_mask=None,
                    aud_family_labels=None):
     _plot_demo(
         k, labels, tgt_img, tgt_aud, pred, out_path,
@@ -558,7 +551,7 @@ def _plot_aud_only(k, labels, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
         outputs={"img": rec_img, "aud": rec_aud, "proto_aud": proto_aud},
         img_kind=img_kind, aud_kind=aud_kind,
         retrieval_img=retrieval_img,
-        aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse,
+        aud_mask=aud_mask,
         aud_family_labels=aud_family_labels,
     )
 
@@ -581,7 +574,7 @@ def _plot_img_only(k, labels, img_cue, rec_img, rec_aud, tgt_img, tgt_aud,
 def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
                pred, img_kind, aud_kind, out_path, proto_aud=None,
                img_mask=None, rec_img_coarse=None,
-               aud_mask=None, rec_aud_coarse=None,
+               aud_mask=None,
                img_family_labels=None, aud_family_labels=None):
     _plot_demo(
         k, labels, tgt_img, tgt_aud, pred, out_path,
@@ -593,7 +586,7 @@ def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
         outputs={"img": rec_img, "aud": rec_aud, "proto_aud": proto_aud},
         img_kind=img_kind, aud_kind=aud_kind,
         img_mask=img_mask, rec_img_coarse=rec_img_coarse,
-        aud_mask=aud_mask, rec_aud_coarse=rec_aud_coarse,
+        aud_mask=aud_mask,
         img_family_labels=img_family_labels,
         aud_family_labels=aud_family_labels,
     )
@@ -729,10 +722,12 @@ def main():
 
     m_a = _mode_metrics(out_aud["recovered_img"], rec_aud_a,
                         tgt_img_a.cpu(), tgt_aud_a.cpu(), labels_cpu, pred_a,
+                        img_mask=torch.ones_like(tgt_img_a.cpu()),
                         aud_mask=aud_mask_a)
     m_i = _mode_metrics(out_img["recovered_img"], rec_aud_i,
                         tgt_img_i.cpu(), tgt_aud_i.cpu(), labels_cpu, pred_i,
-                        img_mask=img_mask_i)
+                        img_mask=img_mask_i,
+                        aud_mask=torch.ones_like(tgt_aud_i.cpu()))
     m_b = _mode_metrics(out_both["recovered_img"], rec_aud_b,
                         tgt_img_b.cpu(), tgt_aud_b.cpu(), labels_cpu, pred_b,
                         img_mask=img_mask_b, aud_mask=aud_mask_b)
@@ -765,8 +760,6 @@ def main():
     aud_mask_b_np = aud_mask_b.cpu() if aud_mask_b is not None else None
     coarse_i = out_img["recovered_img_coarse"].cpu()
     coarse_b_img = out_both["recovered_img_coarse"].cpu()
-    coarse_a = out_aud["recovered_aud_coarse"].cpu()
-    coarse_b = out_both["recovered_aud_coarse"].cpu()
 
     # audio-only 类别图像：按预测标签检索类别原型（联想记忆按地址取内容）
     ret_img_a = proto_img[pred_a].cpu()
@@ -777,7 +770,7 @@ def main():
                    tgt_img_a.cpu(), tgt_aud_a.cpu(), pred_a,
                    img_k_a, aud_k_a, args.out_aud, retrieval_img=ret_img_a,
                    proto_aud=proto_aud_cpu,
-                   aud_mask=aud_mask_a_np, rec_aud_coarse=coarse_a,
+                   aud_mask=aud_mask_a_np,
                    aud_family_labels=aud_family_labels)
     _plot_img_only(k, labels_cpu, img_cue_i_np,
                    out_img["recovered_img"], out_img["recovered_aud"],
@@ -790,7 +783,7 @@ def main():
                tgt_img_b.cpu(), tgt_aud_b.cpu(), pred_b,
                img_k_b, aud_k_b, args.out_both, proto_aud=proto_aud_cpu,
                img_mask=img_mask_b_np, rec_img_coarse=coarse_b_img,
-               aud_mask=aud_mask_b_np, rec_aud_coarse=coarse_b,
+               aud_mask=aud_mask_b_np,
                img_family_labels=img_family_labels,
                aud_family_labels=aud_family_labels)
 

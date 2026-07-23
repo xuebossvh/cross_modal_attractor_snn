@@ -290,23 +290,28 @@ class CrossModalSNN(nn.Module):
             return coarse_logits
         return self._prob_to_logits(final_prob)
 
-    def _apply_audio_refiner(self, coarse_aud, aud_cue, aud_mask):
-        if aud_cue is None or aud_mask is None:
-            return coarse_aud
-        mask = aud_mask.to(device=coarse_aud.device, dtype=coarse_aud.dtype)
+    def _finalize_audio(self, decoder_aud, aud_cue, aud_mask):
+        """Return the single public audio reconstruction.
+
+        v11c bypasses the legacy AudioRefiner, so its decoder prediction is the
+        final result.  The refiner module is still constructed when configured
+        because parent checkpoints contain its parameters and must load
+        strictly.
+        """
         if self.audio_refiner_bypass:
-            if self.audio_refiner_pasteback_only:
-                return mask * coarse_aud + (1.0 - mask) * aud_cue
-            return coarse_aud
+            return decoder_aud
+        if aud_cue is None or aud_mask is None:
+            return decoder_aud
+        mask = aud_mask.to(device=decoder_aud.device, dtype=decoder_aud.dtype)
         if self.audio_refiner is not None:
-            delta = self.audio_refiner(coarse_aud, aud_cue, mask)
+            delta = self.audio_refiner(decoder_aud, aud_cue, mask)
             if self.refiner_visible_paste_back:
-                pred = (coarse_aud + delta).clamp(0.0, 1.0)
+                pred = (decoder_aud + delta).clamp(0.0, 1.0)
                 return mask * pred + (1.0 - mask) * aud_cue
-            return (coarse_aud + mask * delta).clamp(0.0, 1.0)
+            return (decoder_aud + mask * delta).clamp(0.0, 1.0)
         if self.audio_refiner_pasteback_only:
-            return mask * coarse_aud + (1.0 - mask) * aud_cue
-        return coarse_aud
+            return mask * decoder_aud + (1.0 - mask) * aud_cue
+        return decoder_aud
 
     def forward(self, x_img_cue=None, x_aud_cue=None,
                 x_img_target=None, x_aud_target=None,
@@ -401,10 +406,9 @@ class CrossModalSNN(nn.Module):
         out["recovered_img"] = self._apply_image_refiner(
             coarse_img, x_img_cue, img_cue_mask)
 
-        coarse_aud = self.audio_decoder(aud_dec_state)
-        out["recovered_aud_coarse"] = coarse_aud
-        out["recovered_aud"] = self._apply_audio_refiner(
-            coarse_aud, x_aud_cue, aud_cue_mask)
+        decoder_aud = self.audio_decoder(aud_dec_state)
+        out["recovered_aud"] = self._finalize_audio(
+            decoder_aud, x_aud_cue, aud_cue_mask)
         return out
 
     @torch.no_grad()
