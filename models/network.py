@@ -76,6 +76,42 @@ class CrossModalSNN(nn.Module):
             self.aud_to_img_cross_gate = None
             self.img_to_aud_cross_gate = None
 
+        cross_detail_cfg = cfg.get("cross_detail_conditioning", {}) or {}
+        self.use_cross_detail_conditioning = bool(
+            cross_detail_cfg.get("enabled", False))
+        self.build_cross_detail_conditioning = (
+            self.use_cross_detail_conditioning
+            or bool(cross_detail_cfg.get("build_modules", False)))
+        self.cross_detail_detach = bool(
+            cross_detail_cfg.get("detach_source", True))
+        if self.use_cross_detail_conditioning and not self.use_detail_conditioning:
+            raise ValueError(
+                "cross_detail_conditioning requires detail_conditioning.enabled=true")
+        if self.build_cross_detail_conditioning:
+            # Cross-Detail 使用 Key 前一层的高维实例特征，并加到目标模态
+            # 已有 detail channel；因此不改变 v11c Decoder 输入尺寸。
+            self.aud_to_img_detail_proj = nn.Linear(
+                d["aud_hidden"], self.img_detail_dim)
+            self.img_to_aud_detail_proj = nn.Linear(
+                d["img_hidden"], self.aud_detail_dim)
+            self.aud_to_img_detail_gate = nn.Linear(
+                d["N_value_img"] + self.img_detail_dim + 1,
+                self.img_detail_dim)
+            self.img_to_aud_detail_gate = nn.Linear(
+                d["N_value_aud"] + self.aud_detail_dim + 1,
+                self.aud_detail_dim)
+            for projector in (self.aud_to_img_detail_proj,
+                              self.img_to_aud_detail_proj):
+                nn.init.zeros_(projector.weight)
+                nn.init.zeros_(projector.bias)
+            nn.init.zeros_(self.aud_to_img_detail_gate.bias)
+            nn.init.zeros_(self.img_to_aud_detail_gate.bias)
+        else:
+            self.aud_to_img_detail_proj = None
+            self.img_to_aud_detail_proj = None
+            self.aud_to_img_detail_gate = None
+            self.img_to_aud_detail_gate = None
+
         img_decoder_in = d["N_value_img"]
         aud_decoder_in = d["N_value_aud"]
         if self.use_detail_conditioning:
@@ -188,6 +224,25 @@ class CrossModalSNN(nn.Module):
             detail = detail.detach()
         return detail
 
+    def _instance_detail_state(self, spikes):
+        """Cross-Detail 源：Key 前一层脉冲率；模态缺失时保持 None。"""
+        if spikes is None:
+            return None
+        detail = rate(spikes)
+        if self.cross_detail_detach:
+            detail = detail.detach()
+        return detail
+
+    @staticmethod
+    def _missing_ratio(cue, mask, batch, device, dtype):
+        """目标模态缺失比例：模态缺席=1，干净无 mask=0。"""
+        if cue is None:
+            return torch.ones(batch, 1, device=device, dtype=dtype)
+        if mask is None:
+            return torch.zeros(batch, 1, device=device, dtype=dtype)
+        return mask.to(device=device, dtype=dtype).flatten(1).mean(
+            dim=1, keepdim=True)
+
     def _cross_key_residual(self, base_value, cross_key_rate, modality,
                             disabled=False):
         batch = base_value.size(0)
@@ -234,8 +289,70 @@ class CrossModalSNN(nn.Module):
         }
         return residual, stats
 
+    def _cross_detail_residual(self, base_value, cross_detail_rate, modality,
+                               target_missing_ratio=None, disabled=False):
+        """把对侧 Key 前实例特征投影成目标模态的逐维 detail residual。"""
+        batch = base_value.size(0)
+        detail_dim = (self.img_detail_dim if modality == "img"
+                      else self.aud_detail_dim)
+        zeros = base_value.new_zeros(batch)
+        empty = base_value.new_zeros(batch, detail_dim)
+        stats = {
+            "detail_gate": None,
+            "detail_residual_norm": zeros,
+            "detail_ratio": zeros,
+        }
+        if (disabled or not self.use_cross_detail_conditioning
+                or cross_detail_rate is None):
+            return empty, stats
+
+        if cross_detail_rate.dim() != 2 or cross_detail_rate.size(0) != batch:
+            raise ValueError(
+                "cross_detail_rate must have shape [B,D], got "
+                f"{tuple(cross_detail_rate.shape)} for batch={batch}")
+        cross_detail_rate = cross_detail_rate.to(
+            device=base_value.device, dtype=base_value.dtype)
+        if self.cross_detail_detach:
+            cross_detail_rate = cross_detail_rate.detach()
+
+        if modality == "img":
+            projector = self.aud_to_img_detail_proj
+            gate_layer = self.aud_to_img_detail_gate
+        elif modality == "aud":
+            projector = self.img_to_aud_detail_proj
+            gate_layer = self.img_to_aud_detail_gate
+        else:
+            raise ValueError(f"Unknown modality: {modality}")
+
+        projected = projector(cross_detail_rate)
+        if target_missing_ratio is None:
+            target_missing_ratio = base_value.new_zeros(batch, 1)
+        else:
+            target_missing_ratio = target_missing_ratio.to(
+                device=base_value.device, dtype=base_value.dtype)
+            if target_missing_ratio.dim() == 1:
+                target_missing_ratio = target_missing_ratio.unsqueeze(1)
+            if target_missing_ratio.shape != (batch, 1):
+                raise ValueError(
+                    "target_missing_ratio must have shape [B,1], got "
+                    f"{tuple(target_missing_ratio.shape)}")
+        gate = torch.sigmoid(
+            gate_layer(torch.cat(
+                [base_value, projected, target_missing_ratio], dim=1)))
+        residual = gate * projected
+        residual_norm = residual.norm(dim=1)
+        return residual, {
+            "detail_gate": gate,
+            "detail_residual_norm": residual_norm,
+            "detail_ratio": residual_norm / base_value.norm(
+                dim=1).clamp_min(1e-8),
+        }
+
     def _fuse_decoder_state(self, value_state, raw_detail, modality,
                             cross_key_rate=None, disable_cross_key=False,
+                            raw_cross_detail=None,
+                            target_missing_ratio=None,
+                            disable_cross_detail=False,
                             return_cross_stats=False):
         base_value = (value_state.detach() if self.detach_value_for_recon
                       else value_state)
@@ -261,6 +378,12 @@ class CrossModalSNN(nn.Module):
                 detail = gate * detail
         else:
             raise ValueError(f"Unknown modality: {modality}")
+        cross_detail, detail_stats = self._cross_detail_residual(
+            fused_value, raw_cross_detail, modality,
+            target_missing_ratio=target_missing_ratio,
+            disabled=disable_cross_detail)
+        detail = detail + cross_detail
+        cross_stats.update(detail_stats)
         decoder_state = torch.cat([fused_value, detail], dim=1)
         if return_cross_stats:
             return decoder_state, cross_stats
@@ -319,8 +442,12 @@ class CrossModalSNN(nn.Module):
                 img_cue_mask=None, aud_cue_mask=None,
                 cross_key_img_rate_override=None,
                 cross_key_aud_rate_override=None,
+                cross_detail_img_rate_override=None,
+                cross_detail_aud_rate_override=None,
                 disable_img_to_aud_cross=False,
-                disable_aud_to_img_cross=False):
+                disable_aud_to_img_cross=False,
+                disable_img_to_aud_detail=False,
+                disable_aud_to_img_detail=False):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
@@ -329,9 +456,17 @@ class CrossModalSNN(nn.Module):
             x_img_target = None
             x_aud_target = None
 
-        spike_img_cue = self.img_encoder(x_img_cue) if x_img_cue is not None else None
-        spike_aud_cue = (self.aud_encoder(self._normalize_audio_for_encoder(x_aud_cue))
-                         if x_aud_cue is not None else None)
+        spike_img_cue = None
+        spike_img_instance = None
+        if x_img_cue is not None:
+            spike_img_cue, spike_img_instance = (
+                self.img_encoder.forward_with_detail(x_img_cue))
+        spike_aud_cue = None
+        spike_aud_instance = None
+        if x_aud_cue is not None:
+            spike_aud_cue, spike_aud_instance = (
+                self.aud_encoder.forward_with_detail(
+                    self._normalize_audio_for_encoder(x_aud_cue)))
 
         spike_img_tgt = None
         spike_aud_tgt = None
@@ -380,19 +515,42 @@ class CrossModalSNN(nn.Module):
         if aud_key_rate is None and mem.get("key_aud") is not None:
             aud_key_rate = rate(mem["key_aud"])
 
+        img_cross_detail = cross_detail_img_rate_override
+        if img_cross_detail is None:
+            img_cross_detail = self._instance_detail_state(spike_img_instance)
+        aud_cross_detail = cross_detail_aud_rate_override
+        if aud_cross_detail is None:
+            aud_cross_detail = self._instance_detail_state(spike_aud_instance)
+
+        batch = mem["index_state"].size(0)
+        device = mem["index_state"].device
+        dtype = mem["index_state"].dtype
+        img_missing_ratio = self._missing_ratio(
+            x_img_cue, img_cue_mask, batch, device, dtype)
+        aud_missing_ratio = self._missing_ratio(
+            x_aud_cue, aud_cue_mask, batch, device, dtype)
+
         img_dec_state, aud_to_img_stats = self._fuse_decoder_state(
             mem["v_img_from_A"], img_detail, "img",
             cross_key_rate=aud_key_rate,
             disable_cross_key=disable_aud_to_img_cross,
+            raw_cross_detail=aud_cross_detail,
+            target_missing_ratio=img_missing_ratio,
+            disable_cross_detail=disable_aud_to_img_detail,
             return_cross_stats=True)
         aud_dec_state, img_to_aud_stats = self._fuse_decoder_state(
             mem["v_aud_from_A"], aud_detail, "aud",
             cross_key_rate=img_key_rate,
             disable_cross_key=disable_img_to_aud_cross,
+            raw_cross_detail=img_cross_detail,
+            target_missing_ratio=aud_missing_ratio,
+            disable_cross_detail=disable_img_to_aud_detail,
             return_cross_stats=True)
 
         out["img_detail_state"] = img_detail
         out["aud_detail_state"] = aud_detail
+        out["img_cross_detail_state"] = img_cross_detail
+        out["aud_cross_detail_state"] = aud_cross_detail
         out["aud_to_img_cross_gate"] = aud_to_img_stats["gate"]
         out["aud_to_img_cross_residual_norm"] = aud_to_img_stats["residual_norm"]
         out["aud_to_img_cross_value_norm"] = aud_to_img_stats["value_norm"]
@@ -401,6 +559,14 @@ class CrossModalSNN(nn.Module):
         out["img_to_aud_cross_residual_norm"] = img_to_aud_stats["residual_norm"]
         out["img_to_aud_cross_value_norm"] = img_to_aud_stats["value_norm"]
         out["img_to_aud_cross_ratio"] = img_to_aud_stats["ratio"]
+        out["aud_to_img_detail_gate"] = aud_to_img_stats["detail_gate"]
+        out["aud_to_img_detail_residual_norm"] = (
+            aud_to_img_stats["detail_residual_norm"])
+        out["aud_to_img_detail_ratio"] = aud_to_img_stats["detail_ratio"]
+        out["img_to_aud_detail_gate"] = img_to_aud_stats["detail_gate"]
+        out["img_to_aud_detail_residual_norm"] = (
+            img_to_aud_stats["detail_residual_norm"])
+        out["img_to_aud_detail_ratio"] = img_to_aud_stats["detail_ratio"]
         coarse_img = self.image_decoder(img_dec_state)
         out["recovered_img_coarse"] = coarse_img
         out["recovered_img"] = self._apply_image_refiner(
@@ -416,8 +582,12 @@ class CrossModalSNN(nn.Module):
               img_cue_mask=None, aud_cue_mask=None,
               cross_key_img_rate_override=None,
               cross_key_aud_rate_override=None,
+              cross_detail_img_rate_override=None,
+              cross_detail_aud_rate_override=None,
               disable_img_to_aud_cross=False,
-              disable_aud_to_img_cross=False):
+              disable_aud_to_img_cross=False,
+              disable_img_to_aud_detail=False,
+              disable_aud_to_img_detail=False):
         self.eval()
         return self.forward(x_img_cue=x_img_cue, x_aud_cue=x_aud_cue,
                             training_mode=False, phase="readout",
@@ -427,5 +597,11 @@ class CrossModalSNN(nn.Module):
                                 cross_key_img_rate_override),
                             cross_key_aud_rate_override=(
                                 cross_key_aud_rate_override),
+                            cross_detail_img_rate_override=(
+                                cross_detail_img_rate_override),
+                            cross_detail_aud_rate_override=(
+                                cross_detail_aud_rate_override),
                             disable_img_to_aud_cross=disable_img_to_aud_cross,
-                            disable_aud_to_img_cross=disable_aud_to_img_cross)
+                            disable_aud_to_img_cross=disable_aud_to_img_cross,
+                            disable_img_to_aud_detail=disable_img_to_aud_detail,
+                            disable_aud_to_img_detail=disable_aud_to_img_detail)

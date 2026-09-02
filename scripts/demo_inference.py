@@ -22,7 +22,8 @@ from paths import (ensure_output_dirs, resolve_from_root,
                    figures_dir, tables_dir)
 from common import (fix_console_encoding, log, load_config, select_targets,
                     setup_matplotlib_chinese, batch_ssim, format_table_row,
-                    aud_collapse_stats, build_cue, set_seed)
+                    aud_collapse_stats, build_cue, set_seed,
+                    unpack_paired_batch)
 from data.corruption import (corrupt_audio, corrupt_image, AUD_MODES,
                              IMG_MODES, AUD_TRAIN_MODES, IMG_TRAIN_MODES)
 from data.dataset import build_loaders
@@ -646,7 +647,7 @@ def main():
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
-    x_img, x_aud, labels = next(iter(test_loader))
+    x_img, x_aud, labels, _ = unpack_paired_batch(next(iter(test_loader)))
     k = min(args.num, x_img.size(0))
     x_img = x_img[:k].to(device)
     x_aud = x_aud[:k].to(device)
@@ -704,12 +705,17 @@ def main():
                           aud_cue_mask=_mask_on_device(aud_mask_b))
 
     # 按 cue 模式选择 target（展示列与 loss 评估一致）
+    paired_targets = bool(cfg.get("data", {}).get("pairing", {}).get(
+        "sample_targets_for_missing", False))
     tgt_img_a, tgt_aud_a, img_k_a, aud_k_a = select_targets(
-        "clean_aud_only", x_img, x_aud, proto_img, proto_aud, labels)
+        "clean_aud_only", x_img, x_aud, proto_img, proto_aud, labels,
+        paired_missing_targets=paired_targets)
     tgt_img_i, tgt_aud_i, img_k_i, aud_k_i = select_targets(
-        "clean_img_only", x_img, x_aud, proto_img, proto_aud, labels)
+        "clean_img_only", x_img, x_aud, proto_img, proto_aud, labels,
+        paired_missing_targets=paired_targets)
     tgt_img_b, tgt_aud_b, img_k_b, aud_k_b = select_targets(
-        "clean_both", x_img, x_aud, proto_img, proto_aud, labels)
+        "clean_both", x_img, x_aud, proto_img, proto_aud, labels,
+        paired_missing_targets=paired_targets)
 
     pred_a, _ = _pred_conf(out_aud["logits"])
     pred_i, _ = _pred_conf(out_img["logits"])

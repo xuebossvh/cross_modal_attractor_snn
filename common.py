@@ -72,6 +72,20 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def unpack_paired_batch(batch):
+    """兼容 v11c 三元组与 v11d 带 pair_id 的四元组 batch。"""
+    if len(batch) == 3:
+        x_img, x_aud, labels = batch
+        pair_ids = None
+    elif len(batch) == 4:
+        x_img, x_aud, labels, pair_ids = batch
+    else:
+        raise ValueError(
+            "paired batch must be (image,audio,label[,pair_id]), got "
+            f"{len(batch)} fields")
+    return x_img, x_aud, labels, pair_ids
+
+
 # 8 种 cue 模式：原 6 种 + 两种 clean/corrupt 非对称双模态对照。
 CUE_MODES = [
     "corrupt_img_only", "corrupt_aud_only", "corrupt_both",
@@ -261,7 +275,8 @@ def cue_modalities(mode):
     return True, True   # 双模态：both 或非对称 clean/corrupt
 
 
-def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels):
+def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels,
+                   paired_missing_targets=False):
     """按 cue 模式选择 value target，区分恢复粒度（核心策略）。
 
     原则：cue 只携带「类别 + 本模态细节」，缺失模态无法唯一确定具体样本，
@@ -273,6 +288,10 @@ def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
 
     返回 (x_img_target, x_aud_target, img_kind, aud_kind)，kind ∈ {"sample","category"}。
     """
+    if paired_missing_targets:
+        # v11d 的 pair_id 给缺失模态提供了唯一、稳定的实例级定义。
+        return clean_img, clean_aud, "sample", "sample"
+
     has_img, has_aud = cue_modalities(cue_mode)
     if has_img and has_aud:                       # both：双模态 → 均样本级
         return clean_img, clean_aud, "sample", "sample"

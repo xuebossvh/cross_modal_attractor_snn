@@ -4,6 +4,7 @@
 Audio Encoder 输入、Audio Decoder 输出、audio recovery loss 均使用此格式。
 """
 
+import csv
 import glob
 import os
 import random
@@ -16,6 +17,7 @@ from data.audio_features import (
     log_mel_from_wav, audio_feature_shape, ensure_audio_norm_stats,
 )
 from data.fsdd import ensure_fsdd, fsdd_recordings_dir
+from paths import resolve_from_root
 
 
 class _SyntheticImages:
@@ -61,7 +63,7 @@ def _parse_fsdd_name(path):
 
 
 def _load_fsdd_by_digit(cfg, train):
-    """加载 FSDD log-mel，返回 {digit: [tensor,...]}。"""
+    """加载 FSDD log-mel，返回特征池及与其同序的 wav 路径池。"""
     ac = cfg["audio"]
     try:
         import torchaudio  # noqa: F401
@@ -88,6 +90,7 @@ def _load_fsdd_by_digit(cfg, train):
     norm_mode = ac.get("norm_mode", "global")
     norm_stats = cfg.get("_audio_norm_stats")
     by_digit = {d: [] for d in range(cfg["dims"]["num_classes"])}
+    paths_by_digit = {d: [] for d in range(cfg["dims"]["num_classes"])}
     n_parse_skip = 0
     n_split_skip = 0
     mel_errors = []
@@ -112,6 +115,7 @@ def _load_fsdd_by_digit(cfg, train):
                 norm_mode=norm_mode, norm_stats=norm_stats,
             )
             by_digit[digit].append(feat)
+            paths_by_digit[digit].append(f)
         except Exception as e:
             if len(mel_errors) < 3:
                 mel_errors.append(f"{os.path.basename(f)}: {e}")
@@ -130,7 +134,58 @@ def _load_fsdd_by_digit(cfg, train):
             f"FSDD 在 {'train' if train else 'test'} 划分下缺少数字 {empty} 的 wav。"
             f"目录: {rec}。{hint}"
         )
-    return by_digit
+    return by_digit, paths_by_digit
+
+
+def _shift_feature(x, amount, dim):
+    """无环绕地平移 2D 特征；空出的时频区域填 0。"""
+    amount = int(amount)
+    if amount == 0:
+        return x
+    size = x.size(dim)
+    if abs(amount) >= size:
+        return torch.zeros_like(x)
+    out = torch.zeros_like(x)
+    src = [slice(None), slice(None)]
+    dst = [slice(None), slice(None)]
+    if amount > 0:
+        src[dim] = slice(0, size - amount)
+        dst[dim] = slice(amount, size)
+    else:
+        src[dim] = slice(-amount, size)
+        dst[dim] = slice(0, size + amount)
+    out[tuple(dst)] = x[tuple(src)]
+    return out
+
+
+def _deterministic_audio_augment(feature, seed, augment_cfg):
+    """为一个 pair_id 生成永久不变的轻量 log-mel 实例增广。"""
+    g = torch.Generator(device="cpu").manual_seed(int(seed))
+    out = feature.clone().float()
+
+    max_time = max(0, int(augment_cfg.get("max_time_shift", 4)))
+    max_freq = max(0, int(augment_cfg.get("max_freq_shift", 2)))
+    if max_time:
+        shift = int(torch.randint(
+            -max_time, max_time + 1, (1,), generator=g).item())
+        out = _shift_feature(out, shift, dim=1)
+    if max_freq:
+        shift = int(torch.randint(
+            -max_freq, max_freq + 1, (1,), generator=g).item())
+        out = _shift_feature(out, shift, dim=0)
+
+    gain_min = float(augment_cfg.get("gain_min", 0.90))
+    gain_max = float(augment_cfg.get("gain_max", 1.10))
+    if gain_max < gain_min:
+        raise ValueError("pairing.augment gain_max must be >= gain_min")
+    gain = gain_min + (gain_max - gain_min) * torch.rand((), generator=g).item()
+    out = out * gain
+
+    noise_std = max(0.0, float(augment_cfg.get("noise_std", 0.01)))
+    if noise_std:
+        noise = torch.randn(out.shape, generator=g, dtype=out.dtype)
+        out = out + noise_std * noise
+    return out.clamp(0.0, 1.0)
 
 
 class PairedAudioVisualDataset(Dataset):
@@ -141,11 +196,19 @@ class PairedAudioVisualDataset(Dataset):
         self.n_mels, self.n_frames = audio_feature_shape(cfg)
         self.noise_std = ac["noise_std"]
         self.train = train
+        self.pairing_cfg = data_cfg.get("pairing", {}) or {}
+        self.fixed_augmented_pairing = bool(
+            self.pairing_cfg.get("enabled", False)
+            and self.pairing_cfg.get("mode", "") == "fixed_augmented_one_to_one")
+        self.return_pair_id = bool(self.pairing_cfg.get("return_pair_id", False))
+        self.pair_seed = int(self.pairing_cfg.get("seed", cfg.get("seed", 0)))
+        self._split_salt = 0 if train else 1_000_000_007
 
         self.use_real_audio = bool(ac.get("use_real_audio", True))
         self._fsdd = None
+        self._fsdd_paths = None
         if self.use_real_audio:
-            self._fsdd = _load_fsdd_by_digit(cfg, train)
+            self._fsdd, self._fsdd_paths = _load_fsdd_by_digit(cfg, train)
         self.toy_audio_prototype = not self.use_real_audio
 
         self.audio_protos = _make_audio_prototypes(
@@ -182,6 +245,11 @@ class PairedAudioVisualDataset(Dataset):
         print(f"[dataset] {'train' if train else 'test'} | 图像={self._mode} "
               f"n={len(self)} | 音频={src} shape=[{self.n_mels},{self.n_frames}]",
               flush=True)
+        if self.fixed_augmented_pairing:
+            print(
+                "[dataset] 固定一一配对已启用：每张图像对应一个确定性增广音频 "
+                f"pair_seed={self.pair_seed} return_pair_id={self.return_pair_id}",
+                flush=True)
 
     def __len__(self):
         return len(self._indices)
@@ -252,9 +320,30 @@ class PairedAudioVisualDataset(Dataset):
             protos[c] = self.audio_protos[c]
         return protos
 
+    def _pair_id(self, item_index):
+        """训练/测试命名空间不重叠的稳定整数 pair_id。"""
+        return int(item_index) + (0 if self.train else 1_000_000_000)
+
+    def _pair_spec(self, label, item_index, pool_size):
+        """返回稳定的 (base_audio_index, augmentation_seed)。"""
+        token = int(item_index) + self._split_salt
+        base_index = (
+            token * 104729 + int(label) * 1009 + self.pair_seed * 9176
+        ) % int(pool_size)
+        aug_seed = (
+            self.pair_seed * 2_000_003
+            + token * 1_000_033
+            + int(label) * 10_007
+        ) % (2 ** 63 - 1)
+        return int(base_index), int(aug_seed)
+
     def _make_audio(self, label, item_index):
         if self.use_real_audio:
             pool = self._fsdd[label]
+            if self.fixed_augmented_pairing:
+                j, aug_seed = self._pair_spec(label, item_index, len(pool))
+                return _deterministic_audio_augment(
+                    pool[j], aug_seed, self.pairing_cfg.get("augment", {}))
             if self.train:
                 j = int(self._rng.integers(0, len(pool)))
             else:
@@ -262,6 +351,10 @@ class PairedAudioVisualDataset(Dataset):
                 j = (int(item_index) * 104729 + int(label) * 1009) % len(pool)
             return pool[j].clone()
         proto = self.audio_protos[label]
+        if self.fixed_augmented_pairing:
+            _, aug_seed = self._pair_spec(label, item_index, 1)
+            return _deterministic_audio_augment(
+                proto, aug_seed, self.pairing_cfg.get("augment", {}))
         if self.train:
             noise = torch.randn(self.n_mels, self.n_frames)
         else:
@@ -276,7 +369,43 @@ class PairedAudioVisualDataset(Dataset):
         img, label = self._base[i]
         label = int(label)
         aud = self._make_audio(label, i)
+        if self.return_pair_id:
+            return img.float(), aud.float(), label, self._pair_id(i)
         return img.float(), aud.float(), label
+
+    def _label_for_item(self, item_index):
+        if hasattr(self._base, "targets"):
+            return int(self._base.targets[int(item_index)])
+        if hasattr(self._base, "labels"):
+            return int(self._base.labels[int(item_index)])
+        return int(self._base[int(item_index)][1])
+
+    def export_pair_manifest(self, path):
+        """导出可审计的一一配对清单，不实际复制扩增音频文件。"""
+        if not self.fixed_augmented_pairing:
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        split = "train" if self.train else "test"
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                "pair_id", "split", "image_index", "label",
+                "base_audio", "base_audio_index", "augmentation_seed",
+            ])
+            for item_index in self._indices:
+                label = self._label_for_item(item_index)
+                pool_size = (len(self._fsdd[label])
+                             if self.use_real_audio else 1)
+                base_index, aug_seed = self._pair_spec(
+                    label, item_index, pool_size)
+                base_audio = "toy_prototype"
+                if self.use_real_audio:
+                    base_audio = os.path.basename(
+                        self._fsdd_paths[label][base_index])
+                writer.writerow([
+                    self._pair_id(item_index), split, item_index, label,
+                    base_audio, base_index, aug_seed,
+                ])
 
 
 def _seed_worker(_worker_id):
@@ -309,6 +438,15 @@ def build_loaders(cfg):
     train_set.build_prototypes()
     test_set.prototype_img = train_set.prototype_img
     test_set.prototype_aud = train_set.prototype_aud
+
+    pairing_cfg = cfg.get("data", {}).get("pairing", {}) or {}
+    manifest_dir = pairing_cfg.get("manifest_dir", "")
+    if pairing_cfg.get("enabled", False) and manifest_dir:
+        manifest_dir = str(resolve_from_root(manifest_dir))
+        train_set.export_pair_manifest(os.path.join(
+            manifest_dir, "pair_manifest_train.csv"))
+        test_set.export_pair_manifest(os.path.join(
+            manifest_dir, "pair_manifest_test.csv"))
 
     bs = cfg["data"]["batch_size"]
     nw = cfg["data"]["num_workers"]

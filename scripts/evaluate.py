@@ -1,7 +1,7 @@
 """评估跨模态 SNN 联想记忆网络。
 
-对 8 种 cue 模式分别评估（推理时禁用 target；v11c Decoder 输入由
-v_*_from_A、对侧 Key residual 与当前 cue 的同模态 detail state 构成）：
+对 8 种 cue 模式分别评估（推理时禁用 target；v11d Decoder 输入由
+v_*_from_A、对侧 Key residual、同模态 detail 与对侧 Cross-Detail 构成）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
     clean_img_corrupt_aud / corrupt_img_clean_aud
     clean_img_only / clean_aud_only / clean_both
@@ -21,12 +21,14 @@ v_*_from_A、对侧 Key residual 与当前 cue 的同模态 detail state 构成�
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
 可选：--family_breakdown 按音频腐蚀 family 拆解 audio-only、clean-image assist 与 corrupt-both。
 可选：--cross_key sweep 在同一 cue/mask 下比较 correct/zero/wrong-class Key。
+可选：--cross_detail sweep 比较 correct/zero/same-class wrong-pair Detail。
 
 用法：
     python -u scripts/evaluate.py --config configs/v11c.yaml --protocol fixed_mask
     python -u scripts/evaluate.py --config configs/v11c.yaml --protocol legacy_random
     python -u scripts/evaluate.py --config configs/v11c.yaml --protocol fixed_mask --family_breakdown
     python -u scripts/evaluate.py --config configs/v11c.yaml --protocol fixed_mask --cross_key sweep
+    python -u scripts/evaluate.py --config configs/v11d.yaml --protocol fixed_mask --cross_detail sweep
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -45,7 +47,7 @@ from tqdm import tqdm
 from common import (fix_console_encoding, log, load_config, set_seed,
                     batch_ssim, batch_psnr, build_cue, select_targets,
                     batch_reconstruction_variance, format_table_row,
-                    aud_collapse_stats)
+                    aud_collapse_stats, unpack_paired_batch)
 from paths import resolve_from_root, tables_dir
 from data.corruption import (AUD_MODES, AUD_FAMILY_GROUPS,
                              AUD_TRAIN_MODES, IMG_TRAIN_MODES)
@@ -165,9 +167,11 @@ def _wrong_class_indices(labels):
     return perm, valid
 
 
-def _same_class_indices(labels):
-    """构造同类不同样本置换；batch 内单例类别 valid=False。"""
+def _same_class_indices(labels, pair_ids=None):
+    """构造同类不同 pair_id 置换；batch 内单例类别 valid=False。"""
     labels_cpu = labels.detach().cpu().tolist()
+    pair_cpu = (pair_ids.detach().cpu().tolist()
+                if pair_ids is not None else list(range(len(labels_cpu))))
     groups = {}
     for idx, label in enumerate(labels_cpu):
         groups.setdefault(int(label), []).append(idx)
@@ -178,6 +182,8 @@ def _same_class_indices(labels):
             continue
         shifted = group[1:] + group[:1]
         for source, target in zip(group, shifted):
+            if pair_cpu[source] == pair_cpu[target]:
+                continue
             perm_cpu[source] = target
             valid_cpu[source] = True
     perm = torch.tensor(perm_cpu, dtype=torch.long, device=labels.device)
@@ -188,6 +194,9 @@ def _same_class_indices(labels):
             raise RuntimeError("same-class permutation contains an identity pair")
         if torch.any(labels[perm[valid]] != labels[valid]):
             raise RuntimeError("same-class permutation contains a wrong-class pair")
+        if pair_ids is not None and torch.any(
+                pair_ids[perm[valid]] == pair_ids[valid]):
+            raise RuntimeError("same-class permutation reused the same pair_id")
     return perm, valid
 
 
@@ -246,6 +255,46 @@ def _paired_cross_metrics(normal_out, zero_out, wrong_out, same_out,
         torch.sigmoid(same_out["recovered_img"]),
         tgt_img, img_mask, "aud_to_img_cross_gate",
         "aud_to_img_cross_ratio", "key_aud")
+    return result
+
+
+def _paired_detail_metrics(normal_out, zero_out, same_out,
+                           tgt_img, tgt_aud, img_mask, aud_mask, same_valid):
+    """Cross-Detail 正确/关闭/同类错配的逐样本归因指标。"""
+    result = {}
+
+    def add_direction(prefix, normal_rec, zero_rec, same_rec, target, mask,
+                      gate_key, ratio_key, source_key):
+        if mask is None or normal_out.get(source_key) is None:
+            return
+        n_err, region_valid = _region_error_per_sample(
+            normal_rec, target, mask, power=2)
+        z_err, _ = _region_error_per_sample(zero_rec, target, mask, power=2)
+        s_err, _ = _region_error_per_sample(same_rec, target, mask, power=2)
+        result[f"detail_{prefix}_correct_gain"] = (
+            z_err - n_err, region_valid)
+        result[f"detail_{prefix}_same_damage"] = (
+            s_err - n_err, region_valid & same_valid)
+        gate = normal_out.get(gate_key)
+        if gate is not None:
+            result[f"detail_{prefix}_gate"] = (
+                gate.flatten(1).mean(dim=1), torch.ones_like(same_valid))
+        ratio = normal_out.get(ratio_key)
+        if ratio is not None:
+            result[f"detail_{prefix}_ratio"] = (
+                ratio.flatten(), torch.ones_like(same_valid))
+
+    add_direction(
+        "img2aud", normal_out["recovered_aud"], zero_out["recovered_aud"],
+        same_out["recovered_aud"], tgt_aud, aud_mask,
+        "img_to_aud_detail_gate", "img_to_aud_detail_ratio",
+        "img_cross_detail_state")
+    add_direction(
+        "aud2img", torch.sigmoid(normal_out["recovered_img"]),
+        torch.sigmoid(zero_out["recovered_img"]),
+        torch.sigmoid(same_out["recovered_img"]), tgt_img, img_mask,
+        "aud_to_img_detail_gate", "aud_to_img_detail_ratio",
+        "aud_cross_detail_state")
     return result
 
 
@@ -340,7 +389,7 @@ def _log_audio_diag(diag_rows):
 def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
               max_batches=None, protocol="fixed_mask", mode_idx=0,
               fixed_img_mode_override=None, fixed_aud_mode_override=None,
-              cross_key_mode="normal"):
+              cross_key_mode="normal", cross_detail_mode="normal"):
     """按 cue 模式对应的恢复粒度 target 计算指标。
 
     图像/音频指标均对照 select_targets 选出的 target（区分样本级/类别级）：
@@ -380,12 +429,15 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     total = len(loader) if max_batches is None else min(max_batches, len(loader))
     pbar = tqdm(iterator, total=total, desc=f"{protocol}:{mode}", unit="batch",
                 file=sys.stdout, ascii=True)
-    for bi, (x_img, x_aud, labels) in pbar:
+    for bi, batch in pbar:
         if max_batches is not None and bi >= max_batches:
             break
+        x_img, x_aud, labels, pair_ids = unpack_paired_batch(batch)
         x_img = x_img.to(device)
         x_aud = x_aud.to(device)
         labels = labels.to(device)
+        if pair_ids is not None:
+            pair_ids = pair_ids.to(device)
 
         if protocol == "fixed_mask":
             # 与模型无关的确定性 mask：仅依赖 (seed, mode, batch)
@@ -402,7 +454,10 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         aud_mask = cue_masks.get("aud")
 
         tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
-            mode, x_img, x_aud, proto_img, proto_aud, labels)
+            mode, x_img, x_aud, proto_img, proto_aud, labels,
+            paired_missing_targets=bool(
+                cfg.get("data", {}).get("pairing", {}).get(
+                    "sample_targets_for_missing", False)))
         # A completely absent modality is a 100% missing region, not "no mask".
         # Keep the model input mask unchanged; this mask is for metrics only.
         eval_img_mask = (
@@ -427,7 +482,7 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                 raise RuntimeError("cross-key zero intervention changed index_state")
         elif cross_key_mode in ("shuffle_wrong", "same_class", "sweep"):
             wrong_perm, wrong_valid = _wrong_class_indices(labels)
-            same_perm, same_valid = _same_class_indices(labels)
+            same_perm, same_valid = _same_class_indices(labels, pair_ids)
             img_rate = (rate(normal_out["key_img"]).detach()
                         if normal_out.get("key_img") is not None else None)
             aud_rate = (rate(normal_out["key_aud"]).detach()
@@ -481,6 +536,44 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                                    out["index_state"]):
                     raise RuntimeError(
                         "cross-key same-class intervention changed index_state")
+
+        if cross_detail_mode != "normal":
+            if cross_key_mode != "normal":
+                raise ValueError(
+                    "cross_key and cross_detail interventions cannot be swept "
+                    "in the same evaluation run")
+            same_perm, same_valid = _same_class_indices(labels, pair_ids)
+            zero_detail_out = run_model(
+                disable_img_to_aud_detail=True,
+                disable_aud_to_img_detail=True)
+            same_detail_kwargs = {}
+            img_detail = normal_out.get("img_cross_detail_state")
+            aud_detail = normal_out.get("aud_cross_detail_state")
+            if img_detail is not None:
+                same_detail_kwargs["cross_detail_img_rate_override"] = (
+                    img_detail[same_perm])
+            if aud_detail is not None:
+                same_detail_kwargs["cross_detail_aud_rate_override"] = (
+                    aud_detail[same_perm])
+            same_detail_out = run_model(**same_detail_kwargs)
+            for candidate in (zero_detail_out, same_detail_out):
+                if not torch.equal(normal_out["index_state"],
+                                   candidate["index_state"]):
+                    raise RuntimeError(
+                        "cross-detail intervention changed index_state")
+            if cross_detail_mode == "zero":
+                out = zero_detail_out
+            elif cross_detail_mode == "same_class":
+                out = same_detail_out
+            elif cross_detail_mode == "sweep":
+                paired = _paired_detail_metrics(
+                    normal_out, zero_detail_out, same_detail_out,
+                    tgt_img, tgt_aud, eval_img_mask, eval_aud_mask,
+                    same_valid)
+                for key, (values, valid) in paired.items():
+                    _sum_paired_metric(
+                        cross_metric_sums, cross_metric_counts,
+                        key, values, valid)
 
         pred = out["logits"].argmax(dim=1)
         correct += (pred == labels).sum().item()
@@ -648,7 +741,14 @@ def main():
         choices=["normal", "zero", "shuffle_wrong", "same_class", "sweep"],
         help=("Decoder cross-Key 条件干预；sweep 同 cue/mask 对比 "
               "normal/zero/wrong/same-class"))
+    ap.add_argument(
+        "--cross_detail", default="normal",
+        choices=["normal", "zero", "same_class", "sweep"],
+        help=("Decoder Cross-Detail 实例条件干预；sweep 比较 "
+              "correct/zero/same-class-wrong-pair"))
     args = ap.parse_args()
+    if args.cross_key != "normal" and args.cross_detail != "normal":
+        ap.error("--cross_key 与 --cross_detail 不能在同一次运行中同时干预")
 
     cfg = load_config(args.config)
     # 固定全局 RNG（fixed_mask 协议下逐 batch 还会再确定性重置）
@@ -682,7 +782,8 @@ def main():
                     else [_fixed_eval_families(cfg)])
     log("=" * sum(eval_w))
     log(f"[评估] 8 种 cue 模式  (corrupt severity={args.severity})  "
-        f"协议={args.protocol}  cross_key={args.cross_key}")
+        f"协议={args.protocol}  cross_key={args.cross_key} "
+        f"cross_detail={args.cross_detail}")
     if args.protocol == "fixed_mask":
         fam_text = ", ".join(
             f"{i + 1}:{im}/{am}" for i, (im, am) in enumerate(family_pairs))
@@ -708,7 +809,8 @@ def main():
                 protocol=args.protocol, mode_idx=fam_idx * 100 + seed_mode,
                 fixed_img_mode_override=fixed_img_mode,
                 fixed_aud_mode_override=fixed_aud_mode,
-                cross_key_mode=args.cross_key)
+                cross_key_mode=args.cross_key,
+                cross_detail_mode=args.cross_detail)
             tgt = f"{r['img_kind']}/{r['aud_kind']}"
             log(format_table_row([
                 mode, f"{r['acc']*100:.1f}%",
@@ -765,6 +867,28 @@ def main():
                         _fmt_na(values.get(f"{prefix}_wrong_damage")),
                         _fmt_na(values.get(f"{prefix}_same_damage")),
                     ], cross_w, cross_a))
+
+        if args.cross_detail == "sweep":
+            detail_w = [24, 12, 9, 9, 11, 11]
+            detail_a = ["l", "l"] + ["r"] * 4
+            log("=" * sum(detail_w))
+            log("[Cross-Detail归因] correct/zero/same-class pair；"
+                "gain=zero-correct，damage=same-correct（masked MSE）")
+            log(format_table_row(
+                ["cue模式", "方向", "gate", "res/V", "gain", "same"],
+                detail_w, detail_a))
+            for mode, values in cross_rows:
+                for prefix, direction in (("img2aud", "img->aud"),
+                                          ("aud2img", "aud->img")):
+                    log(format_table_row([
+                        mode, direction,
+                        _fmt_na(values.get(f"detail_{prefix}_gate")),
+                        _fmt_na(values.get(f"detail_{prefix}_ratio")),
+                        _fmt_na(values.get(
+                            f"detail_{prefix}_correct_gain")),
+                        _fmt_na(values.get(
+                            f"detail_{prefix}_same_damage")),
+                    ], detail_w, detail_a))
 
     if args.family_breakdown:
         eval_audio_family_breakdown(model, test_loader, cfg, device,

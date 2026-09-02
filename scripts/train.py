@@ -17,7 +17,8 @@ import torch.nn.functional as F
 from common import (fix_console_encoding, log, load_config, set_seed,
                     sample_cue_mode, sample_train_severity, build_cue,
                     select_targets, is_aud_only_mode, spike_reg,
-                    resolve_train_corrupt_modes, batch_ssim)
+                    resolve_train_corrupt_modes, batch_ssim,
+                    unpack_paired_batch)
 from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
@@ -168,6 +169,36 @@ def _wrong_class_indices(labels):
     selected = perm[valid]
     if selected.unique().numel() != selected.numel():
         raise RuntimeError("wrong-class permutation reuses a Key index")
+    return perm, valid
+
+
+def _same_class_indices(labels, pair_ids=None):
+    """构造同类但不同 pair_id 的一一置换；同类单例不参与。"""
+    labels_cpu = labels.detach().cpu().tolist()
+    pair_cpu = (pair_ids.detach().cpu().tolist()
+                if pair_ids is not None else list(range(len(labels_cpu))))
+    groups = {}
+    for idx, label in enumerate(labels_cpu):
+        groups.setdefault(int(label), []).append(idx)
+    perm_cpu = list(range(len(labels_cpu)))
+    valid_cpu = [False] * len(labels_cpu)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        shifted = group[1:] + group[:1]
+        for source, target in zip(group, shifted):
+            if pair_cpu[source] == pair_cpu[target]:
+                continue
+            perm_cpu[source] = target
+            valid_cpu[source] = True
+    perm = torch.tensor(perm_cpu, dtype=torch.long, device=labels.device)
+    valid = torch.tensor(valid_cpu, dtype=torch.bool, device=labels.device)
+    if valid.any():
+        if torch.any(labels[perm[valid]] != labels[valid]):
+            raise RuntimeError("same-class permutation contains a wrong class")
+        if pair_ids is not None and torch.any(
+                pair_ids[perm[valid]] == pair_ids[valid]):
+            raise RuntimeError("same-class permutation reused the same pair_id")
     return perm, valid
 
 
@@ -437,7 +468,8 @@ def pretrain_decoders(model, train_loader, cfg, device):
         for epoch in range(start_epoch, epochs):
             model.train()
             epoch_loss = 0.0
-            for step, (x_img, x_aud, labels) in enumerate(train_loader):
+            for step, batch in enumerate(train_loader):
+                x_img, x_aud, labels, _ = unpack_paired_batch(batch)
                 del labels
                 x_img = x_img.to(device)
                 x_aud = x_aud.to(device)
@@ -567,25 +599,34 @@ def pretrain_decoders(model, train_loader, cfg, device):
 
 
 def _build_train_optimizer(model, cfg):
-    """Adam with optional lr_mult for refiner/cross-key parameter groups."""
+    """Adam with optional lr_mult for refiner/cross conditioning groups."""
     base_lr = cfg["train"]["lr"]
     wd = cfg["train"]["weight_decay"]
     img_mult = float(cfg.get("image_refiner", {}).get("lr_mult", 1.0))
     aud_mult = float(cfg.get("audio_refiner", {}).get("lr_mult", 1.0))
     cross_mult = float(
         cfg.get("cross_key_conditioning", {}).get("lr_mult", 1.0))
+    detail_mult = float(
+        cfg.get("cross_detail_conditioning", {}).get("lr_mult", 1.0))
     cross_prefixes = (
         "aud_to_img_cross_proj.", "img_to_aud_cross_proj.",
         "aud_to_img_cross_gate.", "img_to_aud_cross_gate.",
+    )
+    detail_prefixes = (
+        "aud_to_img_detail_proj.", "img_to_aud_detail_proj.",
+        "aud_to_img_detail_gate.", "img_to_aud_detail_gate.",
     )
     base_params = []
     img_refiner_params = []
     aud_refiner_params = []
     cross_params = []
+    detail_params = []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if name.startswith(cross_prefixes):
+        if name.startswith(detail_prefixes):
+            detail_params.append(param)
+        elif name.startswith(cross_prefixes):
             cross_params.append(param)
         elif name.startswith("image_refiner."):
             img_refiner_params.append(param)
@@ -600,6 +641,8 @@ def _build_train_optimizer(model, cfg):
         groups.append({"params": aud_refiner_params, "lr": base_lr * aud_mult})
     if cross_params:
         groups.append({"params": cross_params, "lr": base_lr * cross_mult})
+    if detail_params:
+        groups.append({"params": detail_params, "lr": base_lr * detail_mult})
     return torch.optim.Adam(groups, lr=base_lr, weight_decay=wd)
 
 
@@ -902,8 +945,124 @@ def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
     return loss, logs
 
 
+def _cross_detail_causal_loss(model, out_correct, img_cue, aud_cue,
+                              tgt_img, tgt_aud, img_mask, aud_mask,
+                              labels, pair_ids, cue_mode, cfg,
+                              epoch=0, step=0):
+    """要求正确 pair 的实例 Detail 优于关闭及同类错误 pair。"""
+    causal = cfg.get("cross_detail_conditioning", {}).get(
+        "causal_training", {})
+    if not causal.get("enabled", False):
+        return out_correct["logits"].new_tensor(0.0), {}
+
+    probability = float(causal.get("batch_probability", 1.0))
+    decision_seed = (
+        (int(cfg.get("seed", 0)) + 17) * 1_000_003
+        + int(epoch) * 10_007
+        + int(step)
+    )
+    if (probability <= 0
+            or random.Random(decision_seed).random() >= probability):
+        return out_correct["logits"].new_tensor(0.0), {}
+
+    use_img2aud = (
+        img_cue is not None
+        and out_correct.get("img_cross_detail_state") is not None)
+    use_aud2img = (
+        aud_cue is not None
+        and out_correct.get("aud_cross_detail_state") is not None)
+    if not (use_img2aud or use_aud2img):
+        return out_correct["logits"].new_tensor(0.0), {}
+
+    same_perm, same_valid = _same_class_indices(labels, pair_ids)
+    if not same_valid.any():
+        return out_correct["logits"].new_tensor(0.0), {
+            "detail_pair_n": 0.0,
+        }
+
+    def run_reference(**kwargs):
+        return model(
+            x_img_cue=img_cue, x_aud_cue=aud_cue,
+            training_mode=True, phase="readout",
+            img_cue_mask=img_mask, aud_cue_mask=aud_mask,
+            **kwargs)
+
+    rng_devices = []
+    if labels.device.type == "cuda":
+        rng_devices = [labels.device.index
+                       if labels.device.index is not None
+                       else torch.cuda.current_device()]
+    with torch.random.fork_rng(devices=rng_devices), torch.no_grad():
+        zero_out = run_reference(
+            disable_img_to_aud_detail=True,
+            disable_aud_to_img_detail=True)
+        same_kwargs = {}
+        img_detail = out_correct.get("img_cross_detail_state")
+        aud_detail = out_correct.get("aud_cross_detail_state")
+        if img_detail is not None:
+            same_kwargs["cross_detail_img_rate_override"] = (
+                img_detail.detach()[same_perm])
+        if aud_detail is not None:
+            same_kwargs["cross_detail_aud_rate_override"] = (
+                aud_detail.detach()[same_perm])
+        same_out = run_reference(**same_kwargs)
+
+    margin_ratio = float(causal.get("margin_ratio", 0.05))
+    direction_losses = []
+    logs = {}
+    effective_aud_mask = (
+        torch.ones_like(tgt_aud) if aud_cue is None else aud_mask)
+    effective_img_mask = (
+        torch.ones_like(tgt_img) if img_cue is None else img_mask)
+
+    def add_direction(name, correct, zero, same, target, mask):
+        if mask is None:
+            return
+        correct_err, region_valid = _masked_mse_per_sample(
+            correct, target, mask)
+        zero_err, _ = _masked_mse_per_sample(zero, target, mask)
+        same_err, _ = _masked_mse_per_sample(same, target, mask)
+        valid = same_valid & region_valid
+        if not valid.any():
+            return
+        correct_sel = correct_err[valid]
+        zero_sel = zero_err[valid].detach()
+        same_sel = same_err[valid].detach()
+        scale = zero_sel.clamp_min(1e-6)
+        correct_rel = correct_sel / scale
+        same_rel = same_sel / scale
+        pair_loss = (
+            F.relu(correct_rel - 1.0 + margin_ratio)
+            + F.relu(correct_rel - same_rel + margin_ratio)
+        ).mean()
+        direction_losses.append(pair_loss)
+        logs[f"detail_{name}"] = pair_loss.item()
+        logs[f"{name}_detail_correct"] = correct_sel.detach().mean().item()
+        logs[f"{name}_detail_zero"] = zero_sel.mean().item()
+        logs[f"{name}_detail_same"] = same_sel.mean().item()
+        logs[f"{name}_detail_n"] = float(valid.sum().item())
+
+    if use_img2aud:
+        add_direction(
+            "img2aud", out_correct["recovered_aud"],
+            zero_out["recovered_aud"], same_out["recovered_aud"],
+            tgt_aud, effective_aud_mask)
+    if use_aud2img:
+        add_direction(
+            "aud2img", torch.sigmoid(out_correct["recovered_img"]),
+            torch.sigmoid(zero_out["recovered_img"]),
+            torch.sigmoid(same_out["recovered_img"]),
+            tgt_img, effective_img_mask)
+
+    if not direction_losses:
+        return out_correct["logits"].new_tensor(0.0), logs
+    loss = torch.stack(direction_losses).mean()
+    logs["detail_pair"] = loss.item()
+    return loss, logs
+
+
 def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
-                   proto_img, proto_aud, epoch=0, step=0):
+                   proto_img, proto_aud, pair_ids=None, epoch=0, step=0):
     """返回 (总损失, 日志字典)。"""
     lc = cfg["loss"]
     ab = cfg.get("ablation", {})
@@ -917,7 +1076,10 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     img_mask = cue_masks.get("img")
     aud_mask = cue_masks.get("aud")
     tgt_img, tgt_aud, img_kind, aud_kind = select_targets(
-        cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels)
+        cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels,
+        paired_missing_targets=bool(
+            cfg.get("data", {}).get("pairing", {}).get(
+                "sample_targets_for_missing", False)))
     tgt_aud, aud_mix = _apply_audio_target_curriculum(
         tgt_aud, labels, cue_mode, aud_kind, cfg, proto_aud, epoch)
 
@@ -1051,6 +1213,18 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
             total = total + causal_weight * loss_cross
             logs.update(cross_logs)
 
+    detail_causal_cfg = cfg.get("cross_detail_conditioning", {}).get(
+        "causal_training", {})
+    detail_causal_weight = float(detail_causal_cfg.get("loss_weight", 0.0))
+    if detail_causal_weight > 0:
+        loss_pair, pair_logs = _cross_detail_causal_loss(
+            model, out_r, img_cue, aud_cue,
+            tgt_img, tgt_aud, img_mask, aud_mask,
+            labels, pair_ids, cue_mode, cfg, epoch=epoch, step=step)
+        if pair_logs:
+            total = total + detail_causal_weight * loss_pair
+            logs.update(pair_logs)
+
     total = total + lc["lambda_reg"] * spike_reg(out_r)
 
     return total, logs
@@ -1086,6 +1260,8 @@ def main():
     cc = cfg["corruption"]
     dc = cfg.get("detail_conditioning", {})
     xc = cfg.get("cross_key_conditioning", {})
+    xdc = cfg.get("cross_detail_conditioning", {})
+    pairing = cfg.get("data", {}).get("pairing", {}) or {}
     log(f"[启动] 训练集 {len(train_loader.dataset)} 样本，"
         f"每 epoch {steps_per_epoch} step，共 {total_epochs} epoch")
     log(f"[启动] 音频: {'FSDD+log-mel' if real else 'toy'}  "
@@ -1097,6 +1273,8 @@ def main():
         f"cross_key={xc.get('enabled', False)} "
         f"cross_modules={xc.get('enabled', False) or xc.get('build_modules', False)} "
         f"cross_lr_mult={xc.get('lr_mult', 1.0)}  "
+        f"cross_detail={xdc.get('enabled', False)} "
+        f"pairing={pairing.get('mode', 'legacy_random')}  "
         f"curriculum={cc.get('curriculum_mode', 'fixed')}  "
         f"binding={cfg['ablation']['use_binding_phase']}")
 
@@ -1113,10 +1291,23 @@ def main():
             incompatible = model.load_state_dict(state_dict, strict=strict)
             missing = getattr(incompatible, "missing_keys", [])
             unexpected = getattr(incompatible, "unexpected_keys", [])
-            if missing or unexpected:
+            allowed_missing = tuple(
+                cfg["train"].get("init_allowed_missing_prefixes", []))
+            allowed_unexpected = tuple(
+                cfg["train"].get("init_allowed_unexpected_prefixes", []))
+            bad_missing = [
+                key for key in missing
+                if not allowed_missing or not key.startswith(allowed_missing)]
+            bad_unexpected = [
+                key for key in unexpected
+                if not allowed_unexpected
+                or not key.startswith(allowed_unexpected)]
+            if bad_missing or bad_unexpected:
                 raise RuntimeError(
                     "[init] incompatible parent checkpoint: "
-                    f"missing={missing} unexpected={unexpected}")
+                    f"missing={bad_missing} unexpected={bad_unexpected}; "
+                    f"allowed_missing={allowed_missing} "
+                    f"allowed_unexpected={allowed_unexpected}")
             init_state = state if isinstance(state, dict) else None
             init_source = init_ckpt
             log(f"[init] loaded weights from {init_ckpt} strict={strict} "
@@ -1217,15 +1408,19 @@ def main():
         model.train()
         epoch_loss = 0.0
         log(f"[epoch {epoch}/{total_epochs - 1}] 开始 ({steps_per_epoch} steps)")
-        for step, (x_img, x_aud, labels) in enumerate(train_loader):
+        for step, batch in enumerate(train_loader):
+            x_img, x_aud, labels, pair_ids = unpack_paired_batch(batch)
             x_img = x_img.to(device)
             x_aud = x_aud.to(device)
             labels = labels.to(device)
+            if pair_ids is not None:
+                pair_ids = pair_ids.to(device)
 
             cue_mode = sample_cue_mode(cfg)
             loss, logs = compute_losses(
                 model, x_img, x_aud, labels, cue_mode, cfg,
-                proto_img, proto_aud, epoch=epoch, step=step)
+                proto_img, proto_aud, pair_ids=pair_ids,
+                epoch=epoch, step=step)
 
             opt.zero_grad()
             if not torch.isfinite(loss):
