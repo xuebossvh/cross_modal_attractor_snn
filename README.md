@@ -9,24 +9,25 @@
 即任意一种（可能残缺的）模态线索都能从吸引子记忆中**补全 / 联想**出
 另一模态与类别。LIF 神经元与 surrogate gradient 均为手写实现，无需外部 SNN 库。
 
-> **v11d 恢复粒度策略（重要）**：数据集为每张图像建立永久固定的 `pair_id`，
-> 并由 FSDD 基础录音生成一个确定性增广音频实例。因此缺失模态具有唯一的
-> 样本级目标，audio-only 与 image-only 都恢复其配对实例。v11c 配置仍保留旧的
-> 类别代表原型策略，便于复现实验。
+> **v11e 真实配对策略（重要）**：使用 GRID 同一次 utterance 的视频帧和音频，
+> 图像输入是该帧序列的 28×28 rank-pooled mouth-motion dynamic image。manifest
+> 强制 `source_id == image_source_id == audio_source_id`，并按 speaker 划分
+> train/val/test。v11e 不允许退回 MNIST/FSDD 同类别伪配对。
 
 ### 目标策略（target selection by cue mode）
 
 | cue 模式 | recovered image | recovered audio | classification |
 |----------|-----------------|-----------------|----------------|
-| **audio-only** | 当前 `pair_id` 的 clean image（跨模态样本级） | 当前 `pair_id` 的 clean log-mel | label |
-| **image-only** | 当前 `pair_id` 的 clean image | 当前 `pair_id` 的 clean log-mel（跨模态样本级） | label |
-| **image+audio** | 本样本 clean image（样本级） | 本样本 clean log-mel（样本级） | label |
+| **audio-only** | 同一真实 `source_id` 的 clean dynamic image | 同一真实 `source_id` 的 clean log-mel | digit label |
+| **image-only** | 同一真实 `source_id` 的 clean dynamic image | 同一真实 `source_id` 的 clean log-mel | digit label |
+| **image+audio** | 同一真实 `source_id` 的 clean dynamic image | 同一真实 `source_id` 的 clean log-mel | digit label |
 
-- v11d 不再在 epoch 间随机更换音频；同一个 `pair_id` 始终返回同一个图像和同一个
-  增广音频。配对清单写入 `outputs/outputs_v11d/tables/pair_manifest_*.csv`。
+- v11e 的一个 manifest row 就是一个真实 utterance pair；增广/重复曝光不得产生
+  新 `pair_id`。评估表中的目标统一标记为 `paired-sample`，不再出现 `category`。
 - Cross-Key 继续传递类别语义；新增 Cross-Detail 使用 Key 前一层的高维脉冲率，
   通过独立 Project + Vector Gate 向对侧 Decoder 注入实例细节。
-- 同类不同 `pair_id` 是 Cross-Detail 的困难负样本，避免网络只学会数字类别。
+- 同类不同 `pair_id` 同时作为 Cross-Detail 因果困难负样本与 pair-embedding
+  InfoNCE 困难负样本，避免网络只学会数字类别。
 
 旧版类别代表原型仍为 **class medoid**（真实样本，非均值图）：
 `prototype[c] = argmin_i || x_i − mean(x_c) ||₂`，由 `data/dataset.py` 在
@@ -57,30 +58,32 @@ cross_modal_attractor_snn/
 ├── paths.py           # 项目根目录与 outputs 路径
 ├── outputs/           # 运行产物（不入 git，见 .gitignore）
 │   ├── checkpoints/   # 各版本 *.pt 权重（共用）
-│   └── outputs_v11d/  # 当前主实验产物（主实验/control 各有独立目录）
+│   └── outputs_v11e/  # 当前主实验产物（主实验/control 各有独立目录）
 │       ├── logs/
 │       ├── figures/
 │       └── tables/
 ├── docs/              # 文档（如 GPT_HANDOFF.md）
-├── _data/             # MNIST、FSDD 原始数据
+├── _data/             # GRID 预处理数据；旧版 MNIST/FSDD 数据
 ├── requirements.txt
 └── README.md
 ```
 
 ## 3. 训练
 
-当前官方配置族为 **v11d**。它从训练完成的 v11c 第150轮 checkpoint 分叉，
-保持 Key/Index/Value 与 Cross-Key 稳定，只训练 Decoder、ImageRefiner 和新增的
-Cross-Detail Project/Vector Gate，共追加50轮。`v11d_control` 使用完全相同的
-固定配对和样本级 target，但关闭 Cross-Detail，用来隔离其实例细节贡献。
+当前实验配置族为 **v11e**。由于输入域从 MNIST/FSDD 改成 GRID 真实视听事件，
+主实验和 control 均从头端到端训练 100 epoch，不继承 v11c/v11d 权重。默认 GRID
+约 33 个可用 speaker 时按 speaker 分为约 27k train / 3k val / 3k test；每 epoch
+从 unique train pairs 有放回采样 60,000 次，用相同 optimizer exposure 对标 MNIST，
+但报告的 unique pair 数不变。
 
 ```bash
 pip install -r requirements.txt
-test -f outputs/checkpoints/cross_modal_snn_v11c.pt
-python scripts/mkdir_outputs.py --config configs/v11d_control.yaml
-python -u scripts/train.py --config configs/v11d_control.yaml
-python scripts/mkdir_outputs.py --config configs/v11d.yaml
-python -u scripts/train.py --config configs/v11d.yaml
+python -u scripts/prepare_grid_v11e.py --audio_root /path/to/GRID/audio --frames_root /path/to/GRID/jpg --output_root _data/grid_v11e
+python -u scripts/smoke_test_v11e.py
+python scripts/mkdir_outputs.py --config configs/v11e_control.yaml
+python -u scripts/train.py --config configs/v11e_control.yaml
+python scripts/mkdir_outputs.py --config configs/v11e.yaml
+python -u scripts/train.py --config configs/v11e.yaml
 ```
 
 每个 batch 采样一种 cue 模式，并分两阶段计算损失：
@@ -88,45 +91,49 @@ python -u scripts/train.py --config configs/v11d.yaml
 - **binding 阶段**（可关）：cue 驱动 Index A 收敛；干净 target 经 Encoder 写入
   target Value（可延迟若干步）。`bind loss` 让 **A 驱动的 Value** 对齐
   **target Value（stop-grad）**，从而学习 `A→V` 绑定。此阶段不走 decoder。
-- **readout 阶段**：关闭 target。v11d 先把对侧 cue 的 Key rate 投影为 Value 空间
+- **readout 阶段**：关闭 target。v11e 先把对侧 cue 的 Key rate 投影为 Value 空间
   residual，与 `v_*_from_A` 相加；再与对应 cue 的同模态 detail state 拼接后送入
   Decoder，并把对侧 Key 前实例特征经 Project + Vector Gate 加到 detail channel。
   随后计算分类、图像/音频恢复、Cross-Key 因果损失、同类错配 Cross-Detail
-  因果损失和脉冲正则。AudioDecoder 仍只输出一个 `recovered_aud`。
+  因果损失、同类内实例 InfoNCE 和脉冲正则。AudioDecoder 仍只输出一个
+  `recovered_aud`，v11e 不构造旧 AudioRefiner。
 
-每个配置使用独立 checkpoint/output_version。两份 v11d 配置均加载
-`cross_modal_snn_v11c.pt`；新增 Cross-Detail 参数是唯一允许缺失的父权重，
-Decoder 输入尺寸保持不变。
+每个配置使用独立 checkpoint/output_version。每轮在 speaker-disjoint validation
+split 上计算恢复、分类和 pair retrieval 组合分数，并额外保存 `*_best.pt`；正式
+评估默认读取 best checkpoint，final checkpoint 仍用于断点续训。
 
 > 注意：分支初始化默认 strict。evaluate 遇到缺失或结构不匹配的
 > checkpoint 会直接报错，不会用随机权重生成伪评估结果。
 
-快速冒烟：运行 `python -u scripts/smoke_test_v11d.py`；正式训练前确认父 checkpoint 存在。
+快速冒烟：运行 `python -u scripts/smoke_test_v11e.py`；正式训练前确认
+`_data/grid_v11e/pairs.csv` 存在且严格校验通过。
 
 ## 4. 评估与 Demo
 
 ```bash
-python -u scripts/evaluate.py --config configs/v11d.yaml --protocol fixed_mask --severity 0.4 --family_breakdown | tee outputs/outputs_v11d/logs/eval_v11d_fixed_mask_sev04.log
-python -u scripts/evaluate.py --config configs/v11d.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep 2>&1 | tee outputs/outputs_v11d/logs/eval_v11d_cross_key_sweep_sev04.log
-python -u scripts/evaluate.py --config configs/v11d.yaml --protocol fixed_mask --severity 0.4 --cross_detail sweep 2>&1 | tee outputs/outputs_v11d/logs/eval_v11d_cross_detail_sweep_sev04.log
-python -u scripts/demo_inference.py --config configs/v11d.yaml --num 10 --severity 0.4
-python -u scripts/smoke_test_v11d.py
+python -u scripts/evaluate.py --config configs/v11e_control.yaml --protocol fixed_mask --severity 0.4 --family_breakdown 2>&1 | tee outputs/outputs_v11e_control/logs/eval_v11e_control_fixed_mask_sev04.log
+python -u scripts/evaluate.py --config configs/v11e.yaml --protocol fixed_mask --severity 0.4 --family_breakdown 2>&1 | tee outputs/outputs_v11e/logs/eval_v11e_fixed_mask_sev04.log
+python -u scripts/evaluate.py --config configs/v11e.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep 2>&1 | tee outputs/outputs_v11e/logs/eval_v11e_cross_key_sweep_sev04.log
+python -u scripts/evaluate.py --config configs/v11e.yaml --protocol fixed_mask --severity 0.4 --cross_detail sweep 2>&1 | tee outputs/outputs_v11e/logs/eval_v11e_cross_detail_sweep_sev04.log
+python -u scripts/demo_inference.py --config configs/v11e_control.yaml --num 10 --severity 0.4
+python -u scripts/demo_inference.py --config configs/v11e.yaml --num 10 --severity 0.4
 ```
 
 - `evaluate.py`：8 种 cue 模式下的 acc / 图像 MSE·PSNR·SSIM / **log-mel MSE** 等；
   指标按样本数加权，完全缺失的模态按 100% missing mask 评估。Cross-Key sweep
   比较 correct/zero/wrong-class/same-class Key；Cross-Detail sweep 比较
-  correct/zero/same-class wrong-pair Detail。v11d 所有模式的 target 均为 `smp/smp`。
-  快速试跑：`python -u scripts/evaluate.py --config configs/v11d.yaml --max_batches 1`。
+  correct/zero/same-class wrong-pair Detail。v11e 所有模式的 target 均为
+  `paired-sample/paired-sample`，并报告同类候选中的 image→audio / audio→image
+  exact-pair Recall@1。快速试跑：`python -u scripts/evaluate.py --config configs/v11e.yaml --max_batches 1`。
 - `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注
   cue type / target type / true label / pred label / confidence：
-  - `outputs/outputs_v11d/figures/demo_aud_only.png`：audio-only cue → paired **sample** image + audio
-  - `outputs/outputs_v11d/figures/demo_img_only.png`：image-only cue → image + paired **sample** audio
-  - `outputs/outputs_v11d/figures/demo_both.png`：双模态 cue → **sample** image + **sample** audio
+  - `outputs/outputs_v11e/figures/demo_aud_only.png`：audio-only cue → real paired image + audio
+  - `outputs/outputs_v11e/figures/demo_img_only.png`：image-only cue → real paired image + audio
+  - `outputs/outputs_v11e/figures/demo_both.png`：双模态 cue → real paired image + audio
   - random 可视化会输出 `demo_aud_only_random.png` / `demo_img_only_random.png` / `demo_both_random.png`
-  - 评估表：`outputs/outputs_v11d/tables/demo_eval_table.txt`
+  - 评估表：`outputs/outputs_v11e/tables/demo_eval_table.txt`（无 category 列/目标）
   - 全量 eval 表格图（按 family 子目录）：`tables/family01_occlusion_time_mask/full_eval.png` 等；
-    生成：`python scripts/plot_eval_summary.py outputs/outputs_v11d/logs/eval_v11d_fixed_mask_sev04.log`
+    生成：`python scripts/plot_eval_summary.py outputs/outputs_v11e/logs/eval_v11e_fixed_mask_sev04.log`
 
 ---
 

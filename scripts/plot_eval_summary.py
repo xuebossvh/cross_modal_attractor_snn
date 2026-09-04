@@ -63,6 +63,19 @@ _FULL_ROW_V10E_RE = re.compile(
     r"([\d.]+)\s+([\d.]+)\s+"              # pix_var sampleL2
     r"(\S+)",
 )
+# v11e adds exact-pair Recall@1 before the target-kind column.
+_FULL_ROW_V11E_RE = re.compile(
+    r"(corrupt_img_only|corrupt_aud_only|corrupt_both|"
+    r"clean_img_corrupt_aud|corrupt_img_clean_aud|"
+    r"clean_img_only|clean_aud_only|clean_both)\s+"
+    r"(\d+\.\d+)%\s+"
+    r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
+    r"([\d.]+|nan)\s+"
+    r"([\d.]+)\s+([\d.]+|nan)\s+"
+    r"([\d.]+|nan)\s+"
+    r"([\d.]+)\s+([\d.]+)\s+"
+    r"(\S+)\s+(\S+)",
+)
 _AUD_DIAG_ROW_RE = re.compile(
     r"^(\S+)\s+"
     r"([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+"
@@ -129,6 +142,27 @@ def _parse_full_rows_from_text(text):
     """从日志片段解析当前 cue 模式主评估行。"""
     by_mode = {}
     for line in text.splitlines():
+        m = _FULL_ROW_V11E_RE.search(line)
+        if m:
+            img_mask_mse = _maybe_float(m.group(6))
+            aud_mask_mse = _maybe_float(m.group(9))
+            by_mode[m.group(1)] = {
+                "mode": m.group(1),
+                "acc": float(m.group(2)) / 100.0,
+                "img_mse": float(m.group(3)),
+                "psnr": float(m.group(4)),
+                "img_ssim": float(m.group(5)),
+                "img_mask_mse": img_mask_mse,
+                "aud_mse": float(m.group(7)),
+                "aud_ssim": _maybe_float(m.group(8)),
+                "aud_mask_mse": aud_mask_mse,
+                "mask_mse": aud_mask_mse,
+                "pix_var": float(m.group(10)),
+                "pair_l2": float(m.group(11)),
+                "pair_r1": m.group(12),
+                "tgt": m.group(13),
+            }
+            continue
         m = _FULL_ROW_V10E_RE.search(line)
         if m:
             img_mask_mse = _maybe_float(m.group(6))
@@ -648,7 +682,7 @@ def render_demo_table(rows, title, path):
     return _render_table(headers, cell, col_w, title, path)
 
 
-_KIND_ABBR = {"sam": "sample", "cat": "category"}
+_KIND_ABBR = {"sam": "sample", "pai": "paired-sample", "cat": "category"}
 
 
 def _expand_target(tgt):
@@ -680,9 +714,13 @@ def _default_aud_diag_out(path, main_out=None):
 def render_full_eval_table(rows, title, path):
     has_img_mask = any(r.get("img_mask_mse") is not None for r in rows)
     has_aud_ssim = any(r.get("aud_ssim") is not None for r in rows)
+    has_pair_r1 = any(r.get("pair_r1") is not None for r in rows)
     if has_img_mask:
         headers = ["", "acc", "img MSE", "PSNR", "img SSIM", "img mask MSE",
-                   "aud MSE", "aud SSIM", "aud mask MSE",
+                   "aud MSE", "aud SSIM", "aud mask MSE"]
+        if has_pair_r1:
+            headers.append("pair R@1 (i2a/a2i)")
+        headers += [
                    "target(image/audio)"]
         cell = [[
             r["mode"], f"{r['acc']:.3f}",
@@ -691,9 +729,12 @@ def render_full_eval_table(rows, title, path):
             f"{r['aud_mse']:.4f}",
             f"{r['aud_ssim']:.3f}" if r.get("aud_ssim") is not None else "nan",
             f"{r['aud_mask_mse']:.4f}" if r.get("aud_mask_mse") is not None else "nan",
+            *([r.get("pair_r1", "n/a")] if has_pair_r1 else []),
             _expand_target(r["tgt"]),
         ] for r in rows]
-        col_w = [0.11, 0.06, 0.08, 0.06, 0.08, 0.10, 0.08, 0.08, 0.10, 0.15]
+        col_w = ([0.10, 0.055, 0.075, 0.055, 0.075, 0.09,
+                  0.075, 0.075, 0.09]
+                 + ([0.13] if has_pair_r1 else []) + [0.14])
     elif has_aud_ssim:
         headers = ["", "acc", "img MSE", "PSNR", "img SSIM", "aud MSE",
                    "aud SSIM", "mask MSE", "target(image/audio)"]

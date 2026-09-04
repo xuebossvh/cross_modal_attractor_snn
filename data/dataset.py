@@ -15,6 +15,7 @@ from torch.utils.data import Dataset
 
 from data.audio_features import (
     log_mel_from_wav, audio_feature_shape, ensure_audio_norm_stats,
+    load_audio_norm_stats,
 )
 from data.fsdd import ensure_fsdd, fsdd_recordings_dir
 from paths import resolve_from_root
@@ -408,6 +409,289 @@ class PairedAudioVisualDataset(Dataset):
                 ])
 
 
+def _load_saved_tensor(path, field):
+    """Load one precomputed tensor without accepting arbitrary pickle objects."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".npy":
+        value = torch.from_numpy(np.load(path, allow_pickle=False))
+    elif ext in (".pt", ".pth"):
+        try:
+            value = torch.load(path, map_location="cpu", weights_only=True)
+        except TypeError:  # PyTorch < 2.0
+            value = torch.load(path, map_location="cpu")
+        if isinstance(value, dict):
+            for key in (field, "tensor", "feature"):
+                if key in value:
+                    value = value[key]
+                    break
+    else:
+        raise ValueError(
+            f"{field}_path must be .pt/.pth/.npy, got: {path}")
+    if not torch.is_tensor(value):
+        raise TypeError(f"{field}_path did not contain a tensor: {path}")
+    return value.detach().float()
+
+
+class TruePairedManifestDataset(Dataset):
+    """Strict real-instance audiovisual pairs described by one CSV manifest.
+
+    v11d paired unrelated MNIST and FSDD instances by class.  v11e instead
+    requires both modalities to declare the same physical ``source_id``.  A
+    row is one unique source event; repeating it for optimizer-step matching
+    never creates a new pair id.
+    """
+
+    REQUIRED_COLUMNS = {
+        "pair_id", "source_id", "image_source_id", "audio_source_id",
+        "speaker_id", "split", "label", "image_path", "audio_path",
+    }
+
+    def __init__(self, cfg, split="train"):
+        self.cfg = cfg
+        self.train = split == "train"
+        self.split = str(split)
+        self.num_classes = int(cfg["dims"]["num_classes"])
+        self.n_mels, self.n_frames = audio_feature_shape(cfg)
+        self.use_real_audio = True
+        self.toy_audio_prototype = False
+        self.pairing_cfg = cfg["data"].get("pairing", {}) or {}
+        self.return_pair_id = True
+        self._rng = np.random.default_rng(
+            int(cfg.get("seed", 0)) + (0 if self.train else 1))
+
+        manifest = str(resolve_from_root(cfg["data"]["manifest_path"]))
+        if not os.path.isfile(manifest):
+            raise FileNotFoundError(
+                "v11e real-pair manifest not found: " + manifest + "\n"
+                "Run scripts/prepare_grid_v11e.py first; v11e refuses to "
+                "fall back to MNIST/FSDD pseudo-pairs.")
+        self.manifest_path = manifest
+        self.manifest_dir = os.path.dirname(manifest)
+        with open(manifest, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            columns = set(reader.fieldnames or [])
+            missing = sorted(self.REQUIRED_COLUMNS - columns)
+            if missing:
+                raise ValueError(
+                    f"real-pair manifest is missing columns {missing}: {manifest}")
+            all_rows = [dict(row) for row in reader]
+        self._validate_manifest(all_rows)
+        self.rows = [row for row in all_rows if row["split"] == self.split]
+        if not self.rows:
+            raise ValueError(
+                f"manifest has no rows for split={self.split}: {manifest}")
+
+        self._asset_cache = {}
+        if self.cfg["data"].get("preload", False):
+            for row in self.rows:
+                self._asset_cache[("image", row["image_path"])] = (
+                    self._load_image(row["image_path"]))
+                self._asset_cache[("audio", row["audio_path"])] = (
+                    self._load_audio(row["audio_path"]))
+            print(
+                f"[dataset] preloaded {len(self.rows)} paired tensors for "
+                f"split={self.split}", flush=True)
+
+        self.prototype_img = None
+        self.prototype_aud = None
+        counts = {c: 0 for c in range(self.num_classes)}
+        for row in self.rows:
+            counts[int(row["label"])] += 1
+        empty = [c for c, count in counts.items() if count == 0]
+        if empty:
+            raise ValueError(
+                f"split={self.split} is missing labels {empty}; "
+                "speaker-independent GRID splits must cover all ten digits")
+        print(
+            f"[dataset] {self.split} | real source-paired audiovisual data "
+            f"unique_pairs={len(self.rows)} audio_shape="
+            f"[{self.n_mels},{self.n_frames}] manifest={manifest}",
+            flush=True)
+
+    def _resolve_asset(self, value):
+        value = os.path.expandvars(os.path.expanduser(str(value)))
+        if not os.path.isabs(value):
+            value = os.path.join(self.manifest_dir, value)
+        return os.path.normpath(value)
+
+    def _validate_manifest(self, rows):
+        if not rows:
+            raise ValueError(f"real-pair manifest is empty: {self.manifest_path}")
+        valid_splits = {"train", "val", "test"}
+        seen_pair_ids = set()
+        seen_sources = set()
+        paths_by_split = {}
+        source_splits = {}
+        speaker_splits = {}
+        check_paths = bool(self.cfg["data"].get("validate_paths", True))
+        unique_modalities = bool(
+            self.cfg["data"].get("require_unique_modalities", True))
+        for line_no, row in enumerate(rows, start=2):
+            split = row["split"].strip().lower()
+            row["split"] = split
+            if split not in valid_splits:
+                raise ValueError(
+                    f"manifest line {line_no}: invalid split={split!r}")
+            try:
+                pair_id = int(row["pair_id"])
+                label = int(row["label"])
+            except ValueError as e:
+                raise ValueError(
+                    f"manifest line {line_no}: pair_id and label must be integers") from e
+            if pair_id < 0 or label < 0 or label >= self.num_classes:
+                raise ValueError(
+                    f"manifest line {line_no}: pair_id={pair_id}, label={label} "
+                    f"outside valid ranges")
+            if pair_id in seen_pair_ids:
+                raise ValueError(f"duplicate pair_id={pair_id} at line {line_no}")
+            seen_pair_ids.add(pair_id)
+
+            source = row["source_id"].strip()
+            img_source = row["image_source_id"].strip()
+            aud_source = row["audio_source_id"].strip()
+            speaker = row["speaker_id"].strip()
+            if not source or not speaker:
+                raise ValueError(
+                    f"manifest line {line_no}: source_id/speaker_id cannot be empty")
+            if not (source == img_source == aud_source):
+                raise ValueError(
+                    f"manifest line {line_no}: image/audio are not from the same "
+                    f"source ({source!r}, {img_source!r}, {aud_source!r})")
+            if source in seen_sources:
+                raise ValueError(
+                    f"source_id={source!r} occurs more than once; augmented views "
+                    "must not be recorded as additional real pairs")
+            seen_sources.add(source)
+            source_splits.setdefault(source, set()).add(split)
+            speaker_splits.setdefault(speaker, set()).add(split)
+
+            image_path = self._resolve_asset(row["image_path"])
+            audio_path = self._resolve_asset(row["audio_path"])
+            row["image_path"] = image_path
+            row["audio_path"] = audio_path
+            if check_paths:
+                for kind, path in (("image", image_path), ("audio", audio_path)):
+                    if not os.path.isfile(path):
+                        raise FileNotFoundError(
+                            f"manifest line {line_no}: {kind} asset not found: {path}")
+            if unique_modalities:
+                for kind, path in (("image", image_path), ("audio", audio_path)):
+                    key = (split, kind, os.path.normcase(path))
+                    if key in paths_by_split:
+                        raise ValueError(
+                            f"manifest line {line_no}: reused {kind}_path within "
+                            f"split={split}: {path}")
+                    paths_by_split[key] = line_no
+
+        leaking_sources = {
+            source: splits for source, splits in source_splits.items()
+            if len(splits) > 1
+        }
+        if leaking_sources:
+            raise ValueError(
+                f"source leakage across splits: {list(leaking_sources.items())[:3]}")
+        if self.cfg["data"].get("require_speaker_disjoint", True):
+            leaking_speakers = {
+                speaker: splits for speaker, splits in speaker_splits.items()
+                if len(splits) > 1
+            }
+            if leaking_speakers:
+                raise ValueError(
+                    "speaker leakage across splits: "
+                    f"{list(leaking_speakers.items())[:3]}")
+
+    def __len__(self):
+        return len(self.rows)
+
+    def _load_image(self, path):
+        cached = self._asset_cache.get(("image", path))
+        if cached is not None:
+            return cached
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".pt", ".pth", ".npy"):
+            image = _load_saved_tensor(path, "image")
+        else:
+            try:
+                from PIL import Image
+            except ImportError as e:
+                raise ImportError("Pillow is required to load image_path files") from e
+            with Image.open(path) as im:
+                im = im.convert("L").resize((28, 28))
+                image = torch.from_numpy(
+                    np.asarray(im, dtype=np.float32).copy() / 255.0)
+        if image.dim() == 2:
+            image = image.unsqueeze(0)
+        if image.dim() != 3 or image.size(0) != 1:
+            raise ValueError(f"image tensor must have shape [1,H,W]: {path}")
+        if tuple(image.shape[-2:]) != (28, 28):
+            image = torch.nn.functional.interpolate(
+                image.unsqueeze(0), size=(28, 28), mode="bilinear",
+                align_corners=False).squeeze(0)
+        return image.clamp(0.0, 1.0)
+
+    def _load_audio(self, path):
+        cached = self._asset_cache.get(("audio", path))
+        if cached is not None:
+            return cached
+        ext = os.path.splitext(path)[1].lower()
+        if ext in (".pt", ".pth", ".npy"):
+            audio = _load_saved_tensor(path, "audio")
+        elif ext == ".wav":
+            stats = self.cfg.get("_audio_norm_stats")
+            audio = log_mel_from_wav(
+                path, self.cfg["audio"]["sample_rate"], self.n_mels,
+                self.n_frames, self.cfg["audio"]["duration_sec"],
+                norm_mode=self.cfg["audio"].get("norm_mode", "global"),
+                norm_stats=stats)
+        else:
+            raise ValueError(f"unsupported audio_path extension: {path}")
+        audio = audio.squeeze()
+        if tuple(audio.shape) != (self.n_mels, self.n_frames):
+            raise ValueError(
+                f"audio tensor must have shape [{self.n_mels},{self.n_frames}], "
+                f"got {tuple(audio.shape)}: {path}")
+        return audio.clamp(0.0, 1.0)
+
+    def __getitem__(self, idx):
+        row = self.rows[int(idx)]
+        return (
+            self._load_image(row["image_path"]),
+            self._load_audio(row["audio_path"]),
+            int(row["label"]),
+            int(row["pair_id"]),
+        )
+
+    @staticmethod
+    def _medoid(stacked):
+        center = stacked.mean(dim=0, keepdim=True)
+        distance = (stacked - center).flatten(1).pow(2).sum(dim=1)
+        return stacked[int(distance.argmin())]
+
+    def build_prototypes(self):
+        limit = int(self.cfg["data"].get(
+            "prototype_candidates_per_class", 128))
+        image_candidates = {c: [] for c in range(self.num_classes)}
+        audio_candidates = {c: [] for c in range(self.num_classes)}
+        for row in self.rows:
+            label = int(row["label"])
+            if len(image_candidates[label]) >= limit:
+                continue
+            image_candidates[label].append(self._load_image(row["image_path"]))
+            audio_candidates[label].append(self._load_audio(row["audio_path"]))
+        self.prototype_img = torch.stack([
+            self._medoid(torch.stack(image_candidates[c]))
+            for c in range(self.num_classes)
+        ])
+        self.prototype_aud = torch.stack([
+            self._medoid(torch.stack(audio_candidates[c]))
+            for c in range(self.num_classes)
+        ])
+        print(
+            "[dataset] real-pair train medoids built from at most "
+            f"{limit} candidates/class", flush=True)
+        return self.prototype_img, self.prototype_aud
+
+
 def _seed_worker(_worker_id):
     """Give every training worker an independent, reproducible RNG stream."""
     from torch.utils.data import get_worker_info
@@ -424,24 +708,52 @@ def _seed_worker(_worker_id):
         base._rng = np.random.default_rng(worker_seed + 1)
 
 
-def build_loaders(cfg):
-    from torch.utils.data import DataLoader
-    if cfg["audio"].get("use_real_audio", True):
-        cfg["_audio_norm_stats"] = ensure_audio_norm_stats(cfg)
-    else:
-        cfg["_audio_norm_stats"] = None
-    train_set = PairedAudioVisualDataset(cfg, train=True)
-    test_set = PairedAudioVisualDataset(cfg, train=False)
+def build_loaders(cfg, eval_split=None, train_required=True):
+    from torch.utils.data import DataLoader, RandomSampler
 
-    # 类别代表原型仅由 train 集构建，test/demo 复用同一份记忆原型，
-    # 保证「类别代表」定义在训练数据上，评估/推理一致。
-    train_set.build_prototypes()
-    test_set.prototype_img = train_set.prototype_img
-    test_set.prototype_aud = train_set.prototype_aud
+    dataset_kind = cfg.get("data", {}).get("dataset", "mnist_fsdd")
+    if dataset_kind == "paired_manifest":
+        if cfg["audio"].get("precomputed_features", True):
+            cfg["_audio_norm_stats"] = None
+        else:
+            stats_path = str(resolve_from_root(cfg["audio"]["norm_stats_path"]))
+            if not os.path.isfile(stats_path):
+                raise FileNotFoundError(
+                    "manifest WAV loading requires precomputed training-only "
+                    f"normalization stats: {stats_path}")
+            cfg["_audio_norm_stats"] = load_audio_norm_stats(stats_path)
+        eval_split = eval_split or cfg["data"].get("eval_split", "test")
+        train_set = (TruePairedManifestDataset(cfg, split="train")
+                     if train_required else None)
+        test_set = TruePairedManifestDataset(cfg, split=eval_split)
+    elif dataset_kind == "mnist_fsdd":
+        if cfg["audio"].get("use_real_audio", True):
+            cfg["_audio_norm_stats"] = ensure_audio_norm_stats(cfg)
+        else:
+            cfg["_audio_norm_stats"] = None
+        train_set = PairedAudioVisualDataset(cfg, train=True)
+        test_set = PairedAudioVisualDataset(cfg, train=False)
+    else:
+        raise ValueError(f"unknown data.dataset: {dataset_kind}")
+
+    # 旧配置的类别原型仅由 train 集构建。v11e 评估不使用 category target，
+    # 因而 train_required=False 时不加载训练 split，只保留形状占位。
+    if train_set is not None:
+        train_set.build_prototypes()
+        test_set.prototype_img = train_set.prototype_img
+        test_set.prototype_aud = train_set.prototype_aud
+    else:
+        # Real-pair v11e never selects category prototypes. Keep shape-compatible
+        # zero placeholders so legacy visualization plumbing stays harmless.
+        test_set.prototype_img = torch.zeros(
+            test_set.num_classes, 1, 28, 28)
+        test_set.prototype_aud = torch.zeros(
+            test_set.num_classes, test_set.n_mels, test_set.n_frames)
 
     pairing_cfg = cfg.get("data", {}).get("pairing", {}) or {}
     manifest_dir = pairing_cfg.get("manifest_dir", "")
-    if pairing_cfg.get("enabled", False) and manifest_dir:
+    if (dataset_kind == "mnist_fsdd"
+            and pairing_cfg.get("enabled", False) and manifest_dir):
         manifest_dir = str(resolve_from_root(manifest_dir))
         train_set.export_pair_manifest(os.path.join(
             manifest_dir, "pair_manifest_train.csv"))
@@ -452,10 +764,25 @@ def build_loaders(cfg):
     nw = cfg["data"]["num_workers"]
     train_generator = torch.Generator().manual_seed(int(cfg.get("seed", 0)))
     test_generator = torch.Generator().manual_seed(int(cfg.get("seed", 0)) + 1)
-    train_loader = DataLoader(train_set, batch_size=bs, shuffle=True,
-                              num_workers=nw, drop_last=True,
-                              worker_init_fn=_seed_worker,
-                              generator=train_generator)
+    train_loader = None
+    if train_set is not None:
+        samples_per_epoch = int(
+            cfg["data"].get("train_samples_per_epoch", 0))
+        train_sampler = None
+        if samples_per_epoch > 0:
+            train_sampler = RandomSampler(
+                train_set, replacement=True, num_samples=samples_per_epoch,
+                generator=train_generator)
+            print(
+                f"[dataset] optimizer exposure matching: {samples_per_epoch} "
+                f"samples/epoch sampled from {len(train_set)} unique real pairs; "
+                "this does not increase the reported unique-pair count",
+                flush=True)
+        train_loader = DataLoader(
+            train_set, batch_size=bs, shuffle=train_sampler is None,
+            sampler=train_sampler, num_workers=nw, drop_last=True,
+            worker_init_fn=_seed_worker,
+            generator=None if train_sampler is not None else train_generator)
     test_loader = DataLoader(test_set, batch_size=bs, shuffle=False,
                              num_workers=nw, worker_init_fn=_seed_worker,
                              generator=test_generator)

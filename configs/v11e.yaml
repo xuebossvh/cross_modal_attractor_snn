@@ -1,0 +1,93 @@
+# v11e main: real source-paired GRID audiovisual events.
+# One row is one physical utterance; no MNIST/FSDD class-level pseudo-pairing.
+extends: v11d.yaml
+
+audio_refiner:
+  enabled: false
+  bypass: true
+
+cross_key_conditioning:
+  enabled: true
+  build_modules: true
+  detach_key: false
+  lr_mult: 1.0
+
+cross_detail_conditioning:
+  enabled: true
+  build_modules: true
+  detach_source: false
+  lr_mult: 1.0
+  causal_training:
+    enabled: true
+    loss_weight: 0.5
+    batch_probability: 0.5
+    margin_ratio: 0.05
+
+pair_alignment:
+  enabled: true
+  build_modules: true
+  embed_dim: 128
+  temperature: 0.07
+  same_class_only: true
+  loss_weight: 0.5
+  lr_mult: 1.0
+
+audio:
+  use_real_audio: true
+  precomputed_features: true
+  sample_rate: 16000
+  duration_sec: 3.0
+  n_mels: 64
+  n_frames: 64
+  norm_mode: "global"
+  norm_stats_path: "_data/grid_v11e/audio_norm_stats.pt"
+  encoder_norm_mode: "global"
+
+data:
+  dataset: "paired_manifest"
+  use_mnist: false
+  manifest_path: "_data/grid_v11e/pairs.csv"
+  eval_split: "test"
+  batch_size: 128
+  num_workers: 4
+  train_samples_per_epoch: 60000
+  prototype_candidates_per_class: 128
+  preload: true
+  validate_paths: true
+  require_unique_modalities: true
+  require_speaker_disjoint: true
+  pairing:
+    enabled: true
+    mode: "true_source_one_to_one"
+    return_pair_id: true
+    sample_targets_for_missing: true
+    manifest_dir: ""
+    augment: null
+
+train:
+  output_version: v11e
+  epochs: 100
+  lr: 0.0001
+  lr_scheduler: "cosine"
+  lr_min: 0.00001
+  init_ckpt_path: ""
+  init_strict: true
+  init_required: false
+  init_load_optimizer: false
+  start_epoch: null
+  trainable_prefixes: []
+  ckpt_path: "outputs/checkpoints/cross_modal_snn_v11e.pt"
+  best_ckpt_path: "outputs/checkpoints/cross_modal_snn_v11e_best.pt"
+  eval_ckpt_path: "outputs/checkpoints/cross_modal_snn_v11e_best.pt"
+
+validation:
+  enabled: true
+  split: "val"
+  every_epochs: 1
+  max_batches: 20
+  severity: 0.4
+  score:
+    lambda_img: 1.0
+    lambda_aud: 4.0
+    lambda_pair: 0.5
+    lambda_cls: 0.5

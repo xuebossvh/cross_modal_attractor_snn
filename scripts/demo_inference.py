@@ -94,7 +94,10 @@ def _foot(is_mel, y):
 
 
 # kind ∈ {"sample","category"} -> 评估表标注
-_KIND_TAG = {"sample": "sample", "category": "category"}
+_KIND_TAG = {
+    "sample": "sample", "paired-sample": "paired-sample",
+    "category": "category",
+}
 
 
 def _recovered_foot(is_mel, i, labels, pred):
@@ -471,7 +474,7 @@ def _mode_metrics(rec_img_logits, rec_aud, tgt_img, tgt_aud, labels, pred,
 
 def _format_eval_table(rows, k):
     """生成评估表文本（汇总 + 逐样本），中英文混排按显示宽度对齐。"""
-    sum_w = [14, 10, 10, 10, 10, 10, 12, 12, 12, 12]
+    sum_w = [14, 10, 10, 10, 10, 10, 12, 12, 16, 16]
     sum_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
     sum_hdr = ["模式", "分类ACC", "图像SSIM", "图像MSE", "音频SSIM", "音频MSE",
                "图像maskMSE", "音频maskMSE", "img目标", "aud目标"]
@@ -629,7 +632,9 @@ def main():
     args.eval_table = args.eval_table or str(tbl_dir / f"demo_eval_table{suffix}.txt")
     device = torch.device("cuda" if (cfg["device"] == "cuda"
                           and torch.cuda.is_available()) else "cpu")
-    ckpt_path = str(resolve_from_root(args.ckpt or cfg["train"]["ckpt_path"]))
+    ckpt_path = str(resolve_from_root(
+        args.ckpt or cfg["train"].get(
+            "eval_ckpt_path", cfg["train"]["ckpt_path"])))
 
     log(f"[demo] 设备: {device}  加载 checkpoint: {ckpt_path}")
     model = CrossModalSNN(cfg).to(device)
@@ -642,8 +647,8 @@ def main():
         log(f"[警告] checkpoint 结构不匹配，使用随机权重做 demo。\n  {e}")
     model.eval()
 
-    _, test_loader = build_loaders(cfg)
-    # 类别代表原型（class medoid），单模态 cue 的跨模态类别级 target 来源
+    _, test_loader = build_loaders(cfg, train_required=False)
+    # v11e 的目标来自同一真实 pair；原型仅保留给旧配置兼容使用。
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
@@ -707,15 +712,18 @@ def main():
     # 按 cue 模式选择 target（展示列与 loss 评估一致）
     paired_targets = bool(cfg.get("data", {}).get("pairing", {}).get(
         "sample_targets_for_missing", False))
+    paired_kind = ("paired-sample"
+                   if cfg.get("data", {}).get("dataset") == "paired_manifest"
+                   else "sample")
     tgt_img_a, tgt_aud_a, img_k_a, aud_k_a = select_targets(
         "clean_aud_only", x_img, x_aud, proto_img, proto_aud, labels,
-        paired_missing_targets=paired_targets)
+        paired_missing_targets=paired_targets, paired_target_kind=paired_kind)
     tgt_img_i, tgt_aud_i, img_k_i, aud_k_i = select_targets(
         "clean_img_only", x_img, x_aud, proto_img, proto_aud, labels,
-        paired_missing_targets=paired_targets)
+        paired_missing_targets=paired_targets, paired_target_kind=paired_kind)
     tgt_img_b, tgt_aud_b, img_k_b, aud_k_b = select_targets(
         "clean_both", x_img, x_aud, proto_img, proto_aud, labels,
-        paired_missing_targets=paired_targets)
+        paired_missing_targets=paired_targets, paired_target_kind=paired_kind)
 
     pred_a, _ = _pred_conf(out_aud["logits"])
     pred_i, _ = _pred_conf(out_img["logits"])
@@ -767,8 +775,8 @@ def main():
     coarse_i = out_img["recovered_img_coarse"].cpu()
     coarse_b_img = out_both["recovered_img_coarse"].cpu()
 
-    # audio-only 类别图像：按预测标签检索类别原型（联想记忆按地址取内容）
-    ret_img_a = proto_img[pred_a].cpu()
+    # 真配对数据只展示 decoder 的单一恢复结果和该 pair 的真实 target。
+    ret_img_a = None if paired_targets else proto_img[pred_a].cpu()
     proto_aud_cpu = proto_aud.cpu()
 
     _plot_aud_only(k, labels_cpu, aud_cue_a_np,

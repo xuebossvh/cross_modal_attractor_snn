@@ -1,6 +1,6 @@
 """评估跨模态 SNN 联想记忆网络。
 
-对 8 种 cue 模式分别评估（推理时禁用 target；v11d Decoder 输入由
+对 8 种 cue 模式分别评估（推理时禁用 target；v11e Decoder 输入由
 v_*_from_A、对侧 Key residual、同模态 detail 与对侧 Cross-Detail 构成）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
     clean_img_corrupt_aud / corrupt_img_clean_aud
@@ -12,6 +12,7 @@ v_*_from_A、对侧 Key residual、同模态 detail 与对侧 Cross-Detail 构�
     音频   MSE（recovered log-mel vs clean log-mel，[B,n_mels,n_frames]）
     多样性 像素方差 / 样本间 L2（检测是否塌缩成同一张图）
     音频塌缩诊断 rec/target 的 mean/std/max + top-k 能量召回（检测近黑图）
+    真配对 image->audio / audio->image exact-pair Recall@1（同类候选）
 
 评估协议（--protocol）：
     fixed_mask     论文主对照：固定 seed + 固定 corruption family + 同一套 mask，
@@ -29,6 +30,7 @@ v_*_from_A、对侧 Key residual、同模态 detail 与对侧 Cross-Detail 构�
     python -u scripts/evaluate.py --config configs/v11c.yaml --protocol fixed_mask --family_breakdown
     python -u scripts/evaluate.py --config configs/v11c.yaml --protocol fixed_mask --cross_key sweep
     python -u scripts/evaluate.py --config configs/v11d.yaml --protocol fixed_mask --cross_detail sweep
+    python -u scripts/evaluate.py --config configs/v11e.yaml --protocol fixed_mask --cross_detail sweep
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -198,6 +200,38 @@ def _same_class_indices(labels, pair_ids=None):
                 pair_ids[perm[valid]] == pair_ids[valid]):
             raise RuntimeError("same-class permutation reused the same pair_id")
     return perm, valid
+
+
+def _global_pair_retrieval(img_embed, aud_embed, labels, pair_ids,
+                           chunk_size=512):
+    """Exact-pair Recall@1 among same-class, different-source candidates."""
+    if img_embed is None or aud_embed is None or len(labels) < 2:
+        return float("nan"), float("nan")
+    img_embed = F.normalize(img_embed.float(), dim=1)
+    aud_embed = F.normalize(aud_embed.float(), dim=1)
+    labels = labels.view(-1).to(img_embed.device)
+    pair_ids = pair_ids.view(-1).to(img_embed.device)
+    n = labels.numel()
+
+    def direction(query, gallery):
+        correct = total = 0
+        for start in range(0, n, chunk_size):
+            end = min(start + chunk_size, n)
+            scores = query[start:end] @ gallery.t()
+            candidate = labels[start:end, None].eq(labels[None, :])
+            same_source = pair_ids[start:end, None].eq(pair_ids[None, :])
+            target = torch.arange(start, end, device=scores.device)
+            diagonal = torch.zeros_like(candidate)
+            diagonal[torch.arange(end - start), target] = True
+            candidate = candidate & (~same_source | diagonal)
+            valid = candidate.sum(dim=1) > 1
+            if valid.any():
+                predicted = scores.masked_fill(~candidate, -1e9).argmax(dim=1)
+                correct += predicted[valid].eq(target[valid]).sum().item()
+                total += valid.sum().item()
+        return correct / total if total else float("nan")
+
+    return direction(img_embed, aud_embed), direction(aud_embed, img_embed)
 
 
 def _sum_paired_metric(sums, counts, key, values, valid):
@@ -392,10 +426,9 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
               cross_key_mode="normal", cross_detail_mode="normal"):
     """按 cue 模式对应的恢复粒度 target 计算指标。
 
-    图像/音频指标均对照 select_targets 选出的 target（区分样本级/类别级）：
-        audio-only : 图像 vs 类别代表原型      音频 vs 本样本 clean
-        image-only : 图像 vs 本样本 clean       音频 vs 类别代表原型
-        双模态（含非对称 clean/corrupt）: 图像/音频均 vs 本样本 clean
+    图像/音频指标均对照 select_targets 选出的 target。v11e 真实配对数据在
+    所有 cue 模式下都使用同一 source_id 的 paired-sample 真值；旧配置仍保留
+    category/sample 兼容口径。
 
     protocol=fixed_mask：每个 batch 用确定性 seed 重置 RNG，并使用固定 family，
         使任意模型在同一套 mask 上评估（masks 与模型无关，可跨版本对比）。
@@ -417,6 +450,10 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
     diag_sum = {}
     cross_metric_sums = {}
     cross_metric_counts = {}
+    all_img_pair = []
+    all_aud_pair = []
+    all_pair_labels = []
+    all_pair_ids = []
 
     base_seed = int(cfg.get("seed", 0))
     fixed_img_mode, fixed_aud_mode = _fixed_eval_families(cfg)
@@ -457,7 +494,10 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
             mode, x_img, x_aud, proto_img, proto_aud, labels,
             paired_missing_targets=bool(
                 cfg.get("data", {}).get("pairing", {}).get(
-                    "sample_targets_for_missing", False)))
+                    "sample_targets_for_missing", False)),
+            paired_target_kind=(
+                "paired-sample" if cfg.get("data", {}).get("dataset")
+                == "paired_manifest" else "sample"))
         # A completely absent modality is a 100% missing region, not "no mask".
         # Keep the model input mask unchanged; this mask is for metrics only.
         eval_img_mask = (
@@ -473,6 +513,13 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                 **cross_kwargs)
 
         normal_out = run_model()
+        if (normal_out.get("img_pair_embedding") is not None
+                and normal_out.get("aud_pair_embedding") is not None
+                and pair_ids is not None):
+            all_img_pair.append(normal_out["img_pair_embedding"].cpu())
+            all_aud_pair.append(normal_out["aud_pair_embedding"].cpu())
+            all_pair_labels.append(labels.cpu())
+            all_pair_ids.append(pair_ids.cpu())
         out = normal_out
         if cross_key_mode == "zero":
             out = run_model(
@@ -622,6 +669,11 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         key: _mean_metric(cross_metric_sums, cross_metric_counts, key)
         for key in sorted(cross_metric_sums)
     }
+    pair_i2a_r1 = pair_a2i_r1 = float("nan")
+    if all_img_pair:
+        pair_i2a_r1, pair_a2i_r1 = _global_pair_retrieval(
+            torch.cat(all_img_pair), torch.cat(all_aud_pair),
+            torch.cat(all_pair_labels), torch.cat(all_pair_ids))
     return {
         "acc": acc,
         "img_mse": sum_img_mse / max(n, 1),
@@ -656,6 +708,8 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
         "aud_kind": aud_kind,
         "diag": diag,
         "cross_attr": cross_attr,
+        "pair_i2a_r1": pair_i2a_r1,
+        "pair_a2i_r1": pair_a2i_r1,
     }
 
 
@@ -755,7 +809,9 @@ def main():
     set_seed(int(cfg.get("seed", 0)))
     device = torch.device("cuda" if (cfg["device"] == "cuda"
                           and torch.cuda.is_available()) else "cpu")
-    ckpt_path = str(resolve_from_root(args.ckpt or cfg["train"]["ckpt_path"]))
+    ckpt_path = str(resolve_from_root(
+        args.ckpt or cfg["train"].get(
+            "eval_ckpt_path", cfg["train"]["ckpt_path"])))
 
     log(f"[评估] 设备: {device}  加载 checkpoint: {ckpt_path}")
     model = CrossModalSNN(cfg).to(device)
@@ -768,15 +824,15 @@ def main():
         raise SystemExit(
             f"[错误] checkpoint 结构不匹配，禁止使用随机权重继续评估。\n{e}") from e
 
-    _, test_loader = build_loaders(cfg)
+    _, test_loader = build_loaders(cfg, train_required=False)
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
-    eval_w = [24, 7, 9, 8, 7, 10, 9, 8, 10, 10, 9, 16]
-    eval_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
+    eval_w = [24, 7, 9, 8, 7, 10, 9, 8, 10, 10, 9, 17, 16]
+    eval_a = ["l", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r", "r"]
     eval_hdr = ["cue模式", "acc", "imgMSE", "PSNR", "SSIM", "imgMaskMSE",
                 "audMSE", "audSSIM", "audMaskMSE", "像素方差", "样本L2",
-                "tgt(img/aud)"]
+                "pairR1(i2a/a2i)", "tgt(img/aud)"]
     family_pairs = (_fixed_eval_family_pairs(cfg)
                     if args.protocol == "fixed_mask"
                     else [_fixed_eval_families(cfg)])
@@ -792,7 +848,10 @@ def main():
             f"seed={int(cfg.get('seed', 0))}（masks 与模型无关，可跨版本对比）")
     else:
         log("  随机残缺：family 随机、不固定 seed（鲁棒性抽查，不可跨版本严格对比）")
-    log("  指标按恢复粒度对照 target：img/aud 列后缀 (smp)=样本级  (cat)=类别代表原型")
+    if cfg.get("data", {}).get("dataset") == "paired_manifest":
+        log("  target：所有 cue 模式均为同一真实 source_id 的 paired-sample；无 category target")
+    else:
+        log("  target：img/aud 后缀 sample=样本级，category=类别代表原型")
     for fam_idx, (fixed_img_mode, fixed_aud_mode) in enumerate(family_pairs):
         log("=" * sum(eval_w))
         log(f"[评估 family {fam_idx + 1}/{len(family_pairs)}] "
@@ -820,6 +879,8 @@ def main():
                 _fmt_float(r["aud_ssim"], digits=3),
                 _fmt_float(r["aud_masked_mse"]),
                 f"{r['pix_var']:.4f}", f"{r['pair_l2']:.4f}",
+                (f"{r['pair_i2a_r1']*100:.1f}%/{r['pair_a2i_r1']*100:.1f}%"
+                 if math.isfinite(r["pair_i2a_r1"]) else "n/a"),
                 tgt,
             ], eval_w, eval_a))
             diag_rows.append((mode, r["diag"]))
@@ -897,7 +958,10 @@ def main():
 
     if args.severity_curve:
         log("=" * 78)
-        log("[评估] 严重度曲线（corrupt_aud_only -> 类别代表图像恢复 & 分类）")
+        target_text = ("真实 paired-sample 图像恢复"
+                       if cfg.get("data", {}).get("dataset") == "paired_manifest"
+                       else "类别代表图像恢复")
+        log(f"[评估] 严重度曲线（corrupt_aud_only -> {target_text} & 分类）")
         log(f"{'severity':>9}{'acc':>8}{'imgMSE':>9}{'PSNR':>8}{'SSIM':>7}")
         for s in [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]:
             r = eval_mode(model, test_loader, cfg, "corrupt_aud_only",

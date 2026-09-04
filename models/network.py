@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
@@ -111,6 +112,24 @@ class CrossModalSNN(nn.Module):
             self.img_to_aud_detail_proj = None
             self.aud_to_img_detail_gate = None
             self.img_to_aud_detail_gate = None
+
+        pair_cfg = cfg.get("pair_alignment", {}) or {}
+        self.use_pair_alignment = bool(pair_cfg.get("enabled", False))
+        self.build_pair_alignment = (
+            self.use_pair_alignment or bool(pair_cfg.get("build_modules", False)))
+        self.pair_embed_dim = int(pair_cfg.get("embed_dim", 128))
+        if self.build_pair_alignment:
+            self.img_pair_projector = nn.Sequential(
+                nn.Linear(d["img_hidden"], self.pair_embed_dim),
+                nn.LayerNorm(self.pair_embed_dim),
+            )
+            self.aud_pair_projector = nn.Sequential(
+                nn.Linear(d["aud_hidden"], self.pair_embed_dim),
+                nn.LayerNorm(self.pair_embed_dim),
+            )
+        else:
+            self.img_pair_projector = None
+            self.aud_pair_projector = None
 
         img_decoder_in = d["N_value_img"]
         aud_decoder_in = d["N_value_aud"]
@@ -232,6 +251,14 @@ class CrossModalSNN(nn.Module):
         if self.cross_detail_detach:
             detail = detail.detach()
         return detail
+
+    def _pair_embedding(self, detail, modality):
+        """Project a pre-Key instance state into the shared pair space."""
+        if detail is None or not self.build_pair_alignment:
+            return None
+        projector = (self.img_pair_projector if modality == "img"
+                     else self.aud_pair_projector)
+        return F.normalize(projector(detail), dim=1)
 
     @staticmethod
     def _missing_ratio(cue, mask, batch, device, dtype):
@@ -551,6 +578,10 @@ class CrossModalSNN(nn.Module):
         out["aud_detail_state"] = aud_detail
         out["img_cross_detail_state"] = img_cross_detail
         out["aud_cross_detail_state"] = aud_cross_detail
+        out["img_pair_embedding"] = self._pair_embedding(
+            img_cross_detail, "img")
+        out["aud_pair_embedding"] = self._pair_embedding(
+            aud_cross_detail, "aud")
         out["aud_to_img_cross_gate"] = aud_to_img_stats["gate"]
         out["aud_to_img_cross_residual_norm"] = aud_to_img_stats["residual_norm"]
         out["aud_to_img_cross_value_norm"] = aud_to_img_stats["value_norm"]

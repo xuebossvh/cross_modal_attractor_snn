@@ -2,6 +2,7 @@
 
 import random
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -59,9 +60,33 @@ def format_table_row(values, widths, aligns):
     )
 
 
-def load_config(path="configs/v11c.yaml"):
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def _deep_merge_config(base, override):
+    merged = dict(base)
+    for key, value in override.items():
+        if (key in merged and isinstance(merged[key], dict)
+                and isinstance(value, dict)):
+            merged[key] = _deep_merge_config(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(path="configs/v11c.yaml", _seen=None):
+    """Load YAML with an optional relative ``extends`` parent."""
+    config_path = Path(path).resolve()
+    seen = set() if _seen is None else set(_seen)
+    if config_path in seen:
+        raise ValueError(f"cyclic config extends chain at {config_path}")
+    seen.add(config_path)
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    parent = cfg.pop("extends", None)
+    if parent is None:
+        return cfg
+    parent_path = Path(parent)
+    if not parent_path.is_absolute():
+        parent_path = config_path.parent / parent_path
+    return _deep_merge_config(load_config(parent_path, seen), cfg)
 
 
 def set_seed(seed):
@@ -276,7 +301,7 @@ def cue_modalities(mode):
 
 
 def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels,
-                   paired_missing_targets=False):
+                   paired_missing_targets=False, paired_target_kind="sample"):
     """按 cue 模式选择 value target，区分恢复粒度（核心策略）。
 
     原则：cue 只携带「类别 + 本模态细节」，缺失模态无法唯一确定具体样本，
@@ -286,11 +311,13 @@ def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels,
       * image-only : 图像目标 = 本样本 clean           音频目标 = 类别代表原型(medoid)
       * 双模态（含非对称 clean/corrupt）: 图像/音频目标均 = 本样本 clean
 
-    返回 (x_img_target, x_aud_target, img_kind, aud_kind)，kind ∈ {"sample","category"}。
+    返回 (x_img_target, x_aud_target, img_kind, aud_kind)，kind ∈
+    {"sample", "paired-sample", "category"}。
     """
     if paired_missing_targets:
-        # v11d 的 pair_id 给缺失模态提供了唯一、稳定的实例级定义。
-        return clean_img, clean_aud, "sample", "sample"
+        # v11e 的真实 source_id 给缺失模态提供了唯一实例级真值；
+        # v11d 仍使用 legacy "sample" 标签以保持旧日志兼容。
+        return clean_img, clean_aud, paired_target_kind, paired_target_kind
 
     has_img, has_aud = cue_modalities(cue_mode)
     if has_img and has_aud:                       # both：双模态 → 均样本级

@@ -202,6 +202,64 @@ def _same_class_indices(labels, pair_ids=None):
     return perm, valid
 
 
+def _pair_alignment_loss(out, labels, pair_ids, cfg):
+    """Symmetric instance retrieval loss with same-class hard negatives.
+
+    Only the diagonal image/audio observations are positives.  Other sources
+    with the same digit label are the hard negatives, so class identity alone
+    cannot solve this objective.  Repeated optimizer exposures of one source
+    are excluded as negatives by pair_id.
+    """
+    pair_cfg = cfg.get("pair_alignment", {}) or {}
+    if not pair_cfg.get("enabled", False):
+        return out["logits"].new_tensor(0.0), {}
+    if pair_ids is None:
+        raise RuntimeError(
+            "pair_alignment requires stable pair_id values from a real-pair manifest")
+    img = out.get("img_pair_embedding")
+    aud = out.get("aud_pair_embedding")
+    if img is None or aud is None:
+        return out["logits"].new_tensor(0.0), {"pair_align_n": 0.0}
+    if img.shape != aud.shape:
+        raise ValueError(
+            f"pair embeddings must have the same shape, got {img.shape}/{aud.shape}")
+
+    temperature = float(pair_cfg.get("temperature", 0.07))
+    if temperature <= 0:
+        raise ValueError("pair_alignment.temperature must be > 0")
+    logits = img @ aud.t() / temperature
+    n = logits.size(0)
+    eye = torch.eye(n, dtype=torch.bool, device=logits.device)
+    same_source = pair_ids[:, None].eq(pair_ids[None, :])
+    if pair_cfg.get("same_class_only", True):
+        candidates = labels[:, None].eq(labels[None, :])
+    else:
+        candidates = torch.ones_like(eye)
+    # Keep the designated diagonal positive; exclude repeated views of the
+    # same source from the negative set.
+    candidates = candidates & (~same_source | eye)
+    candidates = candidates | eye
+    valid = candidates.sum(dim=1) > 1
+    if not valid.any():
+        return logits.new_tensor(0.0), {"pair_align_n": 0.0}
+
+    target = torch.arange(n, device=logits.device)
+    masked_i2a = logits.masked_fill(~candidates, -1e9)
+    masked_a2i = logits.t().masked_fill(~candidates.t(), -1e9)
+    loss_i2a = F.cross_entropy(masked_i2a[valid], target[valid])
+    loss_a2i = F.cross_entropy(masked_a2i[valid], target[valid])
+    loss = 0.5 * (loss_i2a + loss_a2i)
+    with torch.no_grad():
+        i2a_acc = masked_i2a[valid].argmax(dim=1).eq(target[valid]).float().mean()
+        a2i_acc = masked_a2i[valid].argmax(dim=1).eq(target[valid]).float().mean()
+    return loss, {
+        "pair_align": loss.item(),
+        "pair_i2a_acc": i2a_acc.item(),
+        "pair_a2i_acc": a2i_acc.item(),
+        "pair_align_n": float(valid.sum().item()),
+    }
+
+
 def _masked_tf_grad_loss(rec, target, mask):
     """缺失区时频一阶差分 L1（F4，逐样本归一）。"""
     m = mask.to(device=rec.device, dtype=rec.dtype)
@@ -608,6 +666,7 @@ def _build_train_optimizer(model, cfg):
         cfg.get("cross_key_conditioning", {}).get("lr_mult", 1.0))
     detail_mult = float(
         cfg.get("cross_detail_conditioning", {}).get("lr_mult", 1.0))
+    pair_mult = float(cfg.get("pair_alignment", {}).get("lr_mult", 1.0))
     cross_prefixes = (
         "aud_to_img_cross_proj.", "img_to_aud_cross_proj.",
         "aud_to_img_cross_gate.", "img_to_aud_cross_gate.",
@@ -616,15 +675,19 @@ def _build_train_optimizer(model, cfg):
         "aud_to_img_detail_proj.", "img_to_aud_detail_proj.",
         "aud_to_img_detail_gate.", "img_to_aud_detail_gate.",
     )
+    pair_prefixes = ("img_pair_projector.", "aud_pair_projector.")
     base_params = []
     img_refiner_params = []
     aud_refiner_params = []
     cross_params = []
     detail_params = []
+    pair_params = []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if name.startswith(detail_prefixes):
+        if name.startswith(pair_prefixes):
+            pair_params.append(param)
+        elif name.startswith(detail_prefixes):
             detail_params.append(param)
         elif name.startswith(cross_prefixes):
             cross_params.append(param)
@@ -643,6 +706,8 @@ def _build_train_optimizer(model, cfg):
         groups.append({"params": cross_params, "lr": base_lr * cross_mult})
     if detail_params:
         groups.append({"params": detail_params, "lr": base_lr * detail_mult})
+    if pair_params:
+        groups.append({"params": pair_params, "lr": base_lr * pair_mult})
     return torch.optim.Adam(groups, lr=base_lr, weight_decay=wd)
 
 
@@ -1079,7 +1144,10 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
         cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels,
         paired_missing_targets=bool(
             cfg.get("data", {}).get("pairing", {}).get(
-                "sample_targets_for_missing", False)))
+                "sample_targets_for_missing", False)),
+        paired_target_kind=(
+            "paired-sample" if cfg.get("data", {}).get("dataset")
+            == "paired_manifest" else "sample"))
     tgt_aud, aud_mix = _apply_audio_target_curriculum(
         tgt_aud, labels, cue_mode, aud_kind, cfg, proto_aud, epoch)
 
@@ -1116,6 +1184,13 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
         model, out_r, clean_aud, cue_mode, cfg)
     total = total + loss_detail
     logs.update(detail_logs)
+
+    loss_pair_align, pair_align_logs = _pair_alignment_loss(
+        out_r, labels, pair_ids, cfg)
+    pair_align_weight = float(
+        cfg.get("pair_alignment", {}).get("loss_weight", 0.0))
+    total = total + pair_align_weight * loss_pair_align
+    logs.update(pair_align_logs)
 
     loss_cls = F.cross_entropy(out_r["logits"], labels)
     cls_w = lc["lambda_cls"]
@@ -1230,6 +1305,96 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     return total, logs
 
 
+@torch.no_grad()
+def _validate_model(model, loader, cfg, device):
+    """Deterministic paired validation used for best-checkpoint selection."""
+    validation = cfg.get("validation", {}) or {}
+    if not validation.get("enabled", False):
+        return None
+    max_batches = int(validation.get("max_batches", 20))
+    severity = float(validation.get("severity", 0.4))
+    fixed = cfg.get("corruption", {}).get("eval_fixed", {}) or {}
+
+    def first_mode(value, fallback):
+        if isinstance(value, (list, tuple)):
+            return value[0] if value else fallback
+        return value or fallback
+
+    img_mode = first_mode(fixed.get("img_modes", fixed.get("img_mode")),
+                          "occlusion")
+    aud_mode = first_mode(fixed.get("aud_modes", fixed.get("aud_mode")),
+                          "time_mask")
+    was_training = model.training
+    model.eval()
+    n = 0
+    img_sum = aud_sum = correct = 0.0
+    pair_i2a_sum = pair_a2i_sum = pair_n = 0.0
+    for bi, batch in enumerate(loader):
+        if max_batches > 0 and bi >= max_batches:
+            break
+        x_img, x_aud, labels, pair_ids = unpack_paired_batch(batch)
+        x_img = x_img.to(device)
+        x_aud = x_aud.to(device)
+        labels = labels.to(device)
+        if pair_ids is None:
+            raise RuntimeError("v11e validation requires pair_id")
+        pair_ids = pair_ids.to(device)
+
+        devices = []
+        if device.type == "cuda":
+            devices = [device.index if device.index is not None
+                       else torch.cuda.current_device()]
+        with torch.random.fork_rng(devices=devices):
+            seed = int(cfg.get("seed", 0)) * 100003 + bi
+            torch.manual_seed(seed)
+            if device.type == "cuda":
+                torch.cuda.manual_seed_all(seed)
+            img_cue, aud_cue, masks = build_cue(
+                x_img, x_aud, "corrupt_both", cfg, severity=severity,
+                img_mode=img_mode, aud_mode=aud_mode, return_masks=True)
+            out = model(
+                x_img_cue=img_cue, x_aud_cue=aud_cue,
+                img_cue_mask=masks.get("img"),
+                aud_cue_mask=masks.get("aud"), training_mode=False)
+
+        batch_size = labels.size(0)
+        n += batch_size
+        img_sum += F.mse_loss(
+            torch.sigmoid(out["recovered_img"]), x_img).item() * batch_size
+        aud_sum += F.mse_loss(
+            out["recovered_aud"], x_aud).item() * batch_size
+        correct += out["logits"].argmax(dim=1).eq(labels).sum().item()
+        _, pair_logs = _pair_alignment_loss(out, labels, pair_ids, cfg)
+        valid_n = float(pair_logs.get("pair_align_n", 0.0))
+        if valid_n > 0:
+            pair_i2a_sum += pair_logs["pair_i2a_acc"] * valid_n
+            pair_a2i_sum += pair_logs["pair_a2i_acc"] * valid_n
+            pair_n += valid_n
+
+    if was_training:
+        model.train()
+    if n == 0:
+        raise RuntimeError("validation loader produced no samples")
+    metrics = {
+        "img_mse": img_sum / n,
+        "aud_mse": aud_sum / n,
+        "acc": correct / n,
+        "pair_i2a_acc": pair_i2a_sum / max(pair_n, 1.0),
+        "pair_a2i_acc": pair_a2i_sum / max(pair_n, 1.0),
+        "n": float(n),
+    }
+    score_cfg = validation.get("score", {}) or {}
+    pair_acc = 0.5 * (
+        metrics["pair_i2a_acc"] + metrics["pair_a2i_acc"])
+    metrics["score"] = (
+        float(score_cfg.get("lambda_img", 1.0)) * metrics["img_mse"]
+        + float(score_cfg.get("lambda_aud", 4.0)) * metrics["aud_mse"]
+        + float(score_cfg.get("lambda_pair", 0.5)) * (1.0 - pair_acc)
+        + float(score_cfg.get("lambda_cls", 0.5)) * (1.0 - metrics["acc"])
+    )
+    return metrics
+
+
 def main():
     fix_console_encoding()
 
@@ -1250,13 +1415,16 @@ def main():
 
     log(f"[启动] 设备: {device}")
     log("[启动] 加载训练集…")
-    train_loader, _ = build_loaders(cfg)
+    validation_cfg = cfg.get("validation", {}) or {}
+    train_loader, val_loader = build_loaders(
+        cfg, eval_split=validation_cfg.get("split", "val"))
     steps_per_epoch = len(train_loader)
 
     proto_img = train_loader.dataset.prototype_img.to(device)
     proto_aud = train_loader.dataset.prototype_aud.to(device)
     total_epochs = args.epochs if args.epochs is not None else cfg["train"]["epochs"]
     real = train_loader.dataset.use_real_audio
+    dataset_kind = cfg.get("data", {}).get("dataset", "mnist_fsdd")
     cc = cfg["corruption"]
     dc = cfg.get("detail_conditioning", {})
     xc = cfg.get("cross_key_conditioning", {})
@@ -1264,7 +1432,9 @@ def main():
     pairing = cfg.get("data", {}).get("pairing", {}) or {}
     log(f"[启动] 训练集 {len(train_loader.dataset)} 样本，"
         f"每 epoch {steps_per_epoch} step，共 {total_epochs} epoch")
-    log(f"[启动] 音频: {'FSDD+log-mel' if real else 'toy'}  "
+    audio_source = ("real paired manifest" if dataset_kind == "paired_manifest"
+                    else ("FSDD+log-mel" if real else "toy"))
+    log(f"[启动] 音频: {audio_source}  "
         f"enc={cfg['snn'].get('aud_encoder', 'conv')}  "
         f"N_index={cfg['dims']['N_index']} k_wta={cfg['index']['k_wta']}  "
         f"index_schedule={cfg['index'].get('input_schedule', 'simultaneous')}  "
@@ -1274,6 +1444,7 @@ def main():
         f"cross_modules={xc.get('enabled', False) or xc.get('build_modules', False)} "
         f"cross_lr_mult={xc.get('lr_mult', 1.0)}  "
         f"cross_detail={xdc.get('enabled', False)} "
+        f"pair_alignment={cfg.get('pair_alignment', {}).get('enabled', False)} "
         f"pairing={pairing.get('mode', 'legacy_random')}  "
         f"curriculum={cc.get('curriculum_mode', 'fixed')}  "
         f"binding={cfg['ablation']['use_binding_phase']}")
@@ -1381,6 +1552,9 @@ def main():
             log(f"[init] model-only branch; start_epoch={start_epoch}")
 
     ckpt = str(resolve_from_root(cfg["train"]["ckpt_path"]))
+    best_ckpt = str(resolve_from_root(
+        cfg["train"].get("best_ckpt_path", ckpt)))
+    best_validation_score = float("inf")
     if args.resume and os.path.isfile(ckpt):
         state = torch.load(ckpt, map_location=device)
         model.load_state_dict(state["model"])
@@ -1394,6 +1568,8 @@ def main():
             start_epoch = int(state["epoch"]) + 1
         else:
             log("[警告] checkpoint 为旧格式（无 epoch 字段），请指定 --start_epoch。")
+        best_validation_score = float(
+            state.get("best_validation_score", float("inf")))
         log(f"[恢复] 从 {ckpt} 继续，起始 epoch={start_epoch}/{total_epochs - 1}")
     elif args.resume:
         log(f"[警告] --resume 指定但 checkpoint 不存在: {ckpt}，从头训练。")
@@ -1448,9 +1624,34 @@ def main():
 
         avg_loss = epoch_loss / max(steps_per_epoch, 1)
         os.makedirs(os.path.dirname(ckpt), exist_ok=True)
-        payload = _checkpoint_payload(model, opt, scheduler, cfg, epoch)
-        torch.save(payload, ckpt)
         completed_epochs = epoch + 1
+        validation_metrics = None
+        validate_every = int(validation_cfg.get("every_epochs", 1))
+        if (validation_cfg.get("enabled", False)
+                and validate_every > 0
+                and completed_epochs % validate_every == 0):
+            validation_metrics = _validate_model(
+                model, val_loader, cfg, device)
+            log(
+                f"[val epoch {epoch}] score={validation_metrics['score']:.6f} "
+                f"acc={validation_metrics['acc']*100:.1f}% "
+                f"img_mse={validation_metrics['img_mse']:.6f} "
+                f"aud_mse={validation_metrics['aud_mse']:.6f} "
+                f"pair_i2a={validation_metrics['pair_i2a_acc']*100:.1f}% "
+                f"pair_a2i={validation_metrics['pair_a2i_acc']*100:.1f}%")
+        is_best = (validation_metrics is not None
+                   and validation_metrics["score"] < best_validation_score)
+        if is_best:
+            best_validation_score = validation_metrics["score"]
+        payload = _checkpoint_payload(model, opt, scheduler, cfg, epoch)
+        payload["best_validation_score"] = best_validation_score
+        if validation_metrics is not None:
+            payload["validation"] = validation_metrics
+        torch.save(payload, ckpt)
+        if is_best:
+            os.makedirs(os.path.dirname(best_ckpt), exist_ok=True)
+            torch.save(payload, best_ckpt)
+            log(f"[val epoch {epoch}] best checkpoint 已保存 -> {best_ckpt}")
         if completed_epochs in milestone_epochs:
             milestone_path = _milestone_checkpoint_path(
                 ckpt, completed_epochs)
