@@ -195,7 +195,7 @@ K_aud [T,B,128] -> rate/detach [B,128]
 
 ### 0.10 v11e 历史方案（GRID 真实视听配对，已废止）
 
-> 本节仅保留设计演进记录，已由 7.10 节的 MNIST/FSDD 类别级绑定方案取代；
+> 本节仅保留设计演进记录，已由 0.11 与 7.10 节的 MNIST/FSDD 类别级绑定方案取代；
 > 下列 GRID 文件和配置不属于当前 v11e 分支交付物。
 
 `v11e` 将实验主线从 MNIST/FSDD 伪配对切换到 GRID 真实音视频同源事件。
@@ -221,6 +221,32 @@ rank-pooled mouth-motion dynamic image，音频为同源 WAV 的 64x64 log-mel�
 v11e 的 main/control 归因需注意：主模型的 validation score 包含 pair retrieval，
 control 的 `lambda_pair=0`。正式报告时应同时比较 best 与 final checkpoint，
 或统一 best 选择规则后再做强因果判断。
+
+### 0.11 v11e 当前方案（MNIST/FSDD 类别级绑定）
+
+`v11e` 当前使用 MNIST 图像 `[1,28,28]` 与 FSDD `64x64` log-mel。两种模态
+只共享 digit label，因此在同一类别内进行 many-to-many 随机组合，不建立或
+监督人工的一一实例配对。
+
+1. **恢复目标遵循可辨识性**：image-only 使用 `sample/category`，即恢复当前
+   MNIST 样本和训练集音频 class medoid；audio-only 使用 `category/sample`；
+   只有双模态 cue 使用 `sample/sample`。
+2. **类别原型无测试泄漏**：缺失模态的 category target 是仅由训练 split 构建的
+   class medoid，evaluate/demo 复用训练原型，不从测试集重新估计。
+3. **保留当前 decoder 结构**：Decoder 输入仍为
+   `V_from_A + same-modal gated cue detail`；`detach_value_for_recon=true`，
+   重建 loss 不通过 `V_from_A` 反向改写 Index。
+4. **保留 Cross-Key**：主实验启用 Cross-Key，为目标 Decoder 注入对侧类别语义；
+   `v11e_control` 在数据、target、seed、batch size 和训练预算相同的前提下只关闭
+   Cross-Key，用于测量该路径的增量贡献。
+5. **关闭实例级伪监督**：Cross-Detail、pair alignment、pair Recall@1 和
+   same-class exact-pair 因果目标均关闭，因为 MNIST/FSDD 不提供真实实例对应。
+6. **独立版本交付**：`configs/` 只保留自包含的 `v11e.yaml` 和
+   `v11e_control.yaml`；不继承或携带 v11c/v11d YAML。正式评估读取 final
+   checkpoint，不用 test split 选择 best checkpoint。
+
+完整配置字段、target 选择和评估协议见 7.10、8.2 节及
+`docs/V11E_CATEGORY_BINDING_PROTOCOL.md`。
 
 ---
 
@@ -1623,7 +1649,7 @@ checkpoint 仓库。
 | v10a 消融 | 通过 | 已在 6.3 节说明 |
 | v11c AudioRefiner bypass | 通过 | 已在 7.7 节记录 coarse/final 与 paste-back 语义 |
 | v11d Cross-Detail | 通过 | 已在 0.9、3.6、4.4、5.4、7.8 节记录 |
-| v11e 类别级绑定 | 通过 | 已在 7.10、8.2 节记录目标粒度、数据与对照定义 |
+| v11e 类别级绑定 | 通过 | 已在 0.11、7.10、8.2 节记录目标粒度、数据与对照定义 |
 | 评估协议 | 通过 | fixed_mask 和 legacy_random 均已说明 |
 | 音频塌缩诊断 | 通过 | 已在指标和结果文件中说明 |
 
