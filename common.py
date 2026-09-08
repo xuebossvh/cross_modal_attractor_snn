@@ -315,8 +315,8 @@ def select_targets(cue_mode, clean_img, clean_aud, proto_img, proto_aud, labels,
     {"sample", "paired-sample", "category"}。
     """
     if paired_missing_targets:
-        # v11e 的真实 source_id 给缺失模态提供了唯一实例级真值；
-        # v11d 仍使用 legacy "sample" 标签以保持旧日志兼容。
+        # 真实 paired-manifest 数据可为缺失模态提供唯一实例级真值；
+        # legacy 固定伪配对仍使用 "sample" 标签以保持旧日志兼容。
         return clean_img, clean_aud, paired_target_kind, paired_target_kind
 
     has_img, has_aud = cue_modalities(cue_mode)

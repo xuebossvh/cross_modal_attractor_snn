@@ -435,8 +435,9 @@ def _load_saved_tensor(path, field):
 class TruePairedManifestDataset(Dataset):
     """Strict real-instance audiovisual pairs described by one CSV manifest.
 
-    v11d paired unrelated MNIST and FSDD instances by class.  v11e instead
-    requires both modalities to declare the same physical ``source_id``.  A
+    Legacy fixed pairing joined unrelated MNIST and FSDD instances by class.
+    A real-pair manifest instead requires both modalities to declare the same
+    physical ``source_id``.  A
     row is one unique source event; repeating it for optimizer-step matching
     never creates a new pair id.
     """
@@ -736,14 +737,14 @@ def build_loaders(cfg, eval_split=None, train_required=True):
     else:
         raise ValueError(f"unknown data.dataset: {dataset_kind}")
 
-    # 旧配置的类别原型仅由 train 集构建。v11e 评估不使用 category target，
-    # 因而 train_required=False 时不加载训练 split，只保留形状占位。
+    # Category prototypes are always built from the train split. Real-pair
+    # evaluation can skip the train split and retain shape-only placeholders.
     if train_set is not None:
         train_set.build_prototypes()
         test_set.prototype_img = train_set.prototype_img
         test_set.prototype_aud = train_set.prototype_aud
     else:
-        # Real-pair v11e never selects category prototypes. Keep shape-compatible
+        # Real-pair evaluation never selects category prototypes. Keep shape-compatible
         # zero placeholders so legacy visualization plumbing stays harmless.
         test_set.prototype_img = torch.zeros(
             test_set.num_classes, 1, 28, 28)

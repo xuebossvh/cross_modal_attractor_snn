@@ -648,7 +648,7 @@ def main():
     model.eval()
 
     _, test_loader = build_loaders(cfg, train_required=False)
-    # v11e 的目标来自同一真实 pair；原型仅保留给旧配置兼容使用。
+    # 类别协议使用 train medoid；真实配对协议只保留形状兼容的占位原型。
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
