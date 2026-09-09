@@ -34,6 +34,36 @@ class ClassifierHead(nn.Module):
         return self.net(state)
 
 
+class MaskedCrossKeyAdapter(nn.Module):
+    """Key-conditioned feature correction, restricted to the target mask."""
+
+    def __init__(self, channels, key_dim, hidden=32, key_channels=16):
+        super().__init__()
+        self.context = nn.Sequential(
+            nn.Conv2d(channels + 3, hidden, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(hidden, key_channels, 3, padding=1), nn.ReLU())
+        self.key = nn.Linear(key_dim, key_channels, bias=False)
+        self.gate = nn.Conv2d(channels + 3, channels, 3, padding=1)
+        self.out = nn.Conv2d(key_channels, channels, 3, padding=1, bias=False)
+        nn.init.zeros_(self.out.weight)
+
+    def forward(self, features, key, cue, mask, source_missing_ratio):
+        source_quality = (1.0 - source_missing_ratio).view(-1, 1, 1, 1)
+        source_quality = source_quality.expand(-1, 1, *features.shape[-2:])
+        context = torch.cat([features.detach(), cue, mask, source_quality], 1)
+        gate = torch.sigmoid(self.gate(context))
+        condition = self.key(key.detach()).unsqueeze(-1).unsqueeze(-1)
+        # No cue-only residual: a zero Key produces exactly zero correction.
+        delta = mask * gate * self.out(self.context(context) * condition)
+        norm = delta.flatten(1).norm(dim=1)
+        base_norm = features.detach().flatten(1).norm(dim=1)
+        gate_mean = (gate * mask).flatten(1).sum(1) / (
+            mask.flatten(1).sum(1) * gate.size(1)).clamp_min(1)
+        return features + delta, {
+            "gate": gate_mean, "residual_norm": norm,
+            "value_norm": base_norm, "ratio": norm / base_norm.clamp_min(1e-6)}
+
+
 class ImageDecoder(nn.Module):
     """Image decoder input state -> image logits [B, 1, 28, 28]."""
 
@@ -52,9 +82,15 @@ class ImageDecoder(nn.Module):
         )
 
     def forward(self, value_state):
+        return self.decode_features(self.forward_features(value_state))
+
+    def forward_features(self, value_state):
         x = self.fc(value_state)
         x = x.view(-1, self.base_ch, 7, 7)
-        return self.cnn(x)
+        return self.cnn[:-1](x)
+
+    def decode_features(self, features):
+        return self.cnn[-1](features)
 
 
 class ImageRefiner(nn.Module):
@@ -143,12 +179,19 @@ class AudioDecoder(nn.Module):
         layers.append(nn.ReLU(inplace=True))
         layers.append(nn.Conv2d(cur_ch, 1, kernel_size=3, padding=1))
         self.cnn = nn.Sequential(*layers)
+        self.feature_channels = cur_ch
         nn.init.constant_(self.cnn[-1].bias, 0.5)
 
     def forward(self, value_state):
+        return self.decode_features(self.forward_features(value_state))
+
+    def forward_features(self, value_state):
         x = self.fc(value_state)
         x = x.view(-1, self.base_ch, self.start_hw, self.start_hw)
-        x = self.cnn(x)
+        return self.cnn[:-1](x)
+
+    def decode_features(self, features):
+        x = self.cnn[-1](features)
         x = x[..., :self.n_mels, :self.n_frames]
         return F.softplus(x.squeeze(1)).clamp(0.0, 1.0)
 

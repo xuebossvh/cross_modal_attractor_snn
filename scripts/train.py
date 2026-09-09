@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v11c.yaml
+    python -u scripts/train.py --config configs/v11f.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -23,6 +23,9 @@ from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
 from models.lif import rate
+from models.frozen_base import (ADAPTER_PREFIXES, load_frozen_parent,
+                                frozen_metadata, verify_frozen_resume,
+                                verify_audio_normalization)
 
 
 def _img_edge_loss(prob, target):
@@ -668,6 +671,7 @@ def _build_train_optimizer(model, cfg):
         cfg.get("cross_detail_conditioning", {}).get("lr_mult", 1.0))
     pair_mult = float(cfg.get("pair_alignment", {}).get("lr_mult", 1.0))
     cross_prefixes = (
+        "img_cross_adapter.", "aud_cross_adapter.",
         "aud_to_img_cross_proj.", "img_to_aud_cross_proj.",
         "aud_to_img_cross_gate.", "img_to_aud_cross_gate.",
     )
@@ -717,6 +721,8 @@ def _apply_trainable_prefixes(model, cfg):
     if not prefixes:
         return None
     prefixes = tuple(str(prefix) for prefix in prefixes)
+    if model.freeze_base and prefixes != ADAPTER_PREFIXES:
+        raise ValueError("Frozen-base training only permits the two feature adapters")
     trainable = []
     for name, param in model.named_parameters():
         param.requires_grad = name.startswith(prefixes)
@@ -730,6 +736,7 @@ def _apply_trainable_prefixes(model, cfg):
 
 def _checkpoint_payload(model, opt, scheduler, cfg, epoch):
     return {
+        "frozen_base": frozen_metadata(model),
         "model": model.state_dict(),
         "opt": opt.state_dict(),
         "sched": scheduler.state_dict() if scheduler is not None else None,
@@ -920,8 +927,6 @@ def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
         return out_correct["logits"].new_tensor(0.0), {}
 
     wrong_perm, wrong_valid = _wrong_class_indices(labels)
-    if not wrong_valid.any():
-        return out_correct["logits"].new_tensor(0.0), {}
 
     def run_reference(**cross_kwargs):
         return model(
@@ -966,19 +971,27 @@ def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
             correct, target, mask)
         zero_err, _ = _masked_mse_per_sample(zero, target, mask)
         wrong_err, _ = _masked_mse_per_sample(wrong, target, mask)
-        valid = wrong_valid & region_valid
+        valid = region_valid
         if not valid.any():
             return
         correct_sel = correct_err[valid]
         zero_sel = zero_err[valid].detach()
         wrong_sel = wrong_err[valid].detach()
-        scale = zero_sel.clamp_min(1e-6)
+        if causal.get("normalization") == "batch_floor":
+            floor_key = "aud_scale_floor" if name == "img2aud" else "img_scale_floor"
+            floor = float(causal.get(floor_key, 0.005))
+            if floor <= 0:
+                raise ValueError("Causal normalization floor must be positive")
+            scale = zero_sel.mean().clamp_min(floor)
+        else:
+            scale = zero_sel.clamp_min(1e-6)
         correct_rel = correct_sel / scale
         wrong_rel = wrong_sel / scale
-        pair_loss = (
-            F.relu(correct_rel - 1.0 + margin_ratio)
-            + F.relu(correct_rel - wrong_rel + margin_ratio)
-        ).mean()
+        pair_loss = F.relu((correct_sel - zero_sel) / scale + margin_ratio).mean()
+        valid_wrong = wrong_valid[valid]
+        if valid_wrong.any():
+            pair_loss = pair_loss + F.relu(
+                correct_rel[valid_wrong] - wrong_rel[valid_wrong] + margin_ratio).mean()
         direction_losses.append(pair_loss)
         logs[f"cross_{name}"] = pair_loss.item()
         logs[f"{name}_correct"] = correct_sel.detach().mean().item()
@@ -987,6 +1000,9 @@ def _cross_key_causal_loss(model, out_correct, img_cue, aud_cue,
         logs[f"{name}_correct_rel"] = correct_rel.detach().mean().item()
         logs[f"{name}_wrong_rel"] = wrong_rel.mean().item()
         logs[f"{name}_n"] = float(valid.sum().item())
+        logs[f"{name}_wrong_n"] = float(valid_wrong.sum().item())
+        logs[f"{name}_gain"] = (zero_sel - correct_sel.detach()).mean().item()
+        logs[f"{name}_win_zero"] = (correct_sel.detach() < zero_sel - 1e-8).float().mean().item()
 
     if use_img2aud:
         add_direction(
@@ -1131,7 +1147,7 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     """返回 (总损失, 日志字典)。"""
     lc = cfg["loss"]
     ab = cfg.get("ablation", {})
-    use_binding = ab.get("use_binding_phase", True)
+    use_binding = ab.get("use_binding_phase", True) and not model.freeze_base
 
     severity = sample_train_severity(cfg, epoch)
     img_mode, aud_mode = resolve_train_corrupt_modes(cfg, epoch, step=step)
@@ -1175,10 +1191,11 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
                   training_mode=True, phase="readout",
                   img_cue_mask=img_mask, aud_cue_mask=aud_mask)
 
-    loss_align, align_logs = _alignment_losses(
-        model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
-    total = total + loss_align
-    logs.update(align_logs)
+    if not model.freeze_base:
+        loss_align, align_logs = _alignment_losses(
+            model, out_r, clean_img, clean_aud, labels, cue_mode, cfg)
+        total = total + loss_align
+        logs.update(align_logs)
 
     loss_detail, detail_logs = _audio_detail_consistency_loss(
         model, out_r, clean_aud, cue_mode, cfg)
@@ -1399,7 +1416,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11c.yaml")
+    ap.add_argument("--config", default="configs/v11f.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -1407,6 +1424,18 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    frozen = bool(cfg["train"].get("freeze_base", False))
+    if cfg["train"].get("evaluation_only", False):
+        ap.error("This is a frozen reference; use evaluate.py, not train.py")
+    if cfg["train"].get("require_cuda", False) and (
+            not torch.cuda.is_available() or not str(cfg["device"]).startswith("cuda")):
+        raise RuntimeError("v11f requires CUDA for training; CPU fallback is disabled")
+    if frozen:
+        required = cfg["train"]["ckpt_path" if args.resume else "init_ckpt_path"]
+        if not required or not resolve_from_root(required).is_file():
+            raise FileNotFoundError(f"Required {'resume' if args.resume else 'parent'} checkpoint: {required}")
+        if cfg.get("decoder_pretrain", {}).get("enabled", False):
+            raise ValueError("Frozen-base experiment cannot pretrain base decoders")
     cfg["_config_path"] = args.config
     ensure_output_dirs(cfg)
     set_seed(cfg["seed"])
@@ -1447,7 +1476,8 @@ def main():
         f"pair_alignment={cfg.get('pair_alignment', {}).get('enabled', False)} "
         f"pairing={pairing.get('mode', 'legacy_random')}  "
         f"curriculum={cc.get('curriculum_mode', 'fixed')}  "
-        f"binding={cfg['ablation']['use_binding_phase']}")
+        f"binding={cfg['ablation']['use_binding_phase'] and not frozen} "
+        f"freeze_base={frozen}")
 
     model = CrossModalSNN(cfg).to(device)
     init_state = None
@@ -1457,6 +1487,8 @@ def main():
         init_ckpt = str(resolve_from_root(init_ckpt))
         if os.path.isfile(init_ckpt):
             state = torch.load(init_ckpt, map_location=device)
+            if frozen:
+                load_frozen_parent(model, state, init_ckpt)
             state_dict = state.get("model", state)
             strict = cfg["train"].get("init_strict", True)
             incompatible = model.load_state_dict(state_dict, strict=strict)
@@ -1558,6 +1590,8 @@ def main():
     if args.resume and os.path.isfile(ckpt):
         state = torch.load(ckpt, map_location=device)
         model.load_state_dict(state["model"])
+        if frozen:
+            verify_frozen_resume(model, state)
         if "opt" in state:
             opt.load_state_dict(state["opt"])
         if scheduler is not None and state.get("sched") is not None:
@@ -1574,6 +1608,7 @@ def main():
     elif args.resume:
         log(f"[警告] --resume 指定但 checkpoint 不存在: {ckpt}，从头训练。")
 
+    verify_audio_normalization(model, cfg)
     log_every = cfg["train"]["log_every"]
     grad_clip = float(cfg["train"].get("grad_clip", 0.0))
     milestone_epochs = {
@@ -1603,11 +1638,16 @@ def main():
                 raise FloatingPointError(
                     f"[train] non-finite loss at epoch={epoch} "
                     f"step={step} cue={cue_mode}: {logs}")
-            loss.backward()
-            if grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), grad_clip, error_if_nonfinite=True)
-            opt.step()
+            if loss.requires_grad:
+                loss.backward()
+                if grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        (p for p in model.parameters() if p.requires_grad),
+                        grad_clip, error_if_nonfinite=True)
+                opt.step()
+            elif not frozen:
+                raise RuntimeError("Training loss has no gradient path")
+            logs["adapter_step"] = float(loss.requires_grad)
 
             epoch_loss += loss.item()
 

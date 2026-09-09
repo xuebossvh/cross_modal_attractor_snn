@@ -40,7 +40,7 @@
 ## 已知上下文
 
 - 项目主题：基于 MNIST + FSDD 的跨模态 attractor SNN 联想记忆。
-- 当前配置族：`configs/v11e.yaml` 与 `configs/v11e_control.yaml`。
+- 当前配置族：`configs/v11f.yaml` 及同版本 control/no_causal；v11e 配置留在旧分支。
 - 当前代码结构：根目录下的 `data/`、`models/`、`scripts/`、`configs/`、`outputs/`。
 - 历史输出显示项目已经迭代到 v9/v9c；创建本文档时尚未检测到 `outputs/outputs_v10a/`。
 
@@ -57,3 +57,13 @@
   构建原型。
 - 不再对 MNIST/FSDD 使用 exact-pair InfoNCE、pair Recall@1 或要求
   same-class correct pair 优于 same-class wrong pair 的因果目标。
+
+## 2026-09-09 v11f 修改授权
+
+- 用户最终指定分支名 `v11f`，实现并推送代码仓库，不创建 `v11`。
+- 保留 MNIST/FSDD 类别绑定、Value + own cue detail 解码、simultaneous、
+  `detach_value_for_recon=true` 和 `batch_size=128`。
+- Cross-Key 必须以改善部分残缺及全缺失恢复为目标；不能把忽略该通路当作成功。
+- 使用缺失区域特征调制、冻结父模型、稳定正向因果目标、恢复内容类别评估四项修改。
+- 冻结父模型控制分类代价；normal/zero/wrong/same-class 的对照共享 cue 和 mask。
+- 统计收益需要真实实验验证，代码结构和非零 gate 本身不等于获得收益。

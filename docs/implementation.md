@@ -1,12 +1,41 @@
 # 实现指南：Cross-Modal Attractor SNN
 > 生成时间：2026-07-06 18:43 | 生成策略：基于当前代码反向整理 | 状态：ACTIVE_F_STAGE
-> 关联版本：历史 v10a … v11e；当前实现分支为 `v11e`
+> 关联版本：历史 v10a … v11e；当前实现分支为 `v11f`
 > 关联设计：`docs/idea_report.md`（F 阶段实验设计记录，每次版本迭代须同步更新）
 > 扩展说明：本项目已按 ResearchPilot F 阶段管理，后续所有代码修改都走 D-F 迭代。
 
 ---
 
 ## 0 F 阶段迭代约定
+
+### 当前版本 v11f：冻结基线的 Masked Feature Cross-Key
+
+本节优先于下文历史方案。先设计、后编码；完整协议见
+`docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md`。
+
+1. 父模型是已训练的 `cross_modal_snn_v11e_control.pt`。保留 Encoder、Key、
+   Index、Value、Classifier、own-detail fusion、原 Decoder/Refiner 的权重和 eval
+   状态，仅训练 `img_cross_adapter.*` / `aud_cross_adapter.*`。旧全局 Cross-Key
+   参数保留以加载父 checkpoint，但不参与前向调制。
+2. `Value + gated own detail -> Decoder features F` 不变；在末层卷积前加入
+   `F' = F + M * gate(F, cue, M, source_quality) * delta(F, K_other)`。
+   使用目标 mask 的空间/时频结构，Key 只调制同一个 decoder 内的特征，不建立
+   独立输出 residual decoder。输出端再次按 mask 选择，保证未损坏位置与冻结基线一致。
+3. 新 adapter 末层零初始化；对侧缺失、目标无损或显式 zero intervention 均保持
+   父模型输出。父模型在所有训练步骤保持 eval，防止冻结参数但更新 running buffers。
+4. 正确 Key 的绝对重建 loss + 相对 zero/wrong 的正向 margin loss；reference
+   no_grad，按有效 batch 的基线误差及可配置 floor 归一化，不用单样本近零误差作分母。
+   same-class 不作负样本。门控不保证改善；必须验证正确 Key 在部分残缺上的真实收益。
+5. 分类保留 Index ACC；额外使用冻结编码器/Index/Classifier 对恢复内容进行单模态
+   再分类，标注为内部一致性代理，不冒充独立识别器。按 family 导出 paired CSV，
+   包含 normal/zero/wrong/same-class、有效样本数、绝对误差与改善比例。
+6. main/no_causal 从同一父模型各训练 30 轮；control 仅评估冻结父模型（0 额外优化），
+   不伪称等预算重训。配置仅包含 v11f 族；suite 可选运行 no_causal，并包含 fixed、
+   random、family breakdown、Cross-Key sweep 和两种可视化。
+
+父 checkpoint 必须存在且 SHA256 符合配置；只能缺少新 adapter 参数。resume
+必须有 v11f checkpoint 并保持父模型摘要一致；不允许静默随机初始化或 CPU 训练回退。
+保存基础 state 摘要并在每次 checkpoint 前检查，确认冻结权重及 buffers 未改变。
 
 本仓库不是空白项目，而是已有多轮实验输出的研究原型。后续每次修改代码时，必须遵守下面的顺序：
 
@@ -257,7 +286,7 @@ control 的 `lambda_pair=0`。正式报告时应同时比较 best 与 final chec
 ```text
 cross_modal_attractor_snn/
 ├── configs/
-│   └── v11e.yaml / v11e_control.yaml
+│   └── v11f.yaml / v11f_control.yaml / v11f_no_causal.yaml
 ├── data/
 │   ├── audio_features.py
 │   ├── corruption.py
@@ -268,6 +297,7 @@ cross_modal_attractor_snn/
 │   ├── dev_log.md
 │   ├── user_requirements.md
 │   ├── idea_report.md
+│   ├── V11F_MASKED_CROSS_KEY_PROTOCOL.md
 │   └── V11E_CATEGORY_BINDING_PROTOCOL.md
 ├── models/
 │   ├── decoders.py
@@ -275,6 +305,7 @@ cross_modal_attractor_snn/
 │   ├── lif.py
 │   ├── memory.py
 │   ├── network.py
+│   ├── frozen_base.py
 │   └── __init__.py
 ├── scripts/
 │   ├── bootstrap.py
@@ -283,7 +314,8 @@ cross_modal_attractor_snn/
 │   ├── mkdir_outputs.py
 │   ├── plot_eval_summary.py
 │   ├── smoke_test.py
-│   ├── smoke_test_v11e.py
+│   ├── smoke_test_v11f.py
+│   ├── run_v11f_suite.py
 │   └── train.py
 ├── _data/
 │   ├── MNIST/...
@@ -863,7 +895,7 @@ mask 约定：
 |------|------|
 | `fix_console_encoding()` | Windows 终端 UTF-8 输出 |
 | `log(msg)` | flush print |
-| `load_config(path="configs/v11c.yaml")` | 读取 YAML；v11e+ 支持相对路径 `extends` 并做递归 deep merge |
+| `load_config(path="configs/v11f.yaml")` | 读取 YAML；支持相对路径 `extends` 并做递归 deep merge |
 | `set_seed(seed)` | 设置 random、numpy、torch seed |
 | `unpack_paired_batch(batch)` | 兼容三元组 `(img,aud,label)` 与四元组 `(img,aud,label,pair_id)` |
 | `sample_cue_mode(cfg)` | 按概率采样 cue mode |

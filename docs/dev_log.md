@@ -1920,3 +1920,106 @@ python -u scripts/demo_inference.py --config configs/v11e.yaml \
 python -u scripts/demo_inference.py --config configs/v11e.yaml \
   --num 10 --severity 0.4 --protocol legacy_random
 ```
+
+## 2026-09-09 v11f：冻结父模型的缺失区域 Cross-Key
+
+### 需求与回溯
+
+用户同意四项修改并最终指定 `v11f` 分支。不是 `v11`，也不覆盖 v11e。
+按 F 阶段先更新需求、implementation 与实验设计，再实现和测试。
+诊断是 v11e 的部分残缺收益有限且联合训练存在分类代价；本轮通过冻结基线和
+局部调制检验改进假设，不预先认定之前差异的因果来源已经完全确定。
+
+### 逐文件修改
+
+- `configs/v11f.yaml`：从自包含 v11e 配置迁移；batch=128、simultaneous、
+  类别绑定、Value + own detail、detach_value_for_recon 保留。父模型为
+  v11e_control，固定 severity=0.4，额外训练 30 轮，仅 adapter 可训练。
+- `configs/v11f_control.yaml` / `v11f_no_causal.yaml`：固定父模型评估参考与同父、
+  同 seed/额外预算的去因果项实验。删除新分支旧 v11e YAML，不影响旧分支。
+- `models/decoders.py`：原 decoder 拆分 feature/head 接口（不改旧 state key）；
+  新 MaskedCrossKeyAdapter 使用上下文、Key 乘性条件、逐位置/通道 gate，输出层零初始化。
+- `models/network.py`：v11f 禁用旧全局 Value residual，保留参数只为父权重兼容；
+  在缺失区作特征调制，head/refiner 后按 mask 再选择，保护可见基线输出。
+  冻结参数与模块运行状态；新增恢复内容单模态再分类，不走 decoder 递归。
+- `models/frozen_base.py`：校验父文件 SHA256、关键前向配置、音频归一化统计；
+  只允许缺少新 adapter 参数；每次保存检查全部基础 state（含 buffers）摘要，
+  resume 校验 provenance 和前向配置。
+- `scripts/train.py`：跳过冻结基础网络无效的 binding/teacher 计算；只优化 adapter；
+  保留绝对重建项，因果项改用 batch floor，zero/wrong reference 不反传。
+  单类别 batch 仍用 zero 监督；clean-only 无梯度时不做 optimizer step。
+  父权重/续训权重缺失直接报错，正式训练禁止静默 CPU 回退。
+- `scripts/evaluate.py`：增加 normal/zero/wrong/same-class 绝对 masked MSE、
+  win_zero/win_wrong/win_both 与有效样本数；新增恢复内容类别一致性代理。
+  按 family 写长表 CSV；v11f random 明确随机抽取 family，独立 seed 可复现。
+- `scripts/demo_inference.py`：保留 fixed/random 六图，严格加载 checkpoint；
+  禁止缺失或不兼容时以随机权重继续绘图。原 pred 注释仍是 Index 分类，未冒充
+  恢复内容分类。
+- `scripts/run_v11f_suite.py`：顺序执行 train/eval/demo，逐阶段日志；支持可选
+  no_causal、eval_only、resume、dry_run。control 不训练；错误停止后续阶段。
+- `scripts/smoke_test_v11f.py` / `scripts/smoke_test.py`：替换旧版本冒烟入口，
+  覆盖模型、损失、严格加载、续训、评估 CSV 与两套 demo。
+- `common.py`、`paths.py`、`scripts/mkdir_outputs.py`：默认配置改为 v11f。
+- `README.md`、`docs/implementation.md`、`docs/idea_report.md`、
+  `docs/user_requirements.md`、`docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md`：同步版本、
+  架构、维度、四点目的、对照定义、运行与验收方式。
+
+### 验证结果与限制
+
+本地 Python 3.10 / torch 1.13.1+cpu：
+
+1. compileall 通过；`git diff --check` 通过（仅 Windows 换行提示）。
+2. 离线 smoke：8 种 cue 的前后向与 finite 梯度通过；新两个 adapter 的输出层、
+   Key 投影及 gate 可获得梯度；基础参数没有梯度，优化前后摘要不变。
+3. 新模块初始输出和干预 zero 输出与同一父模型严格一致；训练后保持可见位置不变，
+   Index state/logits 不因 normal/wrong/zero 干预改变；零 Key 不产生特征残差。
+4. 使用真实 `cross_modal_snn_v11e_control.pt`（epoch=99）执行同样的模型回归通过。
+   父文件 SHA256 为 `5a792f10e57a95947c8e51bd915b09897baee01475103010826f25275b71501b`；
+   基础 state 摘要为 `92b2f7d6d2127376d59ba093ab86c787a34d6efb038b7e0054ebdbe5489fc02a`。
+   实际 control 配置严格加载通过，可训练参数数为 0。
+5. CLI 合成数据 train 1 轮 + resume 至第 2 轮通过；两个评估协议的 CSV 字段和
+   有效样本数通过；生成六张 demo 并检查尺寸、像素非空；缺失 checkpoint 被拒绝。
+6. no_causal 套件 dry-run 顺序及独立日志检查通过；父权重未被改写，测试产物在临时目录。
+
+这些是实现正确性/回归检查，不能当作 v11f 已收敛或 Cross-Key 已改善的实验结论。
+本机无 CUDA，未执行 RTX 3080、batch=128 的完整 GPU 训练或显存稳定性验证。
+恢复内容分类使用冻结原模型，只是内部一致性，不是外部独立识别准确率。
+正式验收必须看部分残缺各 family 的 normal 相对固定 zero/control 是否改善，
+同时检查 wrong/same-class；不能只看 gate、总 loss 或 wrong 变差。
+
+## 运行说明
+
+以下为当前 v11f 命令；以上旧版本命令仅保留为历史记录。
+在 v11f 项目根目录、可用 GPU 环境运行，先准备
+`outputs/checkpoints/cross_modal_snn_v11e_control.pt` 以及同一数据/归一化统计。
+无需重新训练父模型，不得用 v11e main 替代 control。
+
+```bash
+# main -> eval/demo -> frozen control eval/demo -> optional no_causal train/eval/demo
+nohup python -u scripts/run_v11f_suite.py --with_ablations > v11f_suite.log 2>&1 < /dev/null &
+
+tail -f v11f_suite.log
+
+# All selected checkpoints must exist for eval_only/resume.
+python -u scripts/run_v11f_suite.py --eval_only --with_ablations
+python -u scripts/run_v11f_suite.py --resume
+
+# Independent entries
+python -u scripts/train.py --config configs/v11f.yaml
+python -u scripts/train.py --config configs/v11f_no_causal.yaml
+python -u scripts/evaluate.py --config configs/v11f_control.yaml --protocol fixed_mask --severity 0.4
+python -u scripts/evaluate.py --config configs/v11f.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep
+python -u scripts/evaluate.py --config configs/v11f.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
+python -u scripts/demo_inference.py --config configs/v11f.yaml --protocol fixed_mask --severity 0.4
+python -u scripts/demo_inference.py --config configs/v11f.yaml --protocol legacy_random --severity 0.4
+
+# Offline regression only
+python -u scripts/smoke_test_v11f.py --cli
+python -u scripts/smoke_test_v11f.py --parent outputs/checkpoints/cross_modal_snn_v11e_control.pt
+```
+
+去掉 `--with_ablations` 只跑 main + 固定 control。新权重写入
+`outputs/checkpoints/cross_modal_snn_v11f.pt` 和 `cross_modal_snn_v11f_no_causal.pt`；
+其他产物进入 `outputs/outputs_v11f{,_control,_no_causal}/`。
+fixed/random 的每个评估过程都会写各自 CSV，不互相覆盖；随机可视化带 `_random` 后缀。
+套件结束标志是 `[suite] ALL STAGES COMPLETED`，`tail -f` 无新输出不代表仍在训练。

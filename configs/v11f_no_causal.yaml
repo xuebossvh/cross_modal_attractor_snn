@@ -1,0 +1,10 @@
+# Same parent, seed, architecture and extra epochs; remove only causal loss.
+extends: v11f.yaml
+cross_key_conditioning:
+  causal_training:
+    enabled: false
+    loss_weight: 0.0
+train:
+  output_version: v11f_no_causal
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v11f_no_causal.pt
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v11f_no_causal.pt

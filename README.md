@@ -1,242 +1,147 @@
-# 跨模态循环吸引子 SNN 记忆网络
+# 跨模态循环吸引子 SNN：v11f
 
-可运行的 PyTorch 原型，实现**跨模态脉冲联想记忆**网络。图像与音频模态通过
-共享的**循环吸引子 Index 层**绑定。统一任务接口：
+当前分支为 **v11f**。在已训练的 v11e_control 上冻结基础网络，只训练
+**缺失区域 Cross-Key 特征调制**。研究目标是让正确的对侧 Key 改善部分残缺和
+全缺失恢复，同时避免基础分类能力因恢复训练而漂移。
 
-> 给定**残缺 / 干净**的 cue（图像、音频或双模态），统一输出
-> **分类 label + 完整图像 + 完整音频特征**。
+详细设计：[v11f 协议](docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md)；
+实现与验证记录：[implementation](docs/implementation.md)、
+[dev_log](docs/dev_log.md)。历史版本配置请切换对应分支查看。
 
-即任意一种（可能残缺的）模态线索都能从吸引子记忆中**补全 / 联想**出
-另一模态与类别。LIF 神经元与 surrogate gradient 均为手写实现，无需外部 SNN 库。
+## 1. 四项修改
 
-> **v11e 类别级绑定策略（重要）**：使用 MNIST 图像与 FSDD `64x64` log-mel。
-> 训练时只在相同 digit 内随机组成 many-to-many 组合，不建立人工固定实例对。
-> 单模态输入的缺失侧恢复训练集 class medoid；只有输入中存在的模态才使用
-> 当前 clean sample 作为恢复目标。
+1. **局部条件化**：不再全局修改 Value。Value + gated own cue detail 经原
+   decoder 得到特征，在末层卷积前用对侧 Key 调制缺失区域的空间/时频特征。
+   仍是同一个 decoder，不增加独立的图像/音频输出 residual 分支。
+2. **冻结基础模型**：Encoder、Key、Index、Value、Classifier、原 Decoder/Refiner
+   和 own-detail fusion 的参数与运行状态均固定，只训练两个新 adapter。
+   重建不能通过 Value 影响 Index，`detach_value_for_recon=true` 保持不变。
+3. **正向因果目标**：正确 Key 的绝对恢复 loss，加上相对 zero/wrong-class 的
+   margin loss；参考输出不反传，归一化有 batch floor，避免除以单样本近零误差。
+   同类别其它实例不是负样本，不能通过降低 zero 基线质量制造收益。
+4. **分开评价**：Index ACC、恢复内容类别一致性、masked MSE、normal/zero/wrong/
+   same-class 对照及改善比例。门控非零不等于成功，必须看 normal 是否优于冻结 zero。
 
-### 目标策略（target selection by cue mode）
+```text
+MNIST -> Image Encoder -> Image Key --+
+                                     +-> recurrent Index -> Value states
+FSDD  -> Audio Encoder -> Audio Key --+        |
+                                              +-> Classifier (frozen)
 
-| cue 模式 | recovered image | recovered audio | classification |
-|----------|-----------------|-----------------|----------------|
-| **audio-only** | 训练集 image class medoid (`category`) | 当前 clean log-mel (`sample`) | digit label |
-| **image-only** | 当前 clean MNIST (`sample`) | 训练集 audio class medoid (`category`) | digit label |
-| **image+audio** | 当前 clean MNIST (`sample`) | 当前 clean log-mel (`sample`) | digit label |
+Value_img + gated own image detail -> Image Decoder features F_img
+  F_img + masked Cross-Key modulation(K_aud) -> same decoder head -> image
 
-- v11e 不返回 `pair_id`，不训练 exact-pair InfoNCE，也不报告 pair Recall@1。
-- Cross-Key 传递对侧类别语义；Cross-Detail 在当前 v11e 中关闭，避免把无真实对应
-  的笔迹细节与说话人/音色细节当成监督关系。
-- decoder 继续使用 `V_from_A + same-modal gated cue detail`，并保持
-  `detach_value_for_recon=true` 以保护 Index。
+Value_aud + gated own audio detail -> Audio Decoder features F_aud
+  F_aud + masked Cross-Key modulation(K_img) -> same decoder head -> log-mel
+```
 
-旧版类别代表原型仍为 **class medoid**（真实样本，非均值图）：
-`prototype[c] = argmin_i || x_i − mean(x_c) ||₂`，由 `data/dataset.py` 在
-**训练集**上构建，test/demo 复用同一份；选择逻辑集中在 `common.py :: select_targets`。
-binding 与 readout 两阶段共用同一套 target；不对完整 `index_state` 做强对齐
-（仅分类 loss 约束类别语义），以保留样本细节。
+adapter 使用目标 cue、缺失 mask、基础特征和对侧已知损坏比例作为上下文。
+对侧 Key 投影后乘性调制局部特征；输出层零初始化。对侧不存在则该方向没有
+Cross-Key；目标完全干净则不修改恢复。部分残缺时通路参与训练，是否真的帮助
+由 paired 指标判断，不能把“允许模型忽略它”当作实验结论。
 
----
+输出端再次按 mask 选择，保证可见位置和关闭通路时的输出与冻结基线一致。
+这里的保护是保持**基线输出**，不意味着音频可见区一定等于原始 cue。
 
-## 1. 安装依赖
+## 2. 数据与维度
+
+MNIST 和 FSDD 仍采用同数字类别内的 many-to-many 随机组合。没有人工固定
+实例对，不启用 GRID、Cross-Detail 或 exact-pair alignment。
+
+| cue | 图像 target | 音频 target |
+|---|---|---|
+| audio-only | 训练集类别 medoid | 当前 clean sample |
+| image-only | 当前 clean sample | 训练集类别 medoid |
+| image+audio | 当前 clean sample | 当前 clean sample |
+
+| 模块 | 图像 | 音频 |
+|---|---:|---:|
+| 输入 | 1x28x28 | 64x64 log-mel |
+| cue encoder rate / Key rate | 128 / 128 | 128 / 128 |
+| Value state | 384 | 768 |
+| own detail 投影 | 128 | 256 |
+| decoder 输入 | 512 | 1024 |
+| adapter 所在特征图 | 32x28x28 | 16x64x64 |
+
+Index=512、T=20、simultaneous、batch_size=128 保持不变。
+五种图像 family：occlusion、pixel_delete、mask_vertical、mask_horizontal、salt_mask。
+五种音频 family：time_mask、freq_mask、feature_dropout、partial_temporal、time_freq_block。
+训练均衡轮转 family，severity 固定 0.4，不重复父模型低强度暖启动。
+
+## 3. 前置条件
+
+在**项目根目录**运行，使用已验证可 GPU 训练的环境。训练入口不再静默回退 CPU。
+本分支不要求更换已工作的 PyTorch/CUDA；依赖见 `requirements.txt`。
+
+- 数据：`_data/MNIST/`、`_data/fsdd/recordings/`、父模型使用的音频归一化统计。
+- 父权重：`outputs/checkpoints/cross_modal_snn_v11e_control.pt`。
+- 父权重 SHA256：
+  `5a792f10e57a95947c8e51bd915b09897baee01475103010826f25275b71501b`。
+- checkpoint 来自独立 checkpoint 仓库或已有 v11e 输出，不随代码仓库上传。
+- 父模型缺失、摘要或关键配置不匹配直接失败；不要删掉这些检查来从随机模型起跑。
+
+## 4. 一条命令顺序执行
 
 ```bash
-cd cross_modal_attractor_snn
-pip install -r requirements.txt
+nohup python -u scripts/run_v11f_suite.py --with_ablations > v11f_suite.log 2>&1 < /dev/null &
 ```
 
-已在 Python 3.10、`torch 1.13`（CPU 即可）下测试通过。`torchaudio` 为**必需**依赖（FSDD log-mel）；缺失或 FSDD 未下载会直接报错。
+执行顺序：main 训练及评估/可视化 -> 冻结 control 评估/可视化 ->
+no_causal 训练及评估/可视化。去掉 `--with_ablations` 不运行 no_causal。
+主实验和 no_causal 各额外训练 30 轮；control 是父模型的固定零通路参考，
+**0 轮额外优化，不是等预算重训的 control**。
 
-## 2. 项目结构
-
-```
-cross_modal_attractor_snn/
-├── configs/           # 超参 yaml
-├── data/              # 数据集、损坏、FSDD、log-mel
-├── models/            # SNN 编码器 / 记忆层 / decoder
-├── scripts/           # 可执行入口（train / evaluate / demo / smoke_test）
-├── common.py          # cue 采样、target 选择、指标
-├── paths.py           # 项目根目录与 outputs 路径
-├── outputs/           # 运行产物（不入 git，见 .gitignore）
-│   ├── checkpoints/   # 各版本 *.pt 权重（共用）
-│   └── outputs_v11e/  # 当前主实验产物（主实验/control 各有独立目录）
-│       ├── logs/
-│       ├── figures/
-│       └── tables/
-├── docs/              # 当前协议、实现说明、需求规范与开发日志
-├── _data/             # MNIST、FSDD 与音频归一化统计
-├── requirements.txt
-└── README.md
-```
-
-## 3. 训练
-
-当前实验配置族为 **v11e**。主实验和 control 均使用 MNIST+FSDD 类别级绑定，
-从头端到端训练 100 epoch，不继承 v11c/v11d 权重。主实验启用 Cross-Key，control
-只关闭 Cross-Key；两者的数据、target、seed、batch size 与训练预算一致。
+每个配置运行 fixed normal+family breakdown、fixed sweep、random normal、
+random sweep，以及 fixed/random 的三张 demo。日志同时输出终端并写入各自目录，
+失败停止后续步骤；最后会输出 `[suite] ALL STAGES COMPLETED`。
 
 ```bash
-pip install -r requirements.txt
-python -u scripts/smoke_test_v11e.py
-python scripts/mkdir_outputs.py --config configs/v11e_control.yaml
-python -u scripts/train.py --config configs/v11e_control.yaml
-python scripts/mkdir_outputs.py --config configs/v11e.yaml
-python -u scripts/train.py --config configs/v11e.yaml
+tail -f v11f_suite.log
+python -u scripts/run_v11f_suite.py --eval_only --with_ablations
+python -u scripts/run_v11f_suite.py --resume
+python scripts/run_v11f_suite.py --with_ablations --dry_run
 ```
 
-每个 batch 采样一种 cue 模式，并分两阶段计算损失：
+`--resume` 要求对应训练 checkpoint 已存在。若主实验已完成但 no_causal 尚未
+开始，不要给整个套件加 `--resume --with_ablations`；单独启动 no_causal。
 
-- **binding 阶段**（可关）：cue 驱动 Index A 收敛；干净 target 经 Encoder 写入
-  target Value（可延迟若干步）。`bind loss` 让 **A 驱动的 Value** 对齐
-  **target Value（stop-grad）**，从而学习 `A→V` 绑定。此阶段不走 decoder。
-- **readout 阶段**：关闭 target。v11e 先把对侧 cue 的 Key rate 投影为 Value 空间
-  residual，与 `v_*_from_A` 相加；再与对应 cue 的同模态 detail state 拼接后送入
-  Decoder。随后计算分类、图像/音频恢复、Cross-Key 因果损失和脉冲正则。
-  Cross-Detail 与 exact-pair alignment 不参与当前 v11e。
-
-每个配置使用独立 checkpoint/output_version。MNIST/FSDD 当前没有单独 validation
-split，因此训练期间不使用 test split 选择 best checkpoint；正式评估读取 final
-checkpoint。
-
-> 注意：分支初始化默认 strict。evaluate 遇到缺失或结构不匹配的
-> checkpoint 会直接报错，不会用随机权重生成伪评估结果。
-
-快速冒烟：运行 `python -u scripts/smoke_test_v11e.py`。MNIST 可自动下载，FSDD
-放在 `_data/fsdd/recordings/`，或保持 `audio.auto_download=true`。
-
-## 4. 评估与 Demo
+## 5. 单独运行
 
 ```bash
-python -u scripts/evaluate.py --config configs/v11e_control.yaml --protocol fixed_mask --severity 0.4 --family_breakdown 2>&1 | tee outputs/outputs_v11e_control/logs/eval_v11e_control_fixed_mask_sev04.log
-python -u scripts/evaluate.py --config configs/v11e.yaml --protocol fixed_mask --severity 0.4 --family_breakdown 2>&1 | tee outputs/outputs_v11e/logs/eval_v11e_fixed_mask_sev04.log
-python -u scripts/evaluate.py --config configs/v11e.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep 2>&1 | tee outputs/outputs_v11e/logs/eval_v11e_cross_key_sweep_sev04.log
-python -u scripts/demo_inference.py --config configs/v11e_control.yaml --num 10 --severity 0.4
-python -u scripts/demo_inference.py --config configs/v11e.yaml --num 10 --severity 0.4
+python -u scripts/train.py --config configs/v11f.yaml
+python -u scripts/train.py --config configs/v11f.yaml --resume
+python -u scripts/train.py --config configs/v11f_no_causal.yaml
+
+python -u scripts/evaluate.py --config configs/v11f_control.yaml --protocol fixed_mask --severity 0.4
+python -u scripts/evaluate.py --config configs/v11f.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep
+python -u scripts/evaluate.py --config configs/v11f.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
+python -u scripts/demo_inference.py --config configs/v11f.yaml --protocol fixed_mask --severity 0.4
+python -u scripts/demo_inference.py --config configs/v11f.yaml --protocol legacy_random --severity 0.4
 ```
 
-- `evaluate.py`：8 种 cue 模式下的 acc / 图像 MSE·PSNR·SSIM / **log-mel MSE** 等；
-  指标按样本数加权，完全缺失的模态按 100% missing mask 评估。Cross-Key sweep
-  比较 correct/zero/wrong-class/same-class Key。v11e 的 target 会按 cue mode 显示
-  `sample/category`、`category/sample` 或 `sample/sample`；不报告 exact-pair
-  Recall@1。快速试跑：`python -u scripts/evaluate.py --config configs/v11e.yaml --max_batches 1`。
-- `demo_inference.py` 输出三张图，标题明确区分恢复粒度，每格标注
-  cue type / target type / true label / pred label / confidence：
-  - `outputs/outputs_v11e/figures/demo_aud_only.png`：audio-only cue → category image + sample audio
-  - `outputs/outputs_v11e/figures/demo_img_only.png`：image-only cue → sample image + category audio
-  - `outputs/outputs_v11e/figures/demo_both.png`：双模态 cue → sample image + sample audio
-  - random 可视化会输出 `demo_aud_only_random.png` / `demo_img_only_random.png` / `demo_both_random.png`
-  - 评估表：`outputs/outputs_v11e/tables/demo_eval_table.txt`（明确记录 target kind）
-  - 全量 eval 表格图（按 family 子目录）：`tables/family01_occlusion_time_mask/full_eval.png` 等；
-    生成：`python scripts/plot_eval_summary.py outputs/outputs_v11e/logs/eval_v11e_fixed_mask_sev04.log`
+fixed_mask 对每种 family 用确定性 mask；random 在每 batch 随机抽取 family 和
+mask，使用独立 `eval.random_seed=4321` 以便重复比较。
+`evaluate.py --random_seed 5678` 可换一组抽样；random demo 是小样本展示，
+不等于全量 random 评估。十张示例不能替代全测试集统计。
 
----
+## 6. 输出与验收
 
-## 5. 模块与架构图对应关系
+产物在 `outputs/outputs_v11f{,_control,_no_causal}/`：
+`logs/`、`tables/`、`figures/`。随机 demo 带 `_random.png` 后缀。
 
-| 代码 | 架构图模块 |
-|------|-----------|
-| `models/encoders.py :: ImageSNNEncoder` | **Image SNN Encoder**（首脉冲 + trace → LIF） |
-| `models/encoders.py :: AudioSNNEncoder` | **Audio SNN Encoder**（重复电流 / Poisson → LIF） |
-| `models/memory.py :: KeyLayer`（×2：`K_img`, `K_aud`） | **Key 层**（记忆层内部，独立权重） |
-| `models/memory.py :: RecurrentIndexLayer` | **Index 层 A**（唯一循环吸引子核心） |
-| `models/memory.py :: ValueLayer`（×2：`V_img`, `V_aud`） | **Value 层**（A 路 + target 路分离） |
-| `models/memory.py :: CrossModalAttractorMemory` | 中央记忆模块整体 |
-| `models/decoders.py :: ClassifierHead / ImageDecoder / AudioDecoder` | 分类 MLP + 图像/音频 **CNN decoder** |
-| `models/network.py :: CrossModalSNN` | 完整网络 + cue/phase 路由 |
-| `models/lif.py` | LIF 神经元 + surrogate gradient |
-| `data/corruption.py` | 图像 / 音频 cue 损坏函数 |
+`tables/eval_<protocol>_sev0.4_key_<normal|sweep>_detail_normal.csv` 为长表，
+包含 family、cue、target 粒度、metric、value、有效样本数。
+sweep 重点检查 `*_normal_mse`、`*_zero_mse`、`*_wrong_mse`、
+`*_correct_gain`、`*_win_zero` 和 `*_win_both`。正 gain 才代表相对基线改善。
 
-**Key 投射到 Index**（独立电流求和，不拼接）：
+`content_img_*_acc` / `content_aud_*_acc` 是恢复内容经冻结原模型单模态再分类
+的准确率，**只是内部一致性代理，不是独立识别器**；它与 Index ACC 不同。
+原 demo 的 pred 注释仍来自 Index，不能据此声称恢复内容类别正确。
 
-```
-I_A = alpha_img * W_img_to_A(K_img) + alpha_aud * W_aud_to_A(K_aud)
-      + [use_recurrent] W_rec(prev_spikes) - [use_kwta] 竞争抑制
+```bash
+python -u scripts/smoke_test_v11f.py --cli
+python -u scripts/smoke_test_v11f.py --parent outputs/checkpoints/cross_modal_snn_v11e_control.pt
 ```
 
-**对侧 Key 条件化 Decoder**（不修改 Memory、Decoder 和 Refiner 内部结构）：
-
-```
-image Decoder: (V_img_from_A + gate(K_aud) * P_aud_to_img(K_aud))
-               concat same-modal image detail -> Image Decoder
-audio Decoder: (V_aud_from_A + gate(K_img) * P_img_to_aud(K_img))
-               concat same-modal audio detail -> Audio Decoder
-```
-
-`P_*` 零初始化，因此新模块初始行为与 control 一致。对侧 Key 默认 detach，重建梯度
-只训练投影器、门控和下游重建模块，不通过这条捷径改写 Key/Index。`--cross_key sweep`
-在同一批样本上配对比较 correct / zero / wrong-class Key，并检查共享 Index 不变。
-control 仍构造相同 projector/gate 以保持参数规模和后续模块初始化一致，但前向严格旁路。
-
-**v11d 对侧实例 Detail 条件化**（从 Key 前一层提取，使用逐维门控）：
-
-```
-image detail channel += VectorGate(V_img, P_a2i(D_aud)) * P_a2i(D_aud)
-audio detail channel += VectorGate(V_aud, P_i2a(D_img)) * P_i2a(D_img)
-```
-
-Cross-Detail residual 与原本同模态 detail 相加，因此不改变 v11c Decoder 的输入尺寸，
-可以安全继承父 checkpoint。`--cross_detail sweep` 使用同类别、不同 `pair_id` 的
-困难负样本，验证恢复结果是否真正依赖正确配对，而不是只依赖数字类别。
-
-### 关键设计：杜绝答案泄漏
-- decoder 的 **Value 主输入永远来自 `v_*_from_A`**（Index 驱动的 Value），
-  从不读「A + Encoder 混合」Value。v10a 可额外融合 cue detail，但该 detail
-  只来自当前 cue，缺失模态用 0；重建 loss 默认不通过 `V_from_A` 反向拖动 Index/Value。
-- target（干净输入）**只在训练 binding 阶段**经 `W_enc_to_V` 进入 *target Value*，
-  仅用于 `bind loss` 的 teacher，且与 `v_*_from_A` 在 `ValueLayer` 中走**两条独立路径**。
-- `network.forward` 中 `training_mode=False` 时**强制** `phase="readout"` 并丢弃 target。
-
-### k-WTA 竞争
-- 方案 A（默认 `wta_mode: kwta`）：每步保留膜电位 top-k 的 Index 神经元。
-- 方案 B（`wta_mode: inhibition_pool`）：全局抑制池均匀反馈抑制。
-
----
-
-## 6. 数据集
-
-- **图像**：MNIST（离线回退合成斑点图），值域 [0,1]。
-- **音频（默认）**：**FSDD** 真实 wav → **log-mel spectrogram**
-  （`torchaudio`，默认 **64 mel × 64 帧** = `aud_in: 4096`），decoder target 使用训练集全局 p1-p99 归一化，encoder cue 使用 hybrid norm。
-  - **Audio Encoder 输入**、**Audio Decoder 输出**、**audio recovery loss** 均为 log-mel `[n_mels, n_frames]`。
-  - v11d 固定增广一一配对：MNIST 数字 y 只配 FSDD spoken digit y；每张图像使用
-    唯一 `pair_id` 和增广种子生成稳定音频实例，虚拟音频样本数与图像样本数相同。
-  - 每个清单记录基础 FSDD 文件、基础池索引和增广种子，可完整复现。
-  - 数据目录：`_data/fsdd/recordings`；`auto_download: true` 时自动 zip 下载。
-- **冒烟**：`audio.use_real_audio: false` 仅用随机伪音频（`scripts/smoke_test.py` 不拉数据）。
-
-## 7. cue 模式与损坏
-
-8 种 cue 模式（`common.py :: CUE_MODES`）：原 6 种模式加
-`clean_img_corrupt_aud` / `corrupt_img_clean_aud`，采样概率见
-`configs/v11e.yaml :: cue_modes`。
-
-损坏函数（`data/corruption.py`，`severity∈[0,1]`）：
-- v11d 图像训练/主评估 family：`occlusion` / `pixel_delete` /
-  `mask_vertical` / `mask_horizontal` / `salt_mask`。
-- v11d 音频训练/主评估 family：`time_mask` / `freq_mask` /
-  `feature_dropout` / `partial_temporal` / `time_freq_block`。
-- `gaussian` 与方向化 `mask_left|right|top|bottom` 仍可由损坏函数单独调用，
-  但不进入 v11c 的五 family 主结论。
-
-## 8. 消融开关（`configs/v11e.yaml :: ablation`）
-
-| 开关 | 作用 |
-|------|------|
-| `use_recurrent` | Index 是否启用 E↔E 循环 `W_rec` |
-| `use_kwta` | Index 是否启用 k-WTA 竞争 |
-| `use_binding_phase` | 是否启用 binding 阶段（`bind loss`） |
-| `use_delayed_value_target` | binding 阶段 target Value 是否延迟 |
-| `use_modality_dropout` | 是否启用单模态 cue（关闭则只用双模态） |
-
-改对应字段为 `false` 即可一键消融，无需改代码。
-
-## 9. 当前简化假设
-
-1. `audio.use_real_audio: false` 时仅为冒烟随机伪音频（正常训练必须 FSDD）。
-2. `A→V` 绑定用 surrogate-gradient 反向传播 + `bind loss`，**非** STDP/Hebbian。
-3. Value/Index 状态读取为时间窗内**平均发放率**；decoder 为 rate-based MLP。
-4. 默认重复电流编码（`encoding: current`），可切 `poisson`。
-5. k-WTA 方案 A 为硬 top-k（前向硬选择，梯度经 surrogate 近似）。
-
-## 10. 最小验收目标
-
-在 MNIST + FSDD 音频上验证：残缺/干净 cue → 图像恢复、音频恢复、分类，
-依次运行 `scripts/train.py` → `scripts/evaluate.py` → `scripts/demo_inference.py`。
+上述为离线 CPU 回归，不下载数据，也不改现有训练 checkpoint。
+完整 3080 GPU 收敛、各 family 的真实收益仍需正式训练与评估验证。

@@ -5,6 +5,28 @@
 
 ---
 
+## F 阶段补充：v11f（当前设计）
+
+本轮从已完成评估的 v11e_control 冻结基线出发，检验 Cross-Key 对部分残缺的
+正向贡献，不把忽略 Cross-Key 或仅使 wrong-class 输出更差当作成功。
+
+**Method**：保留 Value + gated own detail、双 Key simultaneous、类别 medoid
+目标和重建对 Value 的 stop-gradient；用空间/时频 mask 限定 decoder 末层前的
+Key 条件特征调制。基础编码器、吸引子和整个原恢复模块固定，只训练两个 adapter。
+归一化因果项使用有效 batch 基线误差及 floor，参考输出不反传。
+
+**Experiment Design**：v11f 与 v11f_no_causal 从同一父权重/seed 各增加 30 轮；
+v11f_control 是 0 额外优化的固定参考，不作等预算重训声明。保持 batch=128、
+五 family 均衡采样、severity=0.4。固定与随机协议均检查 normal/zero/wrong/
+same-class，报告 masked MSE、正向改善比例及有效样本数。
+
+**类别一致性**：Index ACC 与恢复内容经冻结模型单模态再分类的 ACC 分开报告；
+后者仅为内部一致性代理，不能冒充外部独立识别器。
+
+完整 tensor 形状、目标、数据约束与验收标准见
+`docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md`。当前仅完成实现/回归，尚无 v11f
+正式训练结果，不根据结构上的梯度隔离预先声称恢复指标改善。
+
 ## F 阶段补充：v10c 实验设计
 
 ### 背景诊断

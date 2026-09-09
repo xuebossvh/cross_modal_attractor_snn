@@ -1,0 +1,13 @@
+# Frozen parent reference: evaluation only, not a new training run.
+extends: v11f.yaml
+cross_key_conditioning:
+  enabled: false
+  build_feature_modules: false
+  causal_training:
+    enabled: false
+train:
+  output_version: v11f_control
+  evaluation_only: true
+  trainable_prefixes: []
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v11e_control.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v11f_control.pt

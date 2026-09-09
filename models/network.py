@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
 from .decoders import (ClassifierHead, ImageDecoder, ImageRefiner,
-                       AudioDecoder, AudioRefiner)
+                       AudioDecoder, AudioRefiner, MaskedCrossKeyAdapter)
 from .lif import rate
 
 
@@ -56,6 +56,9 @@ class CrossModalSNN(nn.Module):
             self.use_cross_key_conditioning
             or bool(cross_cfg.get("build_modules", False)))
         self.cross_key_detach = bool(cross_cfg.get("detach_key", True))
+        self.cross_key_mode = cross_cfg.get("mode", "value_residual")
+        if self.cross_key_mode not in ("value_residual", "masked_feature"):
+            raise ValueError(f"Unknown Cross-Key mode: {self.cross_key_mode}")
         if self.build_cross_key_conditioning:
             self.aud_to_img_cross_proj = nn.Linear(
                 d["N_key_aud"], d["N_value_img"])
@@ -211,6 +214,76 @@ class CrossModalSNN(nn.Module):
         else:
             self.aux_aud_classifier = None
 
+        self.freeze_base = bool(cfg.get("train", {}).get("freeze_base", False))
+        if self.freeze_base:
+            if self.cross_key_mode != "masked_feature":
+                raise ValueError("freeze_base requires masked_feature Cross-Key")
+            if self.use_cross_detail_conditioning or self.use_pair_alignment:
+                raise ValueError("Frozen category binding excludes Cross-Detail/pair loss")
+            for param in self.parameters():
+                param.requires_grad_(False)
+        # Construct after every parent module so seeded parent initialization is unchanged.
+        if (self.cross_key_mode == "masked_feature"
+                and cross_cfg.get("build_feature_modules", True)):
+            hidden = int(cross_cfg.get("hidden_ch", 32))
+            key_ch = int(cross_cfg.get("key_channels", 16))
+            self.img_cross_adapter = MaskedCrossKeyAdapter(
+                32, d["N_key_aud"], hidden, key_ch)
+            self.aud_cross_adapter = MaskedCrossKeyAdapter(
+                self.audio_decoder.feature_channels, d["N_key_img"], hidden, key_ch)
+        else:
+            self.img_cross_adapter = None
+            self.aud_cross_adapter = None
+        if self.freeze_base:
+            self.train(False)
+
+    def train(self, mode=True):
+        if getattr(self, "freeze_base", False):
+            super().train(False)
+            for adapter in (self.img_cross_adapter, self.aud_cross_adapter):
+                if adapter is not None:
+                    adapter.train(mode)
+            return self
+        return super().train(mode)
+
+    @torch.no_grad()
+    def classify_recovered(self, image=None, audio=None):
+        """Internal content consistency, not an independent recognition oracle."""
+        img_spikes = self.img_encoder(image) if image is not None else None
+        aud_spikes = (self.aud_encoder(self._normalize_audio_for_encoder(audio))
+                      if audio is not None else None)
+        mem = self.memory(spike_img_cue=img_spikes, spike_aud_cue=aud_spikes,
+                          phase="readout")
+        return self.classifier(mem["index_state"])
+
+    def _decode_masked_cross(self, state, modality, key, cue, mask,
+                             source_missing_ratio, disabled):
+        decoder = self.image_decoder if modality == "img" else self.audio_decoder
+        adapter = self.img_cross_adapter if modality == "img" else self.aud_cross_adapter
+        finalize = self._apply_image_refiner if modality == "img" else self._finalize_audio
+        features = decoder.forward_features(state)
+        coarse = decoder.decode_features(features)
+        base = finalize(coarse, cue, mask)
+        if disabled or not self.use_cross_key_conditioning or key is None or adapter is None:
+            return base, coarse, None
+        region = torch.ones_like(base) if cue is None else (
+            torch.zeros_like(base) if mask is None else mask.to(base))
+        if not region.any():
+            return base, coarse, None
+        cue_map = torch.zeros_like(base) if cue is None else cue.to(base)
+        if region.dim() == 3:
+            region, cue_map = region.unsqueeze(1), cue_map.unsqueeze(1)
+        if region.shape[-2:] != features.shape[-2:]:
+            raise ValueError("masked_feature requires decoder features at target resolution")
+        updated, stats = adapter(features, key, cue_map, region, source_missing_ratio)
+        corrected_coarse = decoder.decode_features(updated)
+        corrected = finalize(corrected_coarse, cue, mask)
+        output_mask = region if base.dim() == 4 else region.squeeze(1)
+        # Protect visible baseline pixels after both the head and refiner receptive fields.
+        corrected = torch.where(output_mask.bool(), corrected, base)
+        corrected_coarse = torch.where(output_mask.bool(), corrected_coarse, coarse)
+        return corrected, corrected_coarse, stats
+
     def _normalize_audio_for_encoder(self, x_aud):
         if x_aud is None:
             return None
@@ -280,7 +353,8 @@ class CrossModalSNN(nn.Module):
             "value_norm": base_value.norm(dim=1),
             "ratio": zeros,
         }
-        if (disabled or not self.use_cross_key_conditioning
+        if (disabled or self.cross_key_mode == "masked_feature"
+                or not self.use_cross_key_conditioning
                 or cross_key_rate is None):
             return torch.zeros_like(base_value), stats
 
@@ -598,6 +672,21 @@ class CrossModalSNN(nn.Module):
         out["img_to_aud_detail_residual_norm"] = (
             img_to_aud_stats["detail_residual_norm"])
         out["img_to_aud_detail_ratio"] = img_to_aud_stats["detail_ratio"]
+        if self.cross_key_mode == "masked_feature":
+            rec_img, coarse_img, img_stats = self._decode_masked_cross(
+                img_dec_state, "img", aud_key_rate if x_aud_cue is not None else None,
+                x_img_cue, img_cue_mask, aud_missing_ratio, disable_aud_to_img_cross)
+            rec_aud, _, aud_stats = self._decode_masked_cross(
+                aud_dec_state, "aud", img_key_rate if x_img_cue is not None else None,
+                x_aud_cue, aud_cue_mask, img_missing_ratio, disable_img_to_aud_cross)
+            out["recovered_img_coarse"] = coarse_img
+            out["recovered_img"], out["recovered_aud"] = rec_img, rec_aud
+            for direction, stats in (("aud_to_img", img_stats), ("img_to_aud", aud_stats)):
+                if stats is not None:
+                    for key, value in stats.items():
+                        out[f"{direction}_cross_{key}"] = value
+            return out
+
         coarse_img = self.image_decoder(img_dec_state)
         out["recovered_img_coarse"] = coarse_img
         out["recovered_img"] = self._apply_image_refiner(

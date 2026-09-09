@@ -1,4 +1,4 @@
-# v11e main: MNIST/FSDD category-level many-to-many association.
+# v11f: frozen v11e_control + masked decoder-feature Cross-Key.
 # Self-contained config; missing modalities use train-set class medoids.
 seed: 1234
 device: cuda
@@ -42,6 +42,10 @@ detail_conditioning:
   img_detail_dim: 128
   aud_detail_dim: 256
 cross_key_conditioning:
+  mode: masked_feature
+  build_feature_modules: true
+  hidden_ch: 32
+  key_channels: 16
   enabled: true
   build_modules: true
   detach_key: true
@@ -51,6 +55,9 @@ cross_key_conditioning:
     loss_weight: 0.5
     batch_probability: 1.0
     margin_ratio: 0.05
+    normalization: batch_floor
+    img_scale_floor: 0.01
+    aud_scale_floor: 0.005
 decoder_pretrain:
   enabled: false
   epochs: 25
@@ -88,7 +95,7 @@ decoder_pretrain:
   lambda_aud: 4.0
   lambda_aud_active: 1.0
   save_ckpt: true
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v11e_decoder_pretrain.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v11f_decoder_pretrain.pt
 dims:
   img_in: 784
   img_hidden: 256
@@ -154,7 +161,7 @@ corruption:
   aud_mode: time_mask
   img_family_sampling: balanced
   aud_family_sampling: balanced
-  curriculum_mode: staged
+  curriculum_mode: fixed
   severity_min: 0.1
   severity_max: 0.4
   stage1_end: 20
@@ -267,7 +274,7 @@ loss:
   - clean_img_corrupt_aud
   - corrupt_both
   aud_sample_curriculum:
-    enabled: true
+    enabled: false
     modes:
     - corrupt_both
     start_epoch: 0
@@ -289,8 +296,11 @@ data:
     manifest_dir: ''
     augment: null
 train:
-  output_version: v11e
-  epochs: 100
+  output_version: v11f
+  freeze_base: true
+  require_cuda: true
+  evaluation_only: false
+  epochs: 30
   lr: 0.0001
   weight_decay: 0.0
   grad_clip: 1.0
@@ -299,15 +309,20 @@ train:
   lr_min: 1.0e-05
   lr_step_size: 15
   lr_gamma: 0.5
-  init_ckpt_path: ''
-  init_strict: true
-  init_required: false
+  init_ckpt_path: outputs/checkpoints/cross_modal_snn_v11e_control.pt
+  parent_sha256: 5a792f10e57a95947c8e51bd915b09897baee01475103010826f25275b71501b
+  init_strict: false
+  init_allowed_missing_prefixes: [img_cross_adapter., aud_cross_adapter.]
+  init_required: true
   init_load_optimizer: false
-  start_epoch: null
-  trainable_prefixes: []
+  start_epoch: 0
+  trainable_prefixes: [img_cross_adapter., aud_cross_adapter.]
   save_milestone_epochs: []
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v11e.pt
-  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v11e.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v11f.pt
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v11f.pt
+eval:
+  recovery_classification: true
+  random_seed: 4321
 cross_detail_conditioning:
   enabled: false
   build_modules: false

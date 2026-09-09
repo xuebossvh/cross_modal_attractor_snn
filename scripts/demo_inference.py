@@ -28,6 +28,7 @@ from data.corruption import (corrupt_audio, corrupt_image, AUD_MODES,
                              IMG_MODES, AUD_TRAIN_MODES, IMG_TRAIN_MODES)
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
+from models.frozen_base import load_evaluation_checkpoint, verify_audio_normalization
 
 
 def _clean_ax(ax):
@@ -601,11 +602,11 @@ def main():
     setup_matplotlib_chinese()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11c.yaml")
+    ap.add_argument("--config", default="configs/v11f.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--num", type=int, default=10,
                     help="可视化样本数（fixed_mask 默认 10；5 family × 2）")
-    ap.add_argument("--severity", type=float, default=0.5)
+    ap.add_argument("--severity", type=float, default=0.4)
     ap.add_argument("--aud_corrupt_mode", default=None,
                     help="覆盖 demo 音频 family；默认使用 eval_fixed.aud_modes")
     ap.add_argument("--img_corrupt_mode", default=None,
@@ -639,15 +640,13 @@ def main():
     log(f"[demo] 设备: {device}  加载 checkpoint: {ckpt_path}")
     model = CrossModalSNN(cfg).to(device)
     try:
-        state = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(state["model"])
-    except FileNotFoundError:
-        log(f"[警告] 未找到 {ckpt_path}，使用随机权重做 demo。")
-    except RuntimeError as e:
-        log(f"[警告] checkpoint 结构不匹配，使用随机权重做 demo。\n  {e}")
+        load_evaluation_checkpoint(model, ckpt_path, device)
+    except (FileNotFoundError, RuntimeError) as e:
+        raise SystemExit(f"[错误] 无法加载 checkpoint，禁止随机权重可视化：{e}") from e
     model.eval()
 
     _, test_loader = build_loaders(cfg, train_required=False)
+    verify_audio_normalization(model, cfg)
     # 类别协议使用 train medoid；真实配对协议只保留形状兼容的占位原型。
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
