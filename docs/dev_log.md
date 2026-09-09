@@ -1201,6 +1201,111 @@ Cross-Key main/control、关闭实例级伪监督以及版本配置清理规则�
 **验证**：检查 Markdown 标题后，0.11 已位于“项目结构”之前并会直接出现在文档
 顶部目录；本次仅调整文档结构，不改变代码、配置或运行命令。
 
+### 2026-09-09 - v11e 类别级绑定正式评估与 checkpoint 归档
+
+**评估对象与可比条件**：
+
+- 主实验 `v11e` 与 `v11e_control` 均从头训练 100 epoch，`seed=1234`、
+  `batch_size=128`、`T=20`，使用同一 MNIST/FSDD 数据、同一 cue 概率、同一
+  balanced corruption-family 采样和同一 cosine 学习率预算。两者唯一目标差异是
+  main 启用 Cross-Key 与对应 causal loss，control 关闭该路径；control 仍构造同构
+  模块，因此这是本轮主要的同预算消融对照。
+- 正式评估采用 `severity=0.4`。fixed-mask 使用 `seed=1234`，覆盖五组 family pair；
+  main 另有 legacy-random、Cross-Key normal/zero/wrong/same-class sweep，以及
+  fixed/random 各三张 demo。当前只有一个训练 seed。
+- 结果来自 `v11e_outputs_with_ckpt/outputs/outputs_v11e/` 与
+  `v11e_outputs_with_ckpt/outputs/outputs_v11e_control/`。两个训练日志均完整到
+  epoch 99，未发现 NaN、CUDA 异常或中断；末轮平均 loss 分别为 `1.2580` 与
+  `1.2135`。
+
+**五类音频残缺的 main/control 宏平均**：
+
+| cue mode | ACC main/control | aud MaskMSE main/control | 相对变化 | aud SSIM main/control |
+| --- | ---: | ---: | ---: | ---: |
+| corrupt_aud_only | 83.62% / 84.47% | 0.010795 / 0.011125 | -2.97% | 0.8111 / 0.8044 |
+| clean_img_corrupt_aud | 98.75% / 98.88% | 0.010255 / 0.010642 | -3.64% | 0.8180 / 0.8073 |
+| corrupt_both | 96.69% / 97.09% | 0.010392 / 0.010762 | -3.44% | 0.8165 / 0.8064 |
+
+Cross-Key main 在三种受损音频场景都带来约 `3%--4%` 的 masked-MSE 相对改善，
+SSIM 与 top-15% 能量召回也小幅提高；代价是 ACC 下降 `0.13--0.84` 个百分点。
+这些差异来自同预算 main/control，方向可信，但单 seed 下小幅 ACC 差异仍需多 seed
+复验。
+
+**图像侧宏平均与 refiner 归因**：
+
+- 五个图像 family 上，`corrupt_img_only` 的 ACC main/control 都为 `92.02%`，
+  img MaskMSE 为 `0.02750 / 0.02664`；`corrupt_both` 为 `97.10% / 97.56%`、
+  `0.02592 / 0.02592`；`corrupt_img_clean_aud` 为 `98.96% / 99.14%`、
+  `0.02550 / 0.02594`。Cross-Key 对部分残缺图像的平均增益很小，没有形成全面
+  优于 control 的图像恢复结果。
+- ImageRefiner 在 occlusion family 的洞内 MSE 从 coarse `0.0955` 降至 final
+  `0.0624`，在 corrupt-both 从 `0.0878` 降至 `0.0572`，约改善 `35%`；
+  visible paste-back 后可见区 MSE 为 0。图像 refiner 的作用清楚且稳定。
+- AudioRefiner 处于 bypass，音频 final 即单一 decoder 输出；恢复音频标准差约
+  `0.122--0.155`，目标约 `0.152`，top-15% 召回约 `68.8%--82.5%`，没有重新出现
+  v11a/v11b 的低能量塌缩。
+
+**Cross-Key 同 checkpoint 因果扫描**：
+
+- 在目标模态完全缺失时，Cross-Key 证据很强。`aud->img` 的
+  `corrupt_aud_only` 五 family 中，zero-normal gain 为 `0.0131--0.0236`，错误类别
+  damage 为 `0.0213--0.0742`；`clean_aud_only` 的 gain/damage 为
+  `0.0228 / 0.0766`。`img->aud` 的 `corrupt_img_only` gain 为
+  `0.0003--0.0005`、wrong damage 为 `0.0005--0.0008`，相对其约
+  `0.0005--0.0010` 的类别音频 MSE 仍是实质贡献。
+- same-class different-sample 替换几乎不伤害结果，部分场景还略优于 normal；而
+  wrong-class 替换显著恶化。这说明路径学到的是可替换的数字类别语义，符合
+  many-to-many 类别级绑定，不能据此宣称实例级说话人、笔迹或时序迁移。
+- 当目标模态仍有残缺 cue 时，Cross-Key 增益明显变小：`img->aud` 多数不超过
+  `0.0007`，`aud->img` 多数不超过 `0.0048`。此时同模态 detail 与 paste-back 已
+  提供主要信息，Cross-Key 更像缺失模态的类别兜底，而不是通用细节补全器。
+- sweep 逐 batch 验证干预前后的 `index_state` 与分类预测完全一致，因此
+  Cross-Key 在推理时只改变 decoder，不直接改变 Index/ACC。main/control 的 ACC
+  差异来自训练阶段共享 encoder/detail 梯度的间接影响。当前没有
+  “Cross-Key 开启但 causal loss 关闭”的第三组同预算实验，因而还不能拆分前向
+  条件结构和 causal loss 各自的训练贡献。
+- 两个方向并不等强：audio Key 对缺失图像的绝对作用远大于 image Key 对缺失音频；
+  这也受两个输出空间的 MSE 尺度和类别 medoid 能量不同影响，不能只按绝对 gain
+  直接比较方向强弱。
+
+**鲁棒性、瓶颈与跨版本边界**：
+
+- main 的 fixed/random 结果接近：`corrupt_img_only` ACC `89.6% / 89.4%`、
+  `corrupt_aud_only` `89.4% / 88.7%`、`corrupt_both` 均为 `97.4%`；核心 MSE
+  变化也在 `1e-4--5e-4` 量级。结论不是单张固定 mask 的偶然结果，但 random 仍
+  只有一次评估，不能替代多 seed。
+- 最大瓶颈是 `partial_temporal`：main 的 audio-only ACC `45.5%`、aud MaskMSE
+  `0.0294`、SSIM `0.548`，显著差于其余四类；加入干净图像后 ACC 恢复到
+  `97.6%`，说明 Index 能用图像语义救回类别，但音频样本细节仍无法由类别 Key
+  代替。
+- main 的 clean single-modality ACC 为 image `97.4%`、audio `96.7%`；control 为
+  `97.7%`、`98.8%`。尤其 clean-audio 下降 `2.1` 个百分点，提示 Cross-Key/causal
+  训练通过共享 audio encoder/detail 梯度带来分类与恢复权衡，后续需多 seed 确认。
+- 相对 v11c，v11e 在第一 family 的音频 MaskMSE 有改善，例如 audio-only
+  `0.0099 -> 0.0090`，clean audio MSE `0.0051 -> 0.0037`；但图像 occlusion
+  MaskMSE `0.0398 -> 0.0624`，clean image MSE `0.0091 -> 0.0129`，分类也下降。
+  v11c 使用不同训练起点/预算，v11e 又重新进行类别 many-to-many 训练，因此该
+  跨版本比较只能描述取舍，不能把变化单独归因于某个模块。
+- 日志中的 test `n=10000` 是 MNIST 条目数，不是 10000 条独立音频。FSDD test
+  只有约 300 条录音并在同类 MNIST 条目间确定性复用；当前划分也不是
+  speaker-independent。结果可以支持类别级联想机制，但不能外推为大规模或未知
+  说话人泛化。
+
+**结论**：v11e 已按预期实现并验证 MNIST/FSDD 类别级 many-to-many 联想。
+Cross-Key 不是无效装饰：在一侧完全缺失时，zero/wrong/same-class 扫描给出了明确
+的类别因果证据；但它尚未成为全面性能增益，部分残缺场景只获得小幅音频恢复改善，
+同时有轻微分类代价，图像恢复也未整体胜过 control。下一步优先级应为：至少 3 个
+训练 seed 复验 main/control；针对 `partial_temporal` 做专门建模或课程；用更大且
+speaker-disjoint 的语音集合验证泛化；在此之前不继续扩大 Cross-Key 宽度或提高
+causal loss 权重。
+
+**checkpoint 归档**：本地正式权重的 Git LFS SHA-256 为
+`e0e0cf0d52fff95599135d2dce154d1fa9395b54319a500cc164fa26716d89f4`
+（main）与
+`5a792f10e57a95947c8e51bd915b09897baee01475103010826f25275b71501b`
+（control）；仅这两个 `.pt` 文件提交到独立 checkpoint 仓库，提交为
+`f091a70 Add v11e main and control checkpoints`。
+
 ## 运行说明
 
 本章固定放在文件末尾。凡代码修改影响命令、参数、输出文件或输出格式时，必须在同一轮迭代中更新本章。
