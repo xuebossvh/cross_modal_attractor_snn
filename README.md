@@ -1,12 +1,17 @@
-# 跨模态循环吸引子 SNN：v11f
+# 跨模态循环吸引子 SNN：v11g
 
-当前分支为 **v11f**。在已训练的 v11e_control 上冻结基础网络，只训练
+当前分支为 **v11g**。在已训练的 v11e_control 上冻结基础网络，只训练
 **缺失区域 Cross-Key 特征调制**。研究目标是让正确的对侧 Key 改善部分残缺和
 全缺失恢复，同时避免基础分类能力因恢复训练而漂移。
 
-详细设计：[v11f 协议](docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md)；
-实现与验证记录：[implementation](docs/implementation.md)、
-[dev_log](docs/dev_log.md)。历史版本配置请切换对应分支查看。
+详细设计、实验协议与结果归档统一记录在
+[implementation](docs/implementation.md) 和 [dev_log](docs/dev_log.md)；
+历史版本配置请切换对应分支查看。
+
+文档闭环：v11g 的初始方案与研究假设在
+[idea_report](docs/idea_report.md)，最终实现与真实配置在
+[implementation](docs/implementation.md)，逐实验完整评估和结论在
+[dev_log](docs/dev_log.md)。不再创建版本专用协议或结果 Markdown。
 
 ## 1. 四项修改
 
@@ -83,7 +88,7 @@ Index=512、T=20、simultaneous、batch_size=128 保持不变。
 ## 4. 一条命令顺序执行
 
 ```bash
-nohup python -u scripts/run_v11f_suite.py --with_ablations > v11f_suite.log 2>&1 < /dev/null &
+nohup python -u scripts/run_v11g_suite.py --with_ablations > v11g_suite.log 2>&1 < /dev/null &
 ```
 
 执行顺序：main 训练及评估/可视化 -> 冻结 control 评估/可视化 ->
@@ -96,10 +101,10 @@ random sweep，以及 fixed/random 的三张 demo。日志同时输出终端并�
 失败停止后续步骤；最后会输出 `[suite] ALL STAGES COMPLETED`。
 
 ```bash
-tail -f v11f_suite.log
-python -u scripts/run_v11f_suite.py --eval_only --with_ablations
-python -u scripts/run_v11f_suite.py --resume
-python scripts/run_v11f_suite.py --with_ablations --dry_run
+tail -f v11g_suite.log
+python -u scripts/run_v11g_suite.py --eval_only --with_ablations
+python -u scripts/run_v11g_suite.py --resume
+python scripts/run_v11g_suite.py --with_ablations --dry_run
 ```
 
 `--resume` 要求对应训练 checkpoint 已存在。若主实验已完成但 no_causal 尚未
@@ -108,15 +113,15 @@ python scripts/run_v11f_suite.py --with_ablations --dry_run
 ## 5. 单独运行
 
 ```bash
-python -u scripts/train.py --config configs/v11f.yaml
-python -u scripts/train.py --config configs/v11f.yaml --resume
-python -u scripts/train.py --config configs/v11f_no_causal.yaml
+python -u scripts/train.py --config configs/v11g.yaml
+python -u scripts/train.py --config configs/v11g.yaml --resume
+python -u scripts/train.py --config configs/v11g_no_causal.yaml
 
-python -u scripts/evaluate.py --config configs/v11f_control.yaml --protocol fixed_mask --severity 0.4
-python -u scripts/evaluate.py --config configs/v11f.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep
-python -u scripts/evaluate.py --config configs/v11f.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
-python -u scripts/demo_inference.py --config configs/v11f.yaml --protocol fixed_mask --severity 0.4
-python -u scripts/demo_inference.py --config configs/v11f.yaml --protocol legacy_random --severity 0.4
+python -u scripts/evaluate.py --config configs/v11g_control.yaml --protocol fixed_mask --severity 0.4
+python -u scripts/evaluate.py --config configs/v11g.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep
+python -u scripts/evaluate.py --config configs/v11g.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
+python -u scripts/demo_inference.py --config configs/v11g.yaml --protocol fixed_mask --severity 0.4
+python -u scripts/demo_inference.py --config configs/v11g.yaml --protocol legacy_random --severity 0.4
 ```
 
 fixed_mask 对每种 family 用确定性 mask；random 在每 batch 随机抽取 family 和
@@ -126,7 +131,7 @@ mask，使用独立 `eval.random_seed=4321` 以便重复比较。
 
 ## 6. 输出与验收
 
-产物在 `outputs/outputs_v11f{,_control,_no_causal}/`：
+产物在 `outputs/outputs_v11g{,_control,_no_causal}/`：
 `logs/`、`tables/`、`figures/`。随机 demo 带 `_random.png` 后缀。
 
 `tables/eval_<protocol>_sev0.4_key_<normal|sweep>_detail_normal.csv` 为长表，
@@ -139,8 +144,8 @@ sweep 重点检查 `*_normal_mse`、`*_zero_mse`、`*_wrong_mse`、
 原 demo 的 pred 注释仍来自 Index，不能据此声称恢复内容类别正确。
 
 ```bash
-python -u scripts/smoke_test_v11f.py --cli
-python -u scripts/smoke_test_v11f.py --parent outputs/checkpoints/cross_modal_snn_v11e_control.pt
+python -u scripts/smoke_test_v11g.py --cli
+python -u scripts/smoke_test_v11g.py --parent outputs/checkpoints/cross_modal_snn_v11e_control.pt
 ```
 
 上述为离线 CPU 回归，不下载数据，也不改现有训练 checkpoint。

@@ -2,30 +2,108 @@
 > 创建时间：2026-07-07 | 当前用途：F 阶段迭代补充记录
 > 说明：本文件先记录当前 D-F 迭代中已经确认的实验设计，不回填完整 A/B/C 阶段长报告。
 > **纪律**：每次 F 阶段版本迭代（新配置、结构改动、消融设计）须同步更新本文件，与 `docs/implementation.md`（先写）和 `docs/dev_log.md`（后写）配套。
+> **文档导航**：本文记录研究问题、方案和预期实验；实际实现以 `docs/implementation.md` 为准；训练、评估和最终结论只追加到 `docs/dev_log.md`。当前版本为 `v11g`，带“已废止”标记的历史方案不属于当前运行入口。
 
 ---
 
-## F 阶段补充：v11f（当前设计）
+## F 阶段补充：v11g（v11f 方案的可复现实验版本）
 
-本轮从已完成评估的 v11e_control 冻结基线出发，检验 Cross-Key 对部分残缺的
-正向贡献，不把忽略 Cross-Key 或仅使 wrong-class 输出更差当作成功。
+### 版本目的与研究问题
 
-**Method**：保留 Value + gated own detail、双 Key simultaneous、类别 medoid
-目标和重建对 Value 的 stop-gradient；用空间/时频 mask 限定 decoder 末层前的
-Key 条件特征调制。基础编码器、吸引子和整个原恢复模块固定，只训练两个 adapter。
-归一化因果项使用有效 batch 基线误差及 floor，参考输出不反传。
+v11g 不引入新的模型假设，而是将已经确定的 v11f 方案整理为独立、可复现的
+版本入口。研究问题保持不变：在不让恢复 loss 通过 Value 影响 Index 的前提下，
+正确的对侧 Key 是否能只在目标缺失区域改善 decoder 恢复，同时保留类别吸引子。
 
-**Experiment Design**：v11f 与 v11f_no_causal 从同一父权重/seed 各增加 30 轮；
-v11f_control 是 0 额外优化的固定参考，不作等预算重训声明。保持 batch=128、
-五 family 均衡采样、severity=0.4。固定与随机协议均检查 normal/zero/wrong/
-same-class，报告 masked MSE、正向改善比例及有效样本数。
+### 方案范围
 
-**类别一致性**：Index ACC 与恢复内容经冻结模型单模态再分类的 ACC 分开报告；
-后者仅为内部一致性代理，不能冒充外部独立识别器。
+1. 以 `v11e_control` 为冻结父模型，保留 v11f 的 Masked Feature Cross-Key、
+   `Value + same-modal gated cue detail` 的 decoder 输入，以及 `detach_value_for_recon=true`。
+2. Cross-Key 只在 decoder feature 上调制目标缺失区域；adapter 零初始化，
+   只训练 `img_cross_adapter.` 与 `aud_cross_adapter.`。
+3. 保留 v11f 的 causal margin、zero/wrong/same-class 对照、fixed/random 评估、
+   五类 corruption family 均衡采样和 30 轮训练预算。
+4. 当前分支只提供 `v11g.yaml`、`v11g_control.yaml`、`v11g_no_causal.yaml`；
+   v11f 配置和脚本留在 v11f 分支，不在本分支重复上传。
 
-完整 tensor 形状、目标、数据约束与验收标准见
-`docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md`。当前仅完成实现/回归，尚无 v11f
-正式训练结果，不根据结构上的梯度隔离预先声称恢复指标改善。
+### 预期验收
+
+- v11g 与 v11f 的结构、父权重、关键超参数和训练边界一致，配置可独立解析。
+- zero intervention 输出应与冻结父模型一致；normal 应在缺失区域优于 zero，
+  并尽量优于 wrong。
+- 评估必须分别报告 main、control、no-causal 的各实验、各 cue/family、
+  fixed/random 和有效样本数；未实际运行的指标不得伪造。
+- 本次版本迁移不宣称性能提升；最终结论只能在 v11g 训练和评估完成后追加到
+  `docs/dev_log.md`。
+
+---
+
+## F 阶段补充：v11f（初始方案与实施后反馈）
+
+### 初始问题与研究假设
+
+v11e 的全局 Cross-Key 对部分残缺的收益不稳定，而且恢复 loss 与类别吸引子
+共同优化时可能影响 Index basin。v11f 的问题被限定为：
+
+> 在不改变已有 Key -> Index -> Value 记忆链、不增加独立 residual decoder 的
+> 前提下，正确的对侧 Key 能否只对目标缺失区域提供有用的 decoder 条件？
+
+核心假设是：Value 继续承担类别/联想底图，当前 cue 的 own detail 继续承担
+样本细节；对侧 Key 只作为类别条件，在缺失区域调制 decoder feature。将 Cross-Key
+放在 decoder feature 而不是 Value 上，是为了把恢复实验与 Index 分类状态隔离。
+
+### 初始方法设计
+
+1. 从已经训练完成的 `v11e_control` 出发，冻结 Encoder、Key、Index、Value、
+   Classifier、原 Decoder/Refiner 以及 own-detail fusion。
+2. 保留 `V_from_A + gated own cue detail` 的 decoder 输入，图像和音频各使用
+   自己的 cue detail；重建继续使用 `detach_value_for_recon=true`。
+3. 对图像恢复使用 `K_aud`，对音频恢复使用 `K_img`。Key 不进入 Index 的新路径，
+   只在同一 decoder 的 feature map 上作 masked modulation。
+4. 用目标缺失 mask 限定修改区域；adapter 零初始化，使训练前和 control 完全一致；
+   对侧缺失、目标无损和 zero intervention 旁路额外修正。
+5. 主实验使用正确 Key 的绝对重建项和相对 zero/wrong 的 causal margin；设置
+   batch-floor 归一化，reference 不反传。`same-class` 只作诊断，不作负样本。
+6. 设置 `v11f_control`、`v11f` main、`v11f_no_causal` 三组，区分结构贡献和
+   causal loss 贡献。control 是固定父模型，不宣称等预算重训。
+
+### 预设数据、维度与实验协议
+
+- 图像为 MNIST `[1,28,28]`，音频为 FSDD `[64,64]` log-mel；仍是类别级
+  many-to-many 绑定，不伪造 MNIST 样本与 FSDD 录音的一一实例对应。
+- `T=20`，图像/音频 Encoder 与 Key 的最终维度均为 128，Index 为 512，
+  `V_img_from_A=384`，`V_aud_from_A=768`。
+- own detail 的投影为图像 `128 -> 128`、音频 `128 -> 256`；decoder 输入
+  分别为 512 和 1024。
+- main/no_causal 从同一 `v11e_control` 父权重各额外训练 30 轮；三组
+  seed=1234、batch=128、severity=0.4、五 family 均衡采样。
+- 评估分为 fixed_mask 和 legacy_random；同时执行 normal/zero/wrong/same-class
+  Cross-Key 配对、family breakdown、恢复内容内部一致性和 fixed/random demo。
+
+### 预期验收条件
+
+v11f 只有同时满足以下条件才算支持假设：
+
+- normal 在同一 cue/mask 下真实优于 zero，并尽量优于 wrong；
+- 缺失区域 masked MSE 改善，而不是仅靠可见区或 paste-back 降低全局 MSE；
+- Index state/logits、Index ACC 和目标可见区保持父模型一致；
+- main 相对 no_causal 的差异能归因于 causal margin，而不是 seed、父权重或
+  训练预算变化；
+- gate、residual ratio 或 wrong 退化只能作为诊断，不能替代上述结果。
+
+### 实施后反馈
+
+v11f 已按上述方案实现并完成 main/control/no_causal 的 fixed/random 评估。main
+四个双模态部分残缺方向相对 zero 的 masked MSE 降幅为 fixed `2.162%--4.453%`、
+random `2.188%--4.471%`，且基础 state、Index 分类和可见区父模型输出保持不变。
+但 main 同时胜过 zero 和 wrong 的比例只有约 `35.75%--38.22%`，说明额外
+Cross-Key 的类别选择性仍弱；no_causal 在部分音频 SSIM/内容一致性上个别更好，
+说明 causal margin 主要改善局部 MSE，并未全面解决恢复-分类权衡。
+
+因此本轮结论是“冻结隔离和局部恢复改善得到支持”，不是“Cross-Key 类别选择性
+已经证明”或“分类问题已经解决”。逐 cue、逐实验、fixed/random、Cross-Key
+四种干预、有效 n、family 和 demo 的完整数值统一写在 `docs/dev_log.md` 的
+v11f 评估条目中；最终代码和真实配置写在 `docs/implementation.md`，本节保留
+最初方案与实施后判断。
 
 ## F 阶段补充：v10c 实验设计
 
@@ -479,7 +557,7 @@ v11d 的结果解释必须遵守以下口径：
 3. 若 same-class wrong 与 correct 接近，则说明模型主要使用类别线索，不能宣称
    恢复了配对实例细节。
 
-### v11e：真实 GRID 视听配对主线
+### v11e：真实 GRID 视听配对主线（已废止历史方案）
 
 v11e 是当前更值得作为主线的版本。它把数据域改为 GRID，同一 manifest row 包含
 一次真实 utterance 的音频与视频帧；图像输入是 28x28 rank-pooled mouth-motion

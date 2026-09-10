@@ -1,6 +1,6 @@
 # 开发日志：Cross-Modal Attractor SNN
 
-> 创建时间：2026-07-06 18:43 | 最后更新：2026-07-09
+> 创建时间：2026-07-06 18:43 | 当前活动版本：v11f | 最后整理：2026-09-11
 > 关联实现指南：`docs/implementation.md`
 > 当前阶段：ResearchPilot F 阶段补档与迭代
 > 本文件原则上只追加，不删除。每次代码修改都必须追加新的日志条目。
@@ -12,13 +12,27 @@
 | --------------- | --------------------------------------------- |
 | 研究方向            | 跨模态 attractor SNN 联想记忆                        |
 | 当前阶段            | F：代码迭代                                        |
-| 当前配置            | `configs/v10a.yaml`                           |
+| 当前配置            | `configs/v11f.yaml`、`v11f_control.yaml`、`v11f_no_causal.yaml` |
 | 代码结构            | 根目录下的 `data/`、`models/`、`scripts/`、`configs/` |
 | 主要任务            | MNIST 图像 + FSDD 音频 cue -> digit 分类 + 图像/音频恢复  |
 | 框架              | PyTorch                                       |
-| 主 checkpoint 目标 | `outputs/checkpoints/cross_modal_snn_v10a.pt` |
-| 版本化输出目标         | `outputs/outputs_v10a/`                       |
+| 主 checkpoint 目标 | `outputs/checkpoints/cross_modal_snn_v11f.pt` |
+| 版本化输出目标         | `outputs/outputs_v11f/`                       |
 | 硬性工作流           | 先改文档，再改代码；每次改代码后追加本日志                         |
+
+## 当前版本导航
+
+当前活动版本为 `v11f`。按文档职责定位内容：
+
+| 内容 | 入口 |
+|---|---|
+| v11f 初始方案、研究问题、预期验收 | `docs/idea_report.md` 顶部 v11f 条目 |
+| v11f 实际结构、配置、张量和命令 | `docs/implementation.md` 第 0-6 节 |
+| v11f 主实验、control、no-causal 的评估与结论 | 本文件 `2026-09-10 v11f 结果归档格式修订` 条目 |
+| v11f 当前运行命令 | 本文件末尾 `运行说明（当前 v11f）` |
+
+本文件前部的 v10a 状态表和中部各版本条目是历史记录；其中出现的旧配置、旧路径或
+已删除文档名不能作为当前运行入口。历史日志只追加，不通过移动或删除旧条目修订。
 
 
 ## F 阶段规则
@@ -28,26 +42,29 @@
 3. 若改动涉及 Method 或实验设计，必须先更新 `docs/idea_report.md`。如果该文件尚不存在，则先创建或补充相关设计说明。
 4. 每次代码修改后，都必须在本文件追加日志条目。
 5. 本文件末尾固定保留 `运行说明` 章节；命令、参数、输出文件或输出路径变化时必须同步更新。
-6. `configs/` **版本卫生（每次切到新版本分支必做）**：`configs/` 只保留**当前活动版本**的主配置 `v10X.yaml` 及其消融 `v10X_ab_*.yaml`；删除其他版本遗留 yaml（如 v10f 分支不应保留 v10d/v10e）。同步把 `paths.py`、`common.py`、`scripts/`* 默认 `--config` 改为当前版本；在本文档追加清理记录。历史配置留在对应 Git 分支或本地 `outputs/`，不堆在活跃分支里。
+6. `configs/` **版本卫生（每次切到新版本分支必做）**：`configs/` 只保留**当前活动版本**的主配置 `<current_version>.yaml` 及其必要的 control/ablation 配置；删除其他版本遗留 yaml。同步把 `paths.py`、`common.py`、`scripts/`* 默认 `--config` 改为当前版本；在本文档追加清理记录。历史配置留在对应 Git 分支或本地 `outputs/`，不堆在活跃分支里。
 
 
 
 ## 项目架构
 
 ```text
-clean/corrupt image cue -> ImageSNNEncoder -> Key_img \
-                                                   -> recurrent Index A -> Value_img -> ImageDecoder
-clean/corrupt audio cue -> AudioSNNEncoder -> Key_aud /                    -> Value_aud -> AudioDecoder
+image cue -> ImageSNNEncoder -> K_img -+
+                                      +-> simultaneous recurrent Index A -> V_img/V_aud
+audio cue -> AudioSNNEncoder -> K_aud -+                         |
+                                                                +-> ClassifierHead
 
-Index state -> ClassifierHead
-cue detail states -> optional gated concat into decoders
+V_img + gated own image detail -> ImageDecoder feature
+K_aud -> masked missing-region adapter -> image output
+V_aud + gated own audio detail -> AudioDecoder feature
+K_img -> masked missing-region adapter -> audio output
 ```
 
 
 
 ## 实现进度
 
-状态说明：`已有` 表示代码已存在但本次文档补档未重新完整验证；`文档完成` 表示本轮已生成或中文化；`待运行` 表示当前 v10a 产物尚未生成。
+状态说明：`已有` 表示代码已存在但本次文档补档未重新完整验证；`文档完成` 表示本轮已生成或中文化；`历史` 表示该条目只用于追溯；当前活动版本以“当前版本导航”为准。
 
 
 | 模块         | 文件                                                            | 状态   | 时间               | 备注                                     |
@@ -55,7 +72,7 @@ cue detail states -> optional gated concat into decoders
 | 用户需求记录     | `docs/user_requirements.md`                                   | 文档完成 | 2026-07-06 18:58 | 已中文化，记录 D-F 硬规则                        |
 | 实现指南       | `docs/implementation.md`                                      | 文档完成 | 2026-07-06 18:58 | 已中文化，基于当前代码整理                          |
 | 开发日志       | `docs/dev_log.md`                                             | 文档完成 | 2026-07-06 18:58 | 当前文件                                   |
-| 配置         | `configs/v10a.yaml`                                           | 已有   | 补档前              | v10a 当前活动配置                            |
+| 历史补档基线配置 | `configs/v10a.yaml`                                         | 历史   | 补档前              | 创建文档时的旧版基线，不代表当前配置            |
 | 数据管线       | `data/*.py`                                                   | 已有   | 补档前              | MNIST + FSDD log-mel + medoids         |
 | 残缺 cue 管线  | `data/corruption.py`, `common.py`                             | 已有   | 补档前              | 6 种 cue mode 和 corruption family       |
 | SNN 基础模块   | `models/lif.py`                                               | 已有   | 补档前              | LIF + surrogate gradient               |
@@ -67,7 +84,7 @@ cue detail states -> optional gated concat into decoders
 | 评估脚本       | `scripts/evaluate.py`                                         | 已有   | 补档前              | fixed/random protocols                 |
 | Demo 脚本    | `scripts/demo_inference.py`                                   | 已有   | 补档前              | demo figures 和 table                   |
 | 消融 suite   | `scripts/make_v10a_ablations.py`, `scripts/run_v10a_suite.py` | 已有   | 补档前              | 三个 v10a 消融变体                           |
-| 当前 v10a 输出 | `outputs/outputs_v10a/`                                       | 待运行  | 2026-07-06 18:43 | 创建日志时目录不存在                             |
+| 历史 v10a 输出 | `outputs/outputs_v10a/`                                       | 历史   | 2026-07-06 18:43 | 创建旧版文档时目录不存在                         |
 
 
 
@@ -2023,3 +2040,344 @@ python -u scripts/smoke_test_v11f.py --parent outputs/checkpoints/cross_modal_sn
 其他产物进入 `outputs/outputs_v11f{,_control,_no_causal}/`。
 fixed/random 的每个评估过程都会写各自 CSV，不互相覆盖；随机可视化带 `_random` 后缀。
 套件结束标志是 `[suite] ALL STAGES COMPLETED`，`tail -f` 无新输出不代表仍在训练。
+
+## 2026-09-10 v11f 本地实测评价与 checkpoint 上传
+
+### 范围与证据
+
+用户要求上传 v11f checkpoint 并详细评价本地结果。本次仅做 F-1 诊断与归档，
+没有修改模型、训练配置或评估代码，也没有重跑全量 GPU 训练/推理。
+来源是 `v11f_outputs_with_ckpt/outputs/` 下 main、control、no_causal 三组产物：
+12 份 normal/sweep CSV、3 份 family breakdown CSV、6 份 demo 表、18 张图及
+20 份日志。完整口径、全部方向和限制见 `docs/V11F_EVALUATION.md`。
+
+### 主模型结论
+
+- v11f 从 v11e_control epoch=99 初始化，seed=1234、batch=128，固定 severity=0.4，
+  五 family 均衡采样，额外 30 轮。checkpoint epoch=29，scheduler last_epoch=30。
+- 48,736 个 adapter 参数可训练；所有父模型参数/buffers 逐张量相同，数值有限。
+  基础 state SHA256 与 provenance 一致，Index ACC 和可见区域误差不变。
+- fixed 四个双模态部分残缺方向的 masked MSE 降幅分别为：干净图像助音频 4.45%、
+  双残缺音频 3.33%、干净音频助图像 2.55%、双残缺图像 2.16%；random 分别为
+  4.47%、3.32%、2.98%、2.19%。这是相对同输入/mask 的固定 zero/control。
+- 但 fixed 的上述场景同时胜过 zero/wrong 的样本只占 35.75%–38.22%，错误 Key
+  仍保留大部分平均改善。额外 decoder 支路的类别选择性仍弱；不代表原有
+  Key -> Index -> Value 完全没有跨模态联系。
+- 干净/残缺图像生成类别音频的 MSE 分别退化约 1.68%/0.28%；部分残缺音频的
+  内容类别一致性未稳定提升。partial_temporal 仍最弱，不能宣称全部目标达成。
+
+### 对照结论：v11f_control
+
+- 消融对象：关闭额外 Cross-Key 的固定父模型；无额外训练，不是等预算重训对照。
+- 数据与评估：同 seed、severity=0.4，fixed 五 family、random seed=4321。
+- 核验：两协议中 main/no_causal 的 paired zero 方向误差与 control 一致，
+  normal 与 sweep 的共有主指标也一致（数值比较容差 1e-9）。
+- 独立结论：固定父模型比较有效，v11f 的部分残缺收益并非换基线或基础参数漂移。
+  不能借此作“局部结构因果优于 v11e 全局结构”的等预算结论。
+
+### 消融结论：v11f_no_causal
+
+- 消融对象：仅去掉因果项开关/权重，保留两个 masked-feature adapter。
+- 对照与预算：同一 v11e_control 父模型、seed=1234、batch=128、额外 30 轮，
+  saved cfg 除因果项和路径外一致，optimizer 参数更新步数也一致。
+- fixed 部分残缺 masked MSE 降幅为 3.05%、2.21%、1.76%、1.40%；main 为
+  4.45%、3.33%、2.55%、2.16%。main 在四方向的全部 20 个 family 任务格都更低。
+- 代价：no_causal 的音频 SSIM 和部分音频内容类别一致性反而略好；残缺音频
+  生成类别图像时，MSE 改善 6.85%，优于 main 的 3.55%，random 也有同向差异。
+- 独立结论：因果项增加了部分残缺正向 MSE 收益，但没有全面改善类别选择性
+  或全部恢复指标。wrong reference 不反传，其梯度更直接地加权正常重建误差。
+  单训练 seed、无逐样本误差分布和独立重复，不作统计显著性结论。
+
+### 异常与比较限制
+
+- 所有日志有非法 OMP_NUM_THREADS 警告，但训练/评估结束，未发现 CUDA/NaN/Inf
+  报错；不能据此认定结果无效或推断具体耗时影响。
+- family breakdown 使用独立 seed 调度和固定 occlusion 图像，不能与主 sweep
+  混为同一 mask。partial_temporal audio-only ACC=45.88% 来自该独立 breakdown。
+- demo 的 random 分支仍默认 occlusion/time_mask 的随机位置；数值 random 才是
+  随机五 family。已在 implementation 和评价报告标注，本轮未改代码/重画图片。
+- Index ACC 与恢复内容再分类分开；后者是内部代理，不是外部独立识别或听感。
+- 类别绑定下不存在可由 MNIST 唯一确定的说话人/语速实例；全缺失 target 为训练
+  medoid，不能用其低 MSE 冒充逐实例跨模态恢复。
+
+### 上传与归档
+
+- 独立 checkpoint 仓库 main 提交 `4ae02eb9e38b11bce5fd80e51f6a75756835813c`，
+  Git LFS 上传成功，远端分支确认，LFS fsck 通过。
+- 新增 `cross_modal_snn_v11f.pt`：SHA256
+  `9b3c2a6fc47f6cb890c2cfd0a87564ce612e5b8424ef343607da8dfef1d95fc8`。
+- 新增 `cross_modal_snn_v11f_no_causal.pt`：SHA256
+  `3951fadc830c0583a73e93340bc1906da5c7578544d478680fec990ace01359f`。
+- bundle 的 v11e_control 与仓库现有文件哈希相同，不重复覆盖。
+- 本轮同步 `V11F_EVALUATION.md`、`idea_report.md`、`implementation.md`、
+  `V11F_MASKED_CROSS_KEY_PROTOCOL.md` 和本日志；不把原始产物或临时分析脚本
+  加入代码仓库。没有进入新版本设计/实现。
+
+## 运行说明
+
+本次评价读取已存在的 `v11f_outputs_with_ckpt/outputs/`，无需重训。
+详细数字、来源 CSV、逐配置结论和限制见 `docs/V11F_EVALUATION.md`。
+要在服务器复跑评估，须先保留原始结果，避免下面套件覆盖同名日志和表。
+在 `/root/autodl-tmp/projects/cross_modal_attractor_snn_v11f` 项目根目录与已激活的
+GPU 环境中，可用：
+
+```bash
+OMP_NUM_THREADS=1 python -u scripts/run_v11f_suite.py --eval_only --with_ablations
+```
+
+此命令只评估已有 main/control/no_causal 权重，不继续训练。需要
+`outputs/checkpoints/cross_modal_snn_v11f.pt`、`cross_modal_snn_v11f_no_causal.pt`
+以及正确 SHA256 的父权重 `cross_modal_snn_v11e_control.pt`。
+当前 random demo 的 family 限制仍然存在，不因重跑命令自动修复。
+
+## 2026-09-10 评估指标交付规范补充
+
+用户要求后续每次评价均告知各实验的各项指标。本轮只补文档规范，不改变模型、
+配置、损失实现或服务器任务，也没有提交/推送代码。
+
+- 在 `docs/user_requirements.md` 增加硬性规则 12 及“评估报告强制规范”，
+  覆盖所有后续版本的主实验、control、各消融和可用评估协议。
+- 要求用户回复包含逐实验主要指标表，完整汇总覆盖原始字段、绝对数值、有效 n、
+  配对干预、区域误差、内容分类、音频诊断、训练曲线和 demo；缺失项明确说明。
+- fixed/random、family breakdown、小样本 demo 不混算，sample/category target
+  不混同，不能只给提升百分比或只给主实验指标。
+- `docs/implementation.md` 增加规范入口；当前完整指标表为
+  `docs/V11F_METRICS_SUMMARY.md`，评价与消融结论见 `docs/V11F_EVALUATION.md`。
+- 重新核对 v11f 的 `_cross_key_causal_loss` 及 YAML，确认 reference 不反传、
+  margin_ratio=0.05、权重=0.5、图/音 scale floor=0.01/0.005。后续损失修订、
+  内容语义监督和受控 Key 对照仅为讨论建议，尚未获得实现授权。
+
+## 运行说明
+
+本轮仅修改规范，无需重新运行训练或评估，现有命令与 checkpoint 不变。
+后续评价前先读取 `docs/user_requirements.md` 的“评估报告强制规范”，按实际
+产物字段清点并生成逐实验完整表，再追加各消融的独立结论。
+当前 v11f 指标入口：`docs/V11F_METRICS_SUMMARY.md`；解读入口：
+`docs/V11F_EVALUATION.md`。服务器复核命令见本日志上一段运行说明；原始结果
+应保留，random demo 口径问题尚未在代码中修复。
+
+## 2026-09-10 v11f 结果归档格式修订
+
+用户明确要求：v11f 评估结果不要写在单独文件。此前新增的
+`V11F_EVALUATION.md` 与 `V11F_METRICS_SUMMARY.md` 属于重复的结果说明文档，
+现将结果统一归档到本 `dev_log.md` 条目；`outputs/` 下的原始 CSV、日志和图片
+继续保留，作为可复核的运行证据。后续版本不得再创建同类独立评估 Markdown。
+此前条目中指向两个文件的路径属于历史记录，本条目是新的正式入口。
+
+### v11f 三组实验口径
+
+| 实验 | 权重来源 | 额外训练 | 可训练范围 | seed | batch | severity |
+|---|---|---:|---|---:|---:|---:|
+| control | v11e_control | 0 轮，仅评估 | 无 | 1234 | 128 | 0.4 |
+| main | v11e_control | 30 轮 | 两个 masked Cross-Key adapter | 1234 | 128 | 0.4 |
+| no_causal | v11e_control | 30 轮 | 同上，关闭 causal loss | 1234 | 128 | 0.4 |
+
+fixed 使用五个 family 的均衡汇总；random 使用 seed=4321 的一次可复现
+family/mask 抽样。下表的主指标均为有效汇总值，主要 normal 指标每格
+`n_sum=50000`；这表示重复评估曝光数，不是独立样本数。图像/音频内容 ACC
+是恢复结果经过冻结原模型单模态再分类得到的内部一致性代理，不是独立识别器。
+MSE 越低越好，SSIM 和 ACC 越高越好；mask MSE 只在对应缺失区域存在时适用。
+
+### fixed_mask 主指标
+
+| cue | 实验 | Index ACC | img MSE | img SSIM | aud MSE | aud SSIM | img mask MSE | aud mask MSE | img content ACC | aud content ACC |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| clean_both | control | 99.180% | 0.00973233 | 0.942685 | 0.00364344 | 0.911253 | N/A | N/A | 97.790% | 96.040% |
+| clean_both | main | 99.180% | 0.00973233 | 0.942685 | 0.00364344 | 0.911253 | N/A | N/A | 97.790% | 96.040% |
+| clean_both | no_causal | 99.180% | 0.00973233 | 0.942685 | 0.00364344 | 0.911253 | N/A | N/A | 97.790% | 96.040% |
+| clean_img_only | control | 97.700% | 0.00977739 | 0.942646 | 0.00028921 | 0.965964 | N/A | 0.00028921 | 96.820% | 94.320% |
+| clean_img_only | main | 97.700% | 0.00977739 | 0.942646 | 0.00029406 | 0.965814 | N/A | 0.00029406 | 96.820% | 94.250% |
+| clean_img_only | no_causal | 97.700% | 0.00977739 | 0.942646 | 0.00029571 | 0.966055 | N/A | 0.00029571 | 96.820% | 94.550% |
+| clean_aud_only | control | 98.830% | 0.00208493 | 0.985595 | 0.00364809 | 0.911157 | 0.00208493 | N/A | 97.710% | 96.000% |
+| clean_aud_only | main | 98.830% | 0.00205180 | 0.985961 | 0.00364809 | 0.911157 | 0.00205180 | N/A | 98.090% | 96.000% |
+| clean_aud_only | no_causal | 98.830% | 0.00207669 | 0.985706 | 0.00364809 | 0.911157 | 0.00207669 | N/A | 97.750% | 96.000% |
+| corrupt_img_only | control | 92.028% | 0.00768047 | 0.955151 | 0.00066839 | 0.916781 | 0.02666188 | 0.00066839 | 95.514% | 83.518% |
+| corrupt_img_only | main | 92.028% | 0.00768047 | 0.955151 | 0.00067026 | 0.916379 | 0.02666188 | 0.00067026 | 95.514% | 83.526% |
+| corrupt_img_only | no_causal | 92.028% | 0.00768047 | 0.955151 | 0.00067341 | 0.917347 | 0.02666188 | 0.00067341 | 95.514% | 84.174% |
+| corrupt_aud_only | control | 84.572% | 0.01321163 | 0.877703 | 0.00628970 | 0.804689 | 0.01321163 | 0.01107898 | 82.882% | 80.600% |
+| corrupt_aud_only | main | 84.572% | 0.01274271 | 0.886050 | 0.00628970 | 0.804689 | 0.01274271 | 0.01107898 | 82.986% | 80.600% |
+| corrupt_aud_only | no_causal | 84.572% | 0.01230638 | 0.893063 | 0.00628970 | 0.804689 | 0.01230638 | 0.01107898 | 82.846% | 80.600% |
+| clean_img_corrupt_aud | control | 98.934% | 0.00979025 | 0.942597 | 0.00609738 | 0.807590 | N/A | 0.01059938 | 97.520% | 88.970% |
+| clean_img_corrupt_aud | main | 98.934% | 0.00979025 | 0.942597 | 0.00592129 | 0.809909 | N/A | 0.01012738 | 97.520% | 88.918% |
+| clean_img_corrupt_aud | no_causal | 98.934% | 0.00979025 | 0.942597 | 0.00597777 | 0.810239 | N/A | 0.01027564 | 97.520% | 89.142% |
+| corrupt_img_clean_aud | control | 99.144% | 0.00750159 | 0.956305 | 0.00364682 | 0.911207 | 0.02591803 | N/A | 96.720% | 95.968% |
+| corrupt_img_clean_aud | main | 99.144% | 0.00731868 | 0.957252 | 0.00364682 | 0.911207 | 0.02525703 | N/A | 96.736% | 95.968% |
+| corrupt_img_clean_aud | no_causal | 99.144% | 0.00739533 | 0.956837 | 0.00364682 | 0.911207 | 0.02546277 | N/A | 96.754% | 95.968% |
+| corrupt_both | control | 97.536% | 0.00751963 | 0.956189 | 0.00617585 | 0.805881 | 0.02591245 | 0.01077483 | 96.178% | 87.012% |
+| corrupt_both | main | 97.536% | 0.00737009 | 0.957024 | 0.00604091 | 0.807620 | 0.02535232 | 0.01041650 | 96.278% | 87.012% |
+| corrupt_both | no_causal | 97.536% | 0.00743799 | 0.956651 | 0.00608690 | 0.807978 | 0.02554904 | 0.01053662 | 96.296% | 87.134% |
+
+### legacy_random 主指标
+
+| cue | 实验 | Index ACC | img MSE | img SSIM | aud MSE | aud SSIM | img mask MSE | aud mask MSE | img content ACC | aud content ACC |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| clean_both | control | 99.180% | 0.00973233 | 0.942685 | 0.00364344 | 0.911253 | N/A | N/A | 97.790% | 96.040% |
+| clean_both | main | 99.180% | 0.00973233 | 0.942685 | 0.00364344 | 0.911253 | N/A | N/A | 97.790% | 96.040% |
+| clean_both | no_causal | 99.180% | 0.00973233 | 0.942685 | 0.00364344 | 0.911253 | N/A | N/A | 97.790% | 96.040% |
+| clean_img_only | control | 97.700% | 0.00977739 | 0.942646 | 0.00028921 | 0.965964 | N/A | 0.00028921 | 96.820% | 94.320% |
+| clean_img_only | main | 97.700% | 0.00977739 | 0.942646 | 0.00029406 | 0.965814 | N/A | 0.00029406 | 96.820% | 94.250% |
+| clean_img_only | no_causal | 97.700% | 0.00977739 | 0.942646 | 0.00029571 | 0.966055 | N/A | 0.00029571 | 96.820% | 94.550% |
+| clean_aud_only | control | 98.830% | 0.00208493 | 0.985595 | 0.00364809 | 0.911157 | 0.00208493 | N/A | 97.710% | 96.000% |
+| clean_aud_only | main | 98.830% | 0.00205180 | 0.985961 | 0.00364809 | 0.911157 | 0.00205180 | N/A | 98.090% | 96.000% |
+| clean_aud_only | no_causal | 98.830% | 0.00207669 | 0.985706 | 0.00364809 | 0.911157 | 0.00207669 | N/A | 97.750% | 96.000% |
+| corrupt_img_only | control | 92.360% | 0.00761429 | 0.955219 | 0.00062749 | 0.921694 | 0.02923265 | 0.00062749 | 95.490% | 84.270% |
+| corrupt_img_only | main | 92.360% | 0.00761429 | 0.955219 | 0.00062952 | 0.921340 | 0.02923265 | 0.00062952 | 95.490% | 84.480% |
+| corrupt_img_only | no_causal | 92.360% | 0.00761429 | 0.955219 | 0.00063137 | 0.922253 | 0.02923265 | 0.00063137 | 95.490% | 85.160% |
+| corrupt_aud_only | control | 85.790% | 0.01220869 | 0.887254 | 0.00605548 | 0.813113 | 0.01220869 | 0.01038064 | 84.090% | 81.770% |
+| corrupt_aud_only | main | 85.790% | 0.01179923 | 0.894696 | 0.00605548 | 0.813113 | 0.01179923 | 0.01038064 | 84.250% | 81.770% |
+| corrupt_aud_only | no_causal | 85.790% | 0.01141631 | 0.900913 | 0.00605548 | 0.813113 | 0.01141631 | 0.01038064 | 84.010% | 81.770% |
+| clean_img_corrupt_aud | control | 98.960% | 0.00978341 | 0.942602 | 0.00587250 | 0.816051 | N/A | 0.00992893 | 97.500% | 89.830% |
+| clean_img_corrupt_aud | main | 98.960% | 0.00978341 | 0.942602 | 0.00570647 | 0.818213 | N/A | 0.00948503 | 97.500% | 89.720% |
+| clean_img_corrupt_aud | no_causal | 98.960% | 0.00978341 | 0.942602 | 0.00576489 | 0.818253 | N/A | 0.00963809 | 97.500% | 90.060% |
+| corrupt_img_clean_aud | control | 99.160% | 0.00741694 | 0.956508 | 0.00364718 | 0.911193 | 0.02826212 | N/A | 96.690% | 96.000% |
+| corrupt_img_clean_aud | main | 99.160% | 0.00720425 | 0.957629 | 0.00364718 | 0.911193 | 0.02742097 | N/A | 96.720% | 96.000% |
+| corrupt_img_clean_aud | no_causal | 99.160% | 0.00727446 | 0.957239 | 0.00364718 | 0.911193 | 0.02759958 | N/A | 96.780% | 96.000% |
+| corrupt_both | control | 97.280% | 0.00771856 | 0.954641 | 0.00592670 | 0.820633 | 0.02618422 | 0.00991035 | 96.340% | 87.310% |
+| corrupt_both | main | 97.280% | 0.00756339 | 0.955451 | 0.00580403 | 0.822283 | 0.02561142 | 0.00958097 | 96.390% | 87.530% |
+| corrupt_both | no_causal | 97.280% | 0.00762250 | 0.955149 | 0.00584141 | 0.822596 | 0.02577683 | 0.00967829 | 96.380% | 87.670% |
+
+### Cross-Key 配对指标
+
+以下只替换 decoder 额外支路的 Key，Index/Value 保留原始输入；`zero` 是关闭
+额外支路，`wrong` 是错误类别，`same-class` 是同类其它样本。`rel. gain` 为
+相对 zero 的 MSE 降幅，`win_both` 为同一样本同时胜 zero 和 wrong 的比例。
+control 没有可训练 adapter，所以 normal/zero/wrong 数值相同。
+
+| 协议 | cue/方向 | 实验 | zero MSE | normal MSE | wrong MSE | same-class MSE | rel. gain | win_zero | win_wrong | win_both |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| fixed | clean_img_corrupt_aud/img2aud | control | 0.01059938 | 0.01059938 | 0.01059938 | 0.01060036 | 0.000% | 0.000% | 0.000% | 0.000% |
+| fixed | clean_img_corrupt_aud/img2aud | main | 0.01059938 | 0.01012738 | 0.01014259 | 0.01012619 | 4.453% | 66.964% | 43.524% | 36.230% |
+| fixed | clean_img_corrupt_aud/img2aud | no_causal | 0.01059938 | 0.01027564 | 0.01035881 | 0.01027439 | 3.054% | 54.962% | 45.200% | 32.946% |
+| fixed | corrupt_both/img2aud | control | 0.01077483 | 0.01077483 | 0.01077483 | 0.01077508 | 0.000% | 0.000% | 0.000% | 0.000% |
+| fixed | corrupt_both/img2aud | main | 0.01077483 | 0.01041650 | 0.01042322 | 0.01041735 | 3.326% | 67.572% | 42.914% | 35.748% |
+| fixed | corrupt_both/img2aud | no_causal | 0.01077483 | 0.01053662 | 0.01058506 | 0.01053651 | 2.211% | 55.080% | 44.550% | 32.154% |
+| fixed | corrupt_img_clean_aud/aud2img | control | 0.02591803 | 0.02591803 | 0.02591803 | 0.02591619 | 0.000% | 0.000% | 0.000% | 0.000% |
+| fixed | corrupt_img_clean_aud/aud2img | main | 0.02591803 | 0.02525703 | 0.02530174 | 0.02525717 | 2.550% | 68.540% | 52.338% | 38.216% |
+| fixed | corrupt_img_clean_aud/aud2img | no_causal | 0.02591803 | 0.02546277 | 0.02554611 | 0.02546369 | 1.757% | 61.064% | 52.492% | 35.954% |
+| fixed | corrupt_both/aud2img | control | 0.02591245 | 0.02591245 | 0.02591245 | 0.02590695 | 0.000% | 0.000% | 0.000% | 0.000% |
+| fixed | corrupt_both/aud2img | main | 0.02591245 | 0.02535232 | 0.02537906 | 0.02533928 | 2.162% | 67.618% | 49.846% | 36.596% |
+| fixed | corrupt_both/aud2img | no_causal | 0.02591245 | 0.02554904 | 0.02560886 | 0.02553523 | 1.402% | 60.584% | 50.108% | 35.208% |
+| random | clean_img_corrupt_aud/img2aud | control | 0.00992893 | 0.00992893 | 0.00992893 | 0.00992173 | 0.000% | 0.000% | 0.000% | 0.000% |
+| random | clean_img_corrupt_aud/img2aud | main | 0.00992893 | 0.00948503 | 0.00949385 | 0.00947565 | 4.471% | 69.320% | 43.870% | 36.930% |
+| random | clean_img_corrupt_aud/img2aud | no_causal | 0.00992893 | 0.00963809 | 0.00970579 | 0.00962232 | 2.929% | 56.320% | 44.900% | 32.520% |
+| random | corrupt_both/img2aud | control | 0.00991035 | 0.00991035 | 0.00991035 | 0.00990307 | 0.000% | 0.000% | 0.000% | 0.000% |
+| random | corrupt_both/img2aud | main | 0.00991035 | 0.00958097 | 0.00958426 | 0.00957182 | 3.324% | 66.230% | 41.860% | 35.290% |
+| random | corrupt_both/img2aud | no_causal | 0.00991035 | 0.00967829 | 0.00971518 | 0.00966431 | 2.342% | 53.890% | 42.540% | 30.780% |
+| random | corrupt_img_clean_aud/aud2img | control | 0.02826212 | 0.02826212 | 0.02826212 | 0.02824295 | 0.000% | 0.000% | 0.000% | 0.000% |
+| random | corrupt_img_clean_aud/aud2img | main | 0.02826212 | 0.02742097 | 0.02743745 | 0.02740010 | 2.976% | 71.240% | 51.800% | 38.860% |
+| random | corrupt_img_clean_aud/aud2img | no_causal | 0.02826212 | 0.02759958 | 0.02766430 | 0.02757850 | 2.344% | 63.980% | 52.830% | 37.240% |
+| random | corrupt_both/aud2img | control | 0.02618422 | 0.02618422 | 0.02618422 | 0.02615921 | 0.000% | 0.000% | 0.000% | 0.000% |
+| random | corrupt_both/aud2img | main | 0.02618422 | 0.02561142 | 0.02563057 | 0.02557729 | 2.188% | 67.280% | 49.940% | 36.370% |
+| random | corrupt_both/aud2img | no_causal | 0.02618422 | 0.02577683 | 0.02583198 | 0.02574490 | 1.556% | 59.950% | 51.150% | 34.860% |
+
+### 其它已计算指标和证据位置
+
+本次没有把所有原始 CSV 字段再复制成第二份独立文档；原始产物中的
+`psnr`、`aud_masked_l1`、`aud_visible_mse`、`aud_visible_l1`、`rec_std`、
+`tgt_std`、`top15_recall`、`pix_var`、`pair_l2`、训练 loss/LR、family breakdown
+和 demo 小样本统计仍按原始文件保留。它们的来源是：
+
+- `v11f_outputs_with_ckpt/outputs/outputs_v11f{,_control,_no_causal}/tables/`
+- `v11f_outputs_with_ckpt/outputs/outputs_v11f{,_control,_no_causal}/logs/`
+- `v11f_outputs_with_ckpt/outputs/outputs_v11f{,_control,_no_causal}/figures/`
+
+本日志已直接记录逐实验 fixed/random 主表和 Cross-Key normal/zero/wrong/
+same-class 对照；若某个字段未在主表中适用，必须按原始 CSV 的 `N/A` 和有效 n
+解释，不能把缺失值改写成 0。v11f 的独立消融结论与限制继续沿用本日志上一段
+“消融结论：v11f_no_causal”，不再另建结果说明文件。
+
+### 归档清理
+
+- 删除独立结果说明：`docs/V11F_EVALUATION.md`、`docs/V11F_METRICS_SUMMARY.md`。
+- 保留实验协议：`docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md`。
+- 评估结果正式入口：本文件的 v11f 评估条目；原始可复核证据入口：`outputs/`。
+
+## 运行说明
+
+后续评价直接在 `docs/dev_log.md` 追加当前版本条目，按“主实验、control、全部
+消融 × fixed/random × cue/family × 已计算指标”展开；不得再创建单独的
+`Vxx_EVALUATION.md` 或 `Vxx_METRICS_SUMMARY.md`。原始 CSV、日志和图片仍写入
+`outputs/`，但不把它们误称为独立结果报告。
+
+## 2026-09-10 文档目录清理
+
+按用户要求，删除两个版本专用的独立协议文件：
+
+- `docs/V11E_CATEGORY_BINDING_PROTOCOL.md`
+- `docs/V11F_MASKED_CROSS_KEY_PROTOCOL.md`
+
+其有效约束已并入 `docs/implementation.md`、`docs/idea_report.md`、
+`docs/user_requirements.md`，具体版本过程和评估归档继续写入本文件。以后除非
+用户明确要求，不创建版本专用协议或结果 Markdown；原始运行证据仍保留在
+`outputs/`。此前日志中对这些文件的路径引用属于历史记录，不改写。
+
+## 2026-09-10 v11f 文档闭环补档
+
+用户进一步明确：每个版本的最初方案和后续评估都必须写入现有核心文档，不能因为
+删除版本专用文件而只留下代码或零散路径。v11f 的当前权威入口现明确如下：
+
+- **最初方案与研究假设**：`docs/idea_report.md` 的“F 阶段补充：v11f”；
+- **最终实现与真实配置**：`docs/implementation.md` 的“当前版本 v11f”；
+- **完整评估与实验结论**：本文件前面的“2026-09-10 v11f 结果归档格式修订”
+  条目，其中包含 control、main、no_causal 的 fixed/random 主表、Cross-Key
+  normal/zero/wrong/same-class 配对表、有效 n、改善比例和限制；
+- **运行与验收规范**：`docs/user_requirements.md` 和上述 implementation 条目。
+
+本次补档没有创建新的 v11f 专用文件。此前日志中提到的已删除协议/评估文件路径
+保留为不可变历史记录；从本条起，后续版本只允许把方案写入
+`idea_report.md`/`implementation.md`，把验证和评估追加到 `dev_log.md`，并在
+进入下一版本前完成三处文档核对。
+
+## 2026-09-11 核心文档结构整理
+
+用户指出核心文档存在重复、旧版本说明混入当前方案和入口不清的问题。本次只整理
+文档，没有修改模型、配置、评估脚本或实验结果。
+
+- `docs/implementation.md` 重写为当前 v11f 的单一实现指南：只保留真实目录、当前
+  数据/target、tensor shape、前向路径、三组实验、评估口径、运行命令和历史索引。
+- `docs/idea_report.md` 增加文档导航，继续保留各版本研究设计；已废止的 GRID 等
+  方案只用于研究演进追溯，不作为当前运行入口。
+- `docs/GPT_HANDOFF.md` 更新为 v11f 快速交接页，只提供入口和运行要点，不复制独立
+  评估结果。
+- `docs/dev_log.md` 顶部项目概览改为当前 v11f；历史日志保持只追加原则，不改写
+  旧结论。当前评估结果的正式入口仍是本文件已有的 v11f 条目。
+- 本次没有创建版本专用 Markdown，也没有暂存 `_data/`、`outputs/`、checkpoint、
+  临时备份或其他未跟踪目录。
+
+验证：`git diff --check` 通过；当前实现文档中的配置文件、路径和 v11f 三组实验与
+仓库代码/配置一致。此次是文档整理，不应被解释为重新训练或重新评估。
+
+## 运行说明（当前 v11g）
+
+这是当前活动版本的唯一运行命令入口；前面各版本的“运行说明”只属于对应历史条目。
+
+```bash
+# 在项目根目录、已激活 GPU 环境中，顺序运行 main、control 和可选 no-causal
+nohup python -u scripts/run_v11g_suite.py --with_ablations > v11g_suite.log 2>&1 < /dev/null &
+tail -f v11g_suite.log
+
+# 只评估已有三组 checkpoint
+python -u scripts/run_v11g_suite.py --eval_only --with_ablations
+```
+
+单独运行、fixed/random、family breakdown 和 demo 命令见
+`docs/implementation.md` 第 6 节。当前分支 `configs/` 只使用三份 v11g YAML；本次
+没有上传本地数据、outputs、checkpoint、临时文件或旧版本配置。
+
+## 2026-09-11 v11g 版本迁移记录
+
+本次将已确定的 v11f 方案迁移为独立的 v11g 运行入口，不新增模型结构或未经验证
+的性能结论。v11g 继续使用 `v11e_control` 冻结父权重、Masked Feature Cross-Key、
+same-modal gated cue detail、`detach_value_for_recon=true`、30 轮训练、batch size
+128、severity 0.4 和五类 corruption family 均衡采样；main、control、no-causal
+三组配置的行为边界与 v11f 保持一致。
+
+当前待执行验证：
+
+- `python -u scripts/smoke_test_v11g.py --config configs/v11g.yaml`
+- `python -u scripts/run_v11g_suite.py --with_ablations`
+- 训练完成后使用 `python -u scripts/run_v11g_suite.py --eval_only --with_ablations`
+
+本条只记录版本入口和验收要求，尚无 v11g 训练或评估结果。实际完成后，必须在本
+文件继续追加 main、control、no-causal 各实验的全部指标、fixed/random 协议、有效 n、
+异常、限制、独立结论和 outputs 证据路径；不创建独立版本评估 Markdown。

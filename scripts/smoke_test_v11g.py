@@ -22,11 +22,11 @@ from models.frozen_base import (ADAPTER_PREFIXES, file_sha256, base_digest,
                                 verify_audio_normalization)
 from train import compute_losses, _build_train_optimizer, _checkpoint_payload
 from evaluate import eval_mode, _paired_cross_metrics
-from run_v11f_suite import build_jobs
+from run_v11g_suite import build_jobs
 
 
 def test_config_contract():
-    cfg = load_config("configs/v11f.yaml")
+    cfg = load_config("configs/v11g.yaml")
     pairing = cfg["data"]["pairing"]
 
     assert cfg["data"]["dataset"] == "mnist_fsdd"
@@ -46,7 +46,7 @@ def test_config_contract():
     assert cfg["index"]["input_schedule"] == "simultaneous"
     assert cfg["train"]["freeze_base"] and cfg["train"]["require_cuda"]
     assert cfg["cross_key_conditioning"]["mode"] == "masked_feature"
-    no_causal = load_config("configs/v11f_no_causal.yaml")
+    no_causal = load_config("configs/v11g_no_causal.yaml")
     assert not no_causal["cross_key_conditioning"]["causal_training"]["enabled"]
     assert no_causal["train"]["epochs"] == cfg["train"]["epochs"]
     return cfg
@@ -287,7 +287,7 @@ def main():
     parent_cfg["train"]["freeze_base"] = False
     parent_cfg["cross_key_conditioning"].update(enabled=False, mode="value_residual")
     parent = CrossModalSNN(parent_cfg).eval()
-    with tempfile.TemporaryDirectory(prefix="v11f-test-") as temp:
+    with tempfile.TemporaryDirectory(prefix="v11g-test-") as temp:
         path = args.parent or Path(temp) / "parent.pt"
         if args.parent is None:
             torch.save({"model": parent.state_dict(), "cfg": parent_cfg}, path)
@@ -301,12 +301,12 @@ def main():
         check_losses_and_eval(model)
         if args.cli:
             check_cli(cfg, model, path.resolve(), Path(temp))
-    jobs = build_jobs(["configs/v11f.yaml", "configs/v11f_control.yaml",
-                       "configs/v11f_no_causal.yaml"])
+    jobs = build_jobs(["configs/v11g.yaml", "configs/v11g_control.yaml",
+                       "configs/v11g_no_causal.yaml"])
     assert sum(c[0] == "scripts/train.py" for c, _ in jobs) == 2
     assert sum(c[0] == "scripts/demo_inference.py" for c, _ in jobs) == 6
     assert len({str(log) for _, log in jobs}) == len(jobs)
-    print("PASS suite order/configs; v11f regression complete (CPU, not GPU convergence)")
+    print("PASS suite order/configs; v11g regression complete (CPU, not GPU convergence)")
 
 
 if __name__ == "__main__":

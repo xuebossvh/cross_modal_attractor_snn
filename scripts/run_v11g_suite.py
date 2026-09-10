@@ -71,7 +71,7 @@ def run_job(command, logfile):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--with_ablations", action="store_true",
-                    help="Also train/evaluate v11f_no_causal from the same parent")
+                    help="Also train/evaluate v11g_no_causal from the same parent")
     ap.add_argument("--eval_only", action="store_true")
     ap.add_argument("--resume", action="store_true", help="Require existing training checkpoints")
     ap.add_argument("--severity", type=float, default=0.4)
@@ -79,9 +79,9 @@ def main():
                     help="Evaluation smoke limit only; never shortens training")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
-    configs = [PROJECT_ROOT / "configs/v11f.yaml", PROJECT_ROOT / "configs/v11f_control.yaml"]
+    configs = [PROJECT_ROOT / "configs/v11g.yaml", PROJECT_ROOT / "configs/v11g_control.yaml"]
     if args.with_ablations:
-        configs.append(PROJECT_ROOT / "configs/v11f_no_causal.yaml")
+        configs.append(PROJECT_ROOT / "configs/v11g_no_causal.yaml")
     jobs = build_jobs(configs, args.eval_only, args.resume, args.severity, args.max_batches)
     if args.dry_run:
         for command, logfile in jobs:

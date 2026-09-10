@@ -1,4 +1,4 @@
-# v11f: frozen v11e_control + masked decoder-feature Cross-Key.
+# v11g: frozen v11e_control + masked decoder-feature Cross-Key.
 # Self-contained config; missing modalities use train-set class medoids.
 seed: 1234
 device: cuda
@@ -95,7 +95,7 @@ decoder_pretrain:
   lambda_aud: 4.0
   lambda_aud_active: 1.0
   save_ckpt: true
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v11f_decoder_pretrain.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v11g_decoder_pretrain.pt
 dims:
   img_in: 784
   img_hidden: 256
@@ -296,7 +296,7 @@ data:
     manifest_dir: ''
     augment: null
 train:
-  output_version: v11f
+  output_version: v11g
   freeze_base: true
   require_cuda: true
   evaluation_only: false
@@ -318,8 +318,8 @@ train:
   start_epoch: 0
   trainable_prefixes: [img_cross_adapter., aud_cross_adapter.]
   save_milestone_epochs: []
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v11f.pt
-  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v11f.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v11g.pt
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v11g.pt
 eval:
   recovery_classification: true
   random_seed: 4321
@@ -351,4 +351,4 @@ validation:
     lambda_img: 1.0
     lambda_aud: 4.0
     lambda_pair: 0.0
-    lambda_cls: 0.5
+  lambda_cls: 0.5
