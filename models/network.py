@@ -7,7 +7,8 @@ import torch.nn.functional as F
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
 from .decoders import (ClassifierHead, ImageDecoder, ImageRefiner,
-                       AudioDecoder, AudioRefiner, MaskedCrossKeyAdapter)
+                       AudioDecoder, AudioRefiner, AudioLocalCueProjector,
+                       MaskedCrossKeyAdapter)
 from .lif import rate
 
 
@@ -186,6 +187,15 @@ class CrossModalSNN(nn.Module):
             start_hw=s.get("aud_decoder_start_hw", 4),
             refine_blocks=s.get("aud_decoder_refine_blocks", 0),
             refine_type=s.get("aud_refine_type", "plain"))
+        local_cfg = cfg.get("audio_local_cue", {}) or {}
+        self.use_audio_local_cue = bool(local_cfg.get("enabled", False))
+        if self.use_audio_local_cue:
+            self.audio_local_cue_projector = AudioLocalCueProjector(
+                int(s.get("aud_conv_ch2", 32)),
+                self.audio_decoder.feature_channels,
+                int(local_cfg.get("hidden_channels", 32)))
+        else:
+            self.audio_local_cue_projector = None
 
         refiner_cfg = cfg.get("audio_refiner", {})
         self.use_audio_refiner = refiner_cfg.get("enabled", False)
@@ -257,11 +267,17 @@ class CrossModalSNN(nn.Module):
         return self.classifier(mem["index_state"])
 
     def _decode_masked_cross(self, state, modality, key, cue, mask,
-                             source_missing_ratio, disabled):
+                             source_missing_ratio, disabled, local_cue=None):
         decoder = self.image_decoder if modality == "img" else self.audio_decoder
         adapter = self.img_cross_adapter if modality == "img" else self.aud_cross_adapter
         finalize = self._apply_image_refiner if modality == "img" else self._finalize_audio
         features = decoder.forward_features(state)
+        if (modality == "aud" and self.use_audio_local_cue
+                and self.audio_local_cue_projector is not None
+                and local_cue is not None):
+            local_cue = local_cue.detach()
+            features = features + self.audio_local_cue_projector(
+                local_cue, features.shape[-2:])
         coarse = decoder.decode_features(features)
         base = finalize(coarse, cue, mask)
         if disabled or not self.use_cross_key_conditioning or key is None or adapter is None:
@@ -523,6 +539,11 @@ class CrossModalSNN(nn.Module):
         strictly.
         """
         if self.audio_refiner_bypass:
+            if (self.refiner_visible_paste_back
+                    and aud_cue is not None and aud_mask is not None):
+                mask = aud_mask.to(
+                    device=decoder_aud.device, dtype=decoder_aud.dtype)
+                return mask * decoder_aud + (1.0 - mask) * aud_cue
             return decoder_aud
         if aud_cue is None or aud_mask is None:
             return decoder_aud
@@ -564,9 +585,10 @@ class CrossModalSNN(nn.Module):
                 self.img_encoder.forward_with_detail(x_img_cue))
         spike_aud_cue = None
         spike_aud_instance = None
+        spike_aud_local = None
         if x_aud_cue is not None:
-            spike_aud_cue, spike_aud_instance = (
-                self.aud_encoder.forward_with_detail(
+            spike_aud_cue, spike_aud_instance, spike_aud_local = (
+                self.aud_encoder.forward_with_local(
                     self._normalize_audio_for_encoder(x_aud_cue)))
 
         spike_img_tgt = None
@@ -600,6 +622,7 @@ class CrossModalSNN(nn.Module):
 
         img_detail = None
         aud_detail = None
+        aud_local_cue = None
         if self.use_detail_conditioning:
             batch = mem["index_state"].size(0)
             device = mem["index_state"].device
@@ -608,6 +631,8 @@ class CrossModalSNN(nn.Module):
                 spike_img_cue, self.cfg["dims"]["D_img"], batch, device, dtype)
             aud_detail = self._cue_detail_state(
                 spike_aud_cue, self.cfg["dims"]["D_aud"], batch, device, dtype)
+            if self.use_audio_local_cue and spike_aud_local is not None:
+                aud_local_cue = rate(spike_aud_local)
 
         img_key_rate = cross_key_img_rate_override
         if img_key_rate is None and mem.get("key_img") is not None:
@@ -678,7 +703,8 @@ class CrossModalSNN(nn.Module):
                 x_img_cue, img_cue_mask, aud_missing_ratio, disable_aud_to_img_cross)
             rec_aud, _, aud_stats = self._decode_masked_cross(
                 aud_dec_state, "aud", img_key_rate if x_img_cue is not None else None,
-                x_aud_cue, aud_cue_mask, img_missing_ratio, disable_img_to_aud_cross)
+                x_aud_cue, aud_cue_mask, img_missing_ratio, disable_img_to_aud_cross,
+                local_cue=aud_local_cue)
             out["recovered_img_coarse"] = coarse_img
             out["recovered_img"], out["recovered_aud"] = rec_img, rec_aud
             for direction, stats in (("aud_to_img", img_stats), ("img_to_aud", aud_stats)):

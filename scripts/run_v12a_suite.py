@@ -71,7 +71,7 @@ def run_job(command, logfile):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--with_ablations", action="store_true",
-                    help="Also train/evaluate v11g_no_causal from the same parent")
+                    help="Also train/evaluate v12a_no_causal from the same parent")
     ap.add_argument("--eval_only", action="store_true")
     ap.add_argument("--resume", action="store_true", help="Require existing training checkpoints")
     ap.add_argument("--severity", type=float, default=0.4)
@@ -79,9 +79,9 @@ def main():
                     help="Evaluation smoke limit only; never shortens training")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
-    configs = [PROJECT_ROOT / "configs/v11g.yaml", PROJECT_ROOT / "configs/v11g_control.yaml"]
+    configs = [PROJECT_ROOT / "configs/v12a.yaml", PROJECT_ROOT / "configs/v12a_control.yaml"]
     if args.with_ablations:
-        configs.append(PROJECT_ROOT / "configs/v11g_no_causal.yaml")
+        configs.append(PROJECT_ROOT / "configs/v12a_no_causal.yaml")
     jobs = build_jobs(configs, args.eval_only, args.resume, args.severity, args.max_batches)
     if args.dry_run:
         for command, logfile in jobs:
@@ -90,8 +90,11 @@ def main():
     for path in configs:
         cfg = load_config(path)
         parent = resolve_from_root(cfg["train"]["init_ckpt_path"])
-        if not parent.is_file() or file_sha256(parent) != cfg["train"]["parent_sha256"]:
-            raise RuntimeError(f"Missing or wrong frozen parent checkpoint: {parent}")
+        if cfg["train"].get("init_required", False) and not parent.is_file():
+            raise FileNotFoundError(f"Required parent checkpoint: {parent}")
+        expected_sha = cfg["train"].get("parent_sha256", "")
+        if expected_sha and (not parent.is_file() or file_sha256(parent) != expected_sha):
+            raise RuntimeError(f"Missing or wrong parent checkpoint: {parent}")
         if (args.resume or args.eval_only) and not cfg["train"].get("evaluation_only"):
             checkpoint = resolve_from_root(cfg["train"]["ckpt_path"])
             if not checkpoint.is_file():

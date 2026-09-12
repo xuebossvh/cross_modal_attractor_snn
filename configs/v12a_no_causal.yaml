@@ -1,0 +1,10 @@
+# Same v12a parent and architecture; remove only the causal loss.
+extends: v12a.yaml
+cross_key_conditioning:
+  causal_training:
+    enabled: false
+    loss_weight: 0.0
+train:
+  output_version: v12a_no_causal
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v12a_no_causal.pt
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v12a_no_causal.pt

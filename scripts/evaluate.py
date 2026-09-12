@@ -1,6 +1,6 @@
 """评估跨模态 SNN 联想记忆网络。
 
-对 8 种 cue 模式分别评估（推理时禁用 target；v11g 保留 Value + own detail，
+对 8 种 cue 模式分别评估（推理时禁用 target；v12a 保留 Value + own detail，
 对侧 Key 只在缺失区域调制 decoder 内部特征）：
     corrupt_img_only / corrupt_aud_only / corrupt_both
     clean_img_corrupt_aud / corrupt_img_clean_aud
@@ -12,12 +12,12 @@
     音频   MSE（recovered log-mel vs clean log-mel，[B,n_mels,n_frames]）
     多样性 像素方差 / 样本间 L2（检测是否塌缩成同一张图）
     音频塌缩诊断 rec/target 的 mean/std/max + top-k 能量召回（检测近黑图）
-    v11g 恢复内容类别一致性（冻结原模型代理，不是独立识别器）
+    v12a 恢复内容类别一致性（冻结原模型代理，不是独立识别器）
 
 评估协议（--protocol）：
     fixed_mask     论文主对照：固定 seed + 固定 corruption family + 同一套 mask，
                     保证不同版本在完全相同的残缺输入上可比。
-    legacy_random  v11g 按独立 random_seed 抽样 family/mask，用于鲁棒性抽查。
+    legacy_random  v12a 按独立 random_seed 抽样 family/mask，用于鲁棒性抽查。
 
 可选：--severity_curve 对 corrupt_* 模式扫描 severity，输出退化曲线。
 可选：--family_breakdown 按音频腐蚀 family 拆解 audio-only、clean-image assist 与 corrupt-both。
@@ -25,10 +25,10 @@
 可选：--cross_detail sweep 比较 correct/zero/same-class wrong-pair Detail。
 
 用法：
-    python -u scripts/evaluate.py --config configs/v11g.yaml --protocol fixed_mask
-    python -u scripts/evaluate.py --config configs/v11g.yaml --protocol legacy_random
-    python -u scripts/evaluate.py --config configs/v11g.yaml --protocol fixed_mask --family_breakdown
-    python -u scripts/evaluate.py --config configs/v11g.yaml --protocol fixed_mask --cross_key sweep
+    python -u scripts/evaluate.py --config configs/v12a.yaml --protocol fixed_mask
+    python -u scripts/evaluate.py --config configs/v12a.yaml --protocol legacy_random
+    python -u scripts/evaluate.py --config configs/v12a.yaml --protocol fixed_mask --family_breakdown
+    python -u scripts/evaluate.py --config configs/v12a.yaml --protocol fixed_mask --cross_key sweep
     python -u scripts/evaluate.py --max_batches 20 --severity_curve
 """
 
@@ -436,12 +436,12 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
               cross_key_mode="normal", cross_detail_mode="normal"):
     """按 cue 模式对应的恢复粒度 target 计算指标。
 
-    图像/音频指标均对照 select_targets：v11g 缺失模态使用 train medoid，
+    图像/音频指标均对照 select_targets：v12a 缺失模态使用 train medoid，
     存在的模态使用 clean sample。历史真实配对数据接口仅保留兼容。
 
     protocol=fixed_mask：每个 batch 用确定性 seed 重置 RNG，并使用固定 family，
         使任意模型在同一套 mask 上评估（masks 与模型无关，可跨版本对比）。
-    protocol=legacy_random：v11g 用独立 seed 随机抽样 family/mask。
+    protocol=legacy_random：v12a 用独立 seed 随机抽样 family/mask。
     """
     model.eval()
     n = 0
@@ -506,7 +506,7 @@ def eval_mode(model, loader, cfg, mode, device, severity, proto_img, proto_aud,
                 img_mode=fixed_img_mode, aud_mode=fixed_aud_mode,
                 return_masks=True)
         else:
-            # v11g random protocol samples families, independently of model work/RNG.
+            # v12a random protocol samples families, independently of model work/RNG.
             random_seed = cfg.get("eval", {}).get("random_seed")
             if random_seed is not None:
                 _reseed(int(random_seed) * 100000 + mode_idx * 10000 + bi)
@@ -819,7 +819,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11g.yaml")
+    ap.add_argument("--config", default="configs/v12a.yaml")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--random_seed", type=int, default=None)

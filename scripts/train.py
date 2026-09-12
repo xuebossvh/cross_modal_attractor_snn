@@ -1,7 +1,7 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v11g.yaml
+    python -u scripts/train.py --config configs/v12a.yaml
     python -u scripts/train.py --epochs 30
 """
 
@@ -405,6 +405,7 @@ def _set_decoder_pretrain_requires_grad(model, cfg, freeze_non_decoders=True):
     )
     decoder_prefixes = (
         "image_decoder.", "audio_decoder.",
+        "audio_local_cue_projector.",
         "img_detail_projector.", "aud_detail_projector.",
         "img_detail_gate.", "aud_detail_gate.",
     )
@@ -1416,7 +1417,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v11g.yaml")
+    ap.add_argument("--config", default="configs/v12a.yaml")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -1429,7 +1430,7 @@ def main():
         ap.error("This is a frozen reference; use evaluate.py, not train.py")
     if cfg["train"].get("require_cuda", False) and (
             not torch.cuda.is_available() or not str(cfg["device"]).startswith("cuda")):
-        raise RuntimeError("v11g requires CUDA for training; CPU fallback is disabled")
+        raise RuntimeError("v12a requires CUDA for training; CPU fallback is disabled")
     if frozen:
         required = cfg["train"]["ckpt_path" if args.resume else "init_ckpt_path"]
         if not required or not resolve_from_root(required).is_file():
@@ -1486,6 +1487,10 @@ def main():
     if init_ckpt and not args.resume:
         init_ckpt = str(resolve_from_root(init_ckpt))
         if os.path.isfile(init_ckpt):
+            expected_parent_sha = cfg["train"].get("parent_sha256", "")
+            if expected_parent_sha and file_sha256(init_ckpt) != expected_parent_sha:
+                raise RuntimeError(
+                    f"[init] parent checkpoint SHA256 mismatch: {init_ckpt}")
             state = torch.load(init_ckpt, map_location=device)
             if frozen:
                 load_frozen_parent(model, state, init_ckpt)

@@ -138,6 +138,28 @@ def _audio_decoder_stages(out_hw, start_hw=4):
     return int(round(math.log2(ratio)))
 
 
+class AudioLocalCueProjector(nn.Module):
+    """Project local encoder feature maps into the audio decoder feature space."""
+
+    def __init__(self, in_channels, out_channels, hidden_channels=32):
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, out_channels, 3, padding=1),
+        )
+        # Preserve the parent decoder exactly before v12a training.
+        nn.init.zeros_(self.body[-1].weight)
+        nn.init.zeros_(self.body[-1].bias)
+
+    def forward(self, local_cue, size):
+        projected = self.body(local_cue)
+        if projected.shape[-2:] != size:
+            projected = F.interpolate(
+                projected, size=size, mode="bilinear", align_corners=False)
+        return projected
+
+
 class AudioDecoder(nn.Module):
     """Audio decoder input state -> log-mel reconstruction [B, n_mels, n_frames]."""
 

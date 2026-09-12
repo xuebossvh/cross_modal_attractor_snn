@@ -71,7 +71,7 @@ def _deep_merge_config(base, override):
     return merged
 
 
-def load_config(path="configs/v11g.yaml", _seen=None):
+def load_config(path="configs/v12a.yaml", _seen=None):
     """Load YAML with an optional relative ``extends`` parent."""
     config_path = Path(path).resolve()
     seen = set() if _seen is None else set(_seen)

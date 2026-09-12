@@ -2,19 +2,71 @@
 > 创建时间：2026-07-07 | 当前用途：F 阶段迭代补充记录
 > 说明：本文件先记录当前 D-F 迭代中已经确认的实验设计，不回填完整 A/B/C 阶段长报告。
 > **纪律**：每次 F 阶段版本迭代（新配置、结构改动、消融设计）须同步更新本文件，与 `docs/implementation.md`（先写）和 `docs/dev_log.md`（后写）配套。
-> **文档导航**：本文记录研究问题、方案和预期实验；实际实现以 `docs/implementation.md` 为准；训练、评估和最终结论只追加到 `docs/dev_log.md`。当前版本为 `v11g`，带“已废止”标记的历史方案不属于当前运行入口。
+> **文档导航**：本文记录研究问题、方案和预期实验；实际实现以 `docs/implementation.md` 为准；训练、评估和最终结论只追加到 `docs/dev_log.md`。当前版本为 `v12a`，带“已废止”标记的历史方案不属于当前运行入口。
 
 ---
 
-## F 阶段补充：v11g（v11f 方案的可复现实验版本）
+## 当前设计顺序
 
-### 版本目的与研究问题
+本文顶部只保留这一条当前版本阅读顺序；下面的旧设计正文仍保留作为研究演进证据，
+但不再作为当前运行入口。完整实现看 `docs/implementation.md`，完整训练和评估结果
+看 `docs/dev_log.md`。
+
+### v11c
+
+AudioRefiner-free 稳定基线，记录 Cross-Key 与 decoder 恢复的基础取舍；结果见
+[`dev_log.md`](dev_log.md#evaluation-v11c)。
+
+### v11d
+
+固定伪配对与 Cross-Detail 历史对照，检验一一伪配对是否带来实例级跨模态细节；结果见
+[`dev_log.md`](dev_log.md#evaluation-v11d)。
+
+### v11e
+
+MNIST/FSDD 类别级 many-to-many 主线，检验类别绑定下的 Cross-Key 类别恢复；结果见
+[`dev_log.md`](dev_log.md#evaluation-v11e)。
+
+### v11f
+
+冻结父模型的 Masked Cross-Key，将恢复增益与 Index 分类状态隔离；结果见
+[`dev_log.md`](dev_log.md#evaluation-v11f)。
+
+### v11g
+
+v11f 的可复现实验入口，在相同父权重和预算下比较 causal；当前实现见
+[`implementation.md`](implementation.md#0-当前版本边界)。
+
+### v12a
+
+音频恢复优先修正版本：保留 `Value + gated own cue detail + Cross-Key`，但将音频
+可见区域原样回填，并把 Audio Encoder 的局部时频特征以零初始化的局部 cue 分支送入
+Audio Decoder。训练只允许更新音频 decoder、局部 cue 投影和必要的音频恢复模块，
+冻结 Encoder/Key/Index/Value/Classifier，避免恢复质量优化再次改变 Index basin。
+
+v12a 的验收重点是：可见区误差接近输入复制基线；缺失区 MSE/L1、时频梯度和能量
+召回改善；Cross-Key 仍只作用于缺失区；Index ACC 不低于 v11g control。由于 MNIST
+与 FSDD 是类别级绑定，Cross-Key 只能提供类别级音频条件，不能承诺从图像恢复某条
+录音的说话人和精确时序细节。
+
+当前活动版本是 `v12a`。只有 v12a 的配置和命令作为当前运行入口；v11c–v11g 的方案和
+结果仅用于按上面顺序追溯，不能把不同 target、配对或训练预算混成一条实验。
+
+## 历史设计记录（内容保留）
+
+<details>
+<summary>展开旧版本设计正文</summary>
+
+
+**历史设计：F 阶段补充：v11g（v11f 方案的可复现实验版本）**
+
+**历史设计：版本目的与研究问题**
 
 v11g 不引入新的模型假设，而是将已经确定的 v11f 方案整理为独立、可复现的
 版本入口。研究问题保持不变：在不让恢复 loss 通过 Value 影响 Index 的前提下，
 正确的对侧 Key 是否能只在目标缺失区域改善 decoder 恢复，同时保留类别吸引子。
 
-### 方案范围
+**历史设计：方案范围**
 
 1. 以 `v11e_control` 为冻结父模型，保留 v11f 的 Masked Feature Cross-Key、
    `Value + same-modal gated cue detail` 的 decoder 输入，以及 `detach_value_for_recon=true`。
@@ -25,7 +77,7 @@ v11g 不引入新的模型假设，而是将已经确定的 v11f 方案整理为
 4. 当前分支只提供 `v11g.yaml`、`v11g_control.yaml`、`v11g_no_causal.yaml`；
    v11f 配置和脚本留在 v11f 分支，不在本分支重复上传。
 
-### 预期验收
+**历史设计：预期验收**
 
 - v11g 与 v11f 的结构、父权重、关键超参数和训练边界一致，配置可独立解析。
 - zero intervention 输出应与冻结父模型一致；normal 应在缺失区域优于 zero，
@@ -37,9 +89,9 @@ v11g 不引入新的模型假设，而是将已经确定的 v11f 方案整理为
 
 ---
 
-## F 阶段补充：v11f（初始方案与实施后反馈）
+**历史设计：F 阶段补充：v11f（初始方案与实施后反馈）**
 
-### 初始问题与研究假设
+**历史设计：初始问题与研究假设**
 
 v11e 的全局 Cross-Key 对部分残缺的收益不稳定，而且恢复 loss 与类别吸引子
 共同优化时可能影响 Index basin。v11f 的问题被限定为：
@@ -51,7 +103,7 @@ v11e 的全局 Cross-Key 对部分残缺的收益不稳定，而且恢复 loss �
 样本细节；对侧 Key 只作为类别条件，在缺失区域调制 decoder feature。将 Cross-Key
 放在 decoder feature 而不是 Value 上，是为了把恢复实验与 Index 分类状态隔离。
 
-### 初始方法设计
+**历史设计：初始方法设计**
 
 1. 从已经训练完成的 `v11e_control` 出发，冻结 Encoder、Key、Index、Value、
    Classifier、原 Decoder/Refiner 以及 own-detail fusion。
@@ -66,7 +118,7 @@ v11e 的全局 Cross-Key 对部分残缺的收益不稳定，而且恢复 loss �
 6. 设置 `v11f_control`、`v11f` main、`v11f_no_causal` 三组，区分结构贡献和
    causal loss 贡献。control 是固定父模型，不宣称等预算重训。
 
-### 预设数据、维度与实验协议
+**历史设计：预设数据、维度与实验协议**
 
 - 图像为 MNIST `[1,28,28]`，音频为 FSDD `[64,64]` log-mel；仍是类别级
   many-to-many 绑定，不伪造 MNIST 样本与 FSDD 录音的一一实例对应。
@@ -79,7 +131,7 @@ v11e 的全局 Cross-Key 对部分残缺的收益不稳定，而且恢复 loss �
 - 评估分为 fixed_mask 和 legacy_random；同时执行 normal/zero/wrong/same-class
   Cross-Key 配对、family breakdown、恢复内容内部一致性和 fixed/random demo。
 
-### 预期验收条件
+**历史设计：预期验收条件**
 
 v11f 只有同时满足以下条件才算支持假设：
 
@@ -90,7 +142,7 @@ v11f 只有同时满足以下条件才算支持假设：
   训练预算变化；
 - gate、residual ratio 或 wrong 退化只能作为诊断，不能替代上述结果。
 
-### 实施后反馈
+**历史设计：实施后反馈**
 
 v11f 已按上述方案实现并完成 main/control/no_causal 的 fixed/random 评估。main
 四个双模态部分残缺方向相对 zero 的 masked MSE 降幅为 fixed `2.162%--4.453%`、
@@ -105,22 +157,22 @@ Cross-Key 的类别选择性仍弱；no_causal 在部分音频 SSIM/内容一致
 v11f 评估条目中；最终代码和真实配置写在 `docs/implementation.md`，本节保留
 最初方案与实施后判断。
 
-## F 阶段补充：v10c 实验设计
+**历史设计：F 阶段补充：v10c 实验设计**
 
-### 背景诊断
+**历史设计：背景诊断**
 
 v10b 已将音频残缺方式收窄到与 long audio inpainting 更一致的连续时间片段缺失，并通过 `fixed_mask` 协议完成评估。完整评估显示，v10b 的分类与图像恢复链路仍可工作，但音频恢复出现明显能量塌缩：`recovered_aud` 均值接近 0，`audSSIM` 约 0.13-0.14，top15% 能量召回接近随机水平。
 
 因此 v10c 不改变核心 CrossModalSNN 架构，而是修正训练协议，让训练任务与 fixed-mask 论文主评估更加一致，并降低 1 秒 FSDD 数字语音上的长缺失难度。
 
-### v10c 目标
+**历史设计：v10c 目标**
 
 1. 图像残缺训练与评估统一为 `occlusion`，不再训练时随机切换多个图像 family。
 2. 图像和音频主残缺强度的后期上限均设为 `0.4`，避免 `0.5` 在短语音和 28x28 图像上过难。
 3. decoder pretrain 从 8 轮增加到 25 轮，并加入固定 family 的 corrupt detail 输入，使 decoder 在进入主训练前见过 `occlusion` 图像 cue detail 和 `time_mask` 音频 cue detail。
 4. 主训练轮数设为 70 轮，给 25 轮预训练后的 binding/readout 阶段足够时间适应固定残缺协议。
 
-### 主要实验设置
+**历史设计：主要实验设置**
 
 | 项目 | v10b | v10c |
 |------|------|------|
@@ -132,7 +184,7 @@ v10b 已将音频残缺方式收窄到与 long audio inpainting 更一致的连�
 | decoder pretrain | 8 轮 clean target Value + detail dropout | 25 轮 clean target Value + fixed corrupt detail + masked audio loss |
 | 主训练 | 配置默认 50 轮，实际可覆盖 | 配置默认 70 轮 |
 
-### 预期观察指标
+**历史设计：预期观察指标**
 
 v10c 的优先目标不是单纯提高分类 ACC，而是修复音频恢复：
 
@@ -142,7 +194,7 @@ v10c 的优先目标不是单纯提高分类 ACC，而是修复音频恢复：
 - `aud_masked_mse`：在 `corrupt_aud_only` 和 `corrupt_both` 下应下降。
 - `ACC` 与图像 SSIM：应尽量保持 v10b 的可用水平。
 
-### 评估协议
+**历史设计：评估协议**
 
 v10c 主结论仍使用：
 
@@ -154,9 +206,9 @@ python -u scripts/evaluate.py --config configs/v10c.yaml --protocol fixed_mask -
 
 ---
 
-## F 阶段补充：v10d 实验设计
+**历史设计：F 阶段补充：v10d 实验设计**
 
-### 背景诊断
+**历史设计：背景诊断**
 
 v10c 在 v10b 基础上修正了训练协议（固定 `occlusion` 图像 family、severity 上限 0.4、25 轮 corrupt-aware decoder pretrain），但**未改动音频恢复模块结构**。对照《Deep Long Audio Inpainting》，v10c 仍缺少：
 
@@ -166,7 +218,7 @@ v10c 在 v10b 基础上修正了训练协议（固定 `occlusion` 图像 family�
 
 v10d 在 v10c 训练协议不变的前提下，首次落地 F3a/F3b/F4 框架，并做保守 cue 比例调整。v10d 修订版进一步对齐文献式 inpainting：**可见区 paste-back 到 aud_cue**，refiner 感受野加深，并补充归因消融配置。
 
-### v10d 目标
+**历史设计：v10d 目标**
 
 1. **F3a**：`AudioDecoder` refine 块改为 gated conv + dilation(1,2,4)（`snn.aud_refine_type: gated_dilated`），扩大缺失区感受野。
 2. **F3b**：启用谱图空间 `AudioRefiner`，输入 `[coarse_rec, aud_cue, mask]`，仅在缺失区修正；`visible_paste_back: true` 时 `final = mask*pred + (1-mask)*aud_cue`（文献式：缺失区补全 + 可见区原样保留 cue）。
@@ -174,7 +226,7 @@ v10d 在 v10c 训练协议不变的前提下，首次落地 F3a/F3b/F4 框架，
 4. **cue 比例**：相对 v10c 保守小幅调整（corrupt 60% / clean 40%），提高 corrupt-audio 训练占比。
 5. **归因可分离**：通过消融配置把「结构增益」与「cue 比例增益」分开测量。
 
-### 主要实验设置
+**历史设计：主要实验设置**
 
 | 项目 | v10c | v10d |
 |------|------|------|
@@ -199,7 +251,7 @@ v10d 在 v10c 训练协议不变的前提下，首次落地 F3a/F3b/F4 框架，
 
 其余训练协议与 v10c 相同：`occlusion` 图像、`time_mask` 音频、severity 0.4、decoder pretrain 25 轮、主训练 70 轮、`lambda_aud_masked: 1.0`。
 
-### 归因消融设计
+**历史设计：归因消融设计**
 
 v10d 同时改了结构与 cue 比例，**主结论不能单独归因于 refiner**。须跑以下对照：
 
@@ -215,7 +267,7 @@ v10d 同时改了结构与 cue 比例，**主结论不能单独归因于 refiner
 2. `v10d_ablation_refiner_off` → `v10d`：在**相同比例与 decoder** 下看 refiner + paste-back 后处理路径的合并增量。
 3. `v10c` → `v10d`：端到端总增益（结构 + 比例 + refiner，**不可单独归因**）。
 
-### 预期观察指标
+**历史设计：预期观察指标**
 
 v10d 优先改善**缺失区**音频恢复（paste-back 会使可见区指标趋近完美，不宜作为主对照）：
 
@@ -226,14 +278,14 @@ v10d 优先改善**缺失区**音频恢复（paste-back 会使可见区指标趋
 - `top15%召回`：应高于 v10c。
 - **分类 ACC**（fixed_mask）：底线不破——`corrupt_aud ≥95%`、`corrupt_both ≥98%`、`clean_both ≥99%`。
 
-### 风险与边界（实验表述口径）
+**历史设计：风险与边界（实验表述口径）**
 
 1. **不是完整文献 inpainting 系统**：仍是 cross-modal attractor SNN；refiner 只修正缺失区，记忆主干（Key/Index/Value）不变。
 2. **refiner 未预训练**：主训练阶段从零学习，不是「预训练好的 inpainting refiner」。
 3. **demo 与 evaluate 对齐（v10e P0-A）**：`fixed_mask` / `legacy_random` 均透传 `aud_mask` 至 `forward(aud_cue_mask=...)`；demo 指标基于最终 `recovered_aud`；图内展示 `audio mask` 与 `coarse audio` 列。
 4. **F4 默认关闭**：后续若打开 `lambda_aud_feat` 等，须单独消融，且 encoder 已严格冻结（梯度不进 aud_encoder）。
 
-### 评估协议
+**历史设计：评估协议**
 
 v10d 主结论使用：
 
@@ -248,13 +300,13 @@ python -u scripts/evaluate.py --config configs/v10d_ablation_v10c_ratio.yaml --p
 python -u scripts/evaluate.py --config configs/v10d_ablation_refiner_off.yaml --protocol fixed_mask --family_breakdown
 ```
 
-## F 阶段补充：v10e 实验设计
+**历史设计：F 阶段补充：v10e 实验设计**
 
-### 背景诊断
+**历史设计：背景诊断**
 
 v10d 只把音频分支改成 inpainting 形式：音频有残缺 cue 和 `aud_mask` 时走 `AudioRefiner + visible paste-back`，而图像分支仍由 `ImageDecoder` 整图重建。这样在 `corrupt_img_only` 和 `corrupt_both` 下，图像可见区域没有被显式保留，图像恢复口径与音频不对称。
 
-### v10e 目标
+**历史设计：v10e 目标**
 
 1. 图像分支新增 `ImageRefiner`，输入 `[coarse_img, img_cue, img_mask]`，只在图像 cue 残缺且 mask 存在时启用。
 2. 图像最终输出采用 `final_img = img_mask * pred_img + (1-img_mask) * img_cue`，使可见区原样保留，缺失区由模型补洞。
@@ -262,7 +314,7 @@ v10d 只把音频分支改成 inpainting 形式：音频有残缺 cue 和 `aud_m
 4. 缺失模态不启用 refiner：该模态没有 cue 和 mask，只能由 attractor memory 联想/生成。
 5. 评估和可视化同时给出图像/音频 masked 指标，避免全图/全谱指标被 paste-back 抬高后误解。
 
-### v10e 关键对照口径
+**历史设计：v10e 关键对照口径**
 
 | cue mode | 图像路径 | 音频路径 |
 |------|------|------|
@@ -273,7 +325,7 @@ v10d 只把音频分支改成 inpainting 形式：音频有残缺 cue 和 `aud_m
 | `clean_aud_only` | 图像无 cue，只能 category-level 联想 | 音频 clean cue，无 mask，不启用 refiner |
 | `clean_both` | 双模态 clean cue，无 mask，不启用 refiner | 双模态 clean cue，无 mask，不启用 refiner |
 
-### 预期观察指标
+**历史设计：预期观察指标**
 
 - `img_masked_mse`：v10e 图像补洞主指标，应优先用于评价 `corrupt_img_only/corrupt_both`。
 - `img_visible_mse`：paste-back sanity check，开启后应接近 0；不作为主结论。
@@ -282,20 +334,20 @@ v10d 只把音频分支改成 inpainting 形式：音频有残缺 cue 和 `aud_m
 
 `legacy_random` 仅作泛化参考，不作为论文主对齐结论。论文主对照指标只引用 `paper_aligned_time_gap`（`time_mask`）组的 masked 指标。
 
-## F 阶段补充：v10f 实验设计（归因补齐）
+**历史设计：F 阶段补充：v10f 实验设计（归因补齐）**
 
-### 背景
+**历史设计：背景**
 
 v10e 已具备对称 Image/Audio Refiner + paste-back，但 v10d 消融显示全谱指标可能被 paste-back 抬高；且 refiner 在主训阶段从零学习、pretrain 未对齐 refiner 路径，难以拆分「贴回 vs delta 修正 vs pretrain vs lr_mult」的贡献。
 
-### v10f 目标
+**历史设计：v10f 目标**
 
 1. 抽出 refiner helper，统一 train/eval/pretrain 的 final 合成路径。
 2. refiner-aware decoder pretrain（可选，主配置开启）；关闭该开关的消融必须直接使用 coarse decoder 输出，不能把冻结 refiner 放进 pretrain 前向；主训 refiner 使用 `lr_mult=0.5`。
 3. evaluate 默认输出 coarse→final masked/visible 指标 + `[归因]` 表。
 4. paste-back 分离消融：`pasteback_off`（无可见区贴回）、`pasteback_only`（仅贴回无 delta）、`no_refiner_pretrain`（拆 pretrain 贡献）。
 
-### 关键解读口径（锁定）
+**历史设计：关键解读口径（锁定）**
 
 | 指标 | 用途 |
 |------|------|
@@ -305,7 +357,7 @@ v10e 已具备对称 Image/Audio Refiner + paste-back，但 v10d 消融显示全
 | `*_visible_mse`（final） | paste-back sanity；≈0 **不代表**可见区学习 |
 | full vs pasteback_only masked 差距 | delta refiner 的洞内贡献 |
 
-### 消融矩阵
+**历史设计：消融矩阵**
 
 | 配置 | 作用 |
 |------|------|
@@ -316,7 +368,7 @@ v10e 已具备对称 Image/Audio Refiner + paste-back，但 v10d 消融显示全
 | `v10f_ab_image_pasteback_only` | 图像仅 paste-back（推荐） |
 | `v10f_ab_no_refiner_pretrain` | 结构/lr_mult 同主配置，关 refiner pretrain；pretrain 阶段直接以 coarse decoder 输出计算重建损失 |
 
-### v10f 鲁棒性协议补丁：5-family corruption
+**历史设计：v10f 鲁棒性协议补丁：5-family corruption**
 
 为增强鲁棒性，v10f 在保留 refiner/paste-back 归因结构的前提下，把主训练和 fixed-mask 主评估从单一 `occlusion/time_mask` 扩展为 image/audio 各 5 种带 mask 的缺失 family。
 
@@ -332,13 +384,13 @@ v10e 已具备对称 Image/Audio Refiner + paste-back，但 v10d 消融显示全
 3. demo fixed-mask 可视化使用 10 个样本，每个 family 2 个样本，不允许音频或图像残缺退回 clean cue。
 4. Gaussian 噪声暂不纳入主 5 family。原因是当前 Image/AudioRefiner 与 paste-back 依赖 `mask=1` 的缺失语义；Gaussian 是全域连续扰动，不天然对应“洞”。`salt_mask` 已作为带 mask 的白色缺失 family 纳入主协议，但它不是严格的 Gaussian denoising；若研究 noisy restoration，应作为单独 denoising 扩展实验。
 
-## F 阶段补充：v11a 实验设计（跨模态辅助恢复基线）
+**历史设计：F 阶段补充：v11a 实验设计（跨模态辅助恢复基线）**
 
-### 背景诊断
+**历史设计：背景诊断**
 
 v10f 的 `time_mask` 评估中，`corrupt_aud_only` 到 `corrupt_both` 的分类 ACC 明显提高，但 `audMaskMSE` 基本不变。该结果不能直接解释为“图像对音频恢复无效”，因为原 `corrupt_both` 同时破坏图像和音频，而且两种模式未显式保证复用同一音频 mask。与此同时，v10f 五个音频 family 平衡采样使 `time_mask` 只占全部主训练 batch 的约 9%，其专项结果较 v10e 退化；`partial_temporal` 固定遮挡张量尾部，又可能只遮到 FSDD 的 padding/silence。
 
-### v11a 目标
+**历史设计：v11a 目标**
 
 1. 新增 `clean_img_corrupt_aud`，在完全相同的残缺音频上比较“无图像”与“增加 clean 图像”对分类、coarse audio 与 final audio 的影响。
 2. 对称新增 `corrupt_img_clean_aud`，比较 clean 音频是否帮助残缺图像恢复。
@@ -346,7 +398,7 @@ v10f 的 `time_mask` 评估中，`corrupt_aud_only` 到 `corrupt_both` 的分类
 4. 将 `partial_temporal` 改为 active-aware trailing mask，使缺失区覆盖真实语音尾部而不是固定长度张量的静音尾部。
 5. 在既有 masked L1/MSE 上增加缺失区 energy-weighted MSE，防止大量低能量像素主导优化。
 
-### 8 种 cue mode 与目标
+**历史设计：8 种 cue mode 与目标**
 
 | cue mode | image cue | audio cue | image target | audio target | 用途 |
 |---|---|---|---|---|---|
@@ -359,18 +411,18 @@ v10f 的 `time_mask` 评估中，`corrupt_aud_only` 到 `corrupt_both` 的分类
 | `clean_aud_only` | absent | clean | category | sample | 音频单模态 clean 基线 |
 | `clean_both` | clean | clean | sample | sample | 双模态 clean 上限参考 |
 
-### 关键比较与判据
+**历史设计：关键比较与判据**
 
 1. 图像是否帮助音频：比较 `corrupt_aud_only` 与 `clean_img_corrupt_aud`，要求同一音频样本、同一 audio family、同一 `aud_mask`。主指标为 `aud_coarse_masked_mse`、`aud_masked_mse` 与 ACC。
 2. 音频是否帮助图像：比较 `corrupt_img_only` 与 `corrupt_img_clean_aud`，要求同一图像样本、同一 image family、同一 `img_mask`。主指标为 `img_coarse_masked_mse`、`img_masked_mse` 与 ACC。
 3. `corrupt_both` 继续作为双残缺鲁棒性实验，但不再承担“clean 第二模态是否提供帮助”的单独归因。
 4. `partial_temporal` 的 MaskMSE 必须结合缺失区 target energy 解读；若 active-aware 后仍接近 0，需检查样本本身是否近静音，不能直接宣称恢复完美。
 
-### 本轮边界
+**历史设计：本轮边界**
 
 v11a 基线首轮只建立公平输入与训练基线，不把 image key/index 直接注入 AudioRefiner，也不把 audio key/index 直接注入 ImageRefiner。后续 0.8 补丁仍不注入 Refiner，而是在 Decoder 前加入对侧 Key 条件 residual；是否有效必须由下方 normal/zero/wrong 配对 maskedMSE 判据决定。
 
-### v11a 后续补丁：对侧 Key 条件化 Decoder
+**历史设计：v11a 后续补丁：对侧 Key 条件化 Decoder**
 
 用户确认在现有 v11a 分支继续实现跨模态条件注入。结构选择为 **Key-conditioned Value residual**，而不是 Key 直接输入 Refiner：
 
@@ -391,13 +443,13 @@ v11a 基线首轮只建立公平输入与训练基线，不把 image key/index �
 
 公平实验采用同版本 control：`v11a.yaml` 开启 cross conditioning，`v11a_control.yaml` 关闭前向条件路径但仍构造相同 projector/gate 参数；两者必须使用相同 seed、模型构造顺序、训练预算和除 cross path 开关外的全部设置。这样可避免“少构造四个 Linear 导致后续 Decoder/Refiner 初始化随机数错位”的混杂。若使用已有 v11a checkpoint 做快速续训，control 与 enabled 必须从同一 checkpoint 出发并训练相同轮数；论文主结果仍需同预算训练。
 
-## F 阶段补充：v11b 恢复稳定化与 Cross-Key 因果训练
+**历史设计：F 阶段补充：v11b 恢复稳定化与 Cross-Key 因果训练**
 
-### v11a 结果诊断
+**历史设计：v11a 结果诊断**
 
 同为 120 轮的 v11a 与同构 control 在音频 family 上得到几乎逐项相同的 `audMaskMSE`，并同时出现 clean audio SSIM 约 0.14--0.17、coarse audio 低能量的问题。由此不能把音频退化归因于 Cross-Key；共同训练目标才是优先排查对象。当前 `energy-weighted masked MSE` 用 mask 像素数而非加权 mask 总和作分母，会同时改变洞内关注与整体梯度尺度；主训练又只监督 paste-back 后的 final audio，没有直接约束 `recovered_aud_coarse`。Cross-Key residual 虽有非零 gate 与 norm ratio，但 correct/zero/wrong 配对 maskedMSE 基本不变，说明 Decoder 可忽略该条件。
 
-### v11b 目标与边界
+**历史设计：v11b 目标与边界**
 
 1. 先在 Cross-Key 关闭时恢复可用 coarse audio，避免将“基础重建塌缩”误判为“跨模态条件无效”。
 2. 将 weighted masked MSE 改为按 `sum(weight * mask)` 归一化，使其只重分配缺失区权重；主恢复配置先关闭该项，再用独立分支验证。
@@ -407,7 +459,7 @@ v11a 基线首轮只建立公平输入与训练基线，不把 image key/index �
 
 MNIST 与 FSDD 配对只共享数字标签，不共享说话人、音高、时序或笔迹风格。v11b 对 Cross-Key 的合理主张是“在严重缺失下提供类别语义消歧”，而不是从图像恢复特定说话人细节、或从音频恢复特定 MNIST 笔迹。sample-level MaskMSE 仍是恢复主指标，但必须同时报告 correct/zero/wrong Key 的差值；只有 gate 非零不能构成跨模态贡献证据。
 
-### 五实验分叉
+**历史设计：五实验分叉**
 
 共享 decoder pretrain 25 轮；主训练先完成 100 轮 Recovery trunk，再按下表分叉。所有分支复用同一恢复 checkpoint，不重复预训练。
 
@@ -421,7 +473,7 @@ MNIST 与 FSDD 配对只共享数字标签，不共享说话人、音高、时�
 
 恢复 checkpoint 的“选择”必须在训练前固定判据：优先比较 4-family audio MaskMSE、time-mask MaskMSE、clean audio SSIM 与 coarse energy；不得看到最终 Cross-Key 结果后反向选择。若希望论文级严格比较，三条 30 轮分支使用相同 seed、batch 顺序、mask 和 scheduler 位置，并记录父 checkpoint 哈希。
 
-### 损失设计
+**历史设计：损失设计**
 
 归一化 weighted masked MSE：
 
@@ -443,16 +495,16 @@ L_cross = relu(E_correct - E_zero + margin)
 
 Recovery 在第 100 轮额外保存包含 model、optimizer、scheduler 与 epoch 的里程碑 checkpoint。`v11b_weighted` 必须从该完整状态继续 20 轮，使其与 recovery 后 20 轮只相差 weighted loss。三个 Cross-Key 分支从选定的第 120 轮 checkpoint 只加载 model，统一重建固定低学习率 optimizer，并冻结 Encoder、Memory 与 Refiner；仅 Decoder 和 Cross-Key adapter 可训练。这样三分支共享完全相同的父模型与微调预算。
 
-### 验收标准
+**历史设计：验收标准**
 
 1. Recovery 阶段第 30 轮检查：clean audio SSIM 应超过 0.5、time-mask MaskMSE 应低于 0.018、coarse audio 不得持续近黑；否则停止长训练并回到 F-1。
 2. 完整 Recovery 目标：time-mask MaskMSE 不高于 0.010，4-family audio MaskMSE 接近 v10f 的 0.005--0.007，clean audio SSIM 高于 0.80。
 3. Cross-Key 目标：enabled 优于同预算 control；同一 checkpoint 内 `E_correct < E_zero` 且 `E_correct < E_wrong`，建议至少达到 5% 相对 maskedMSE 改善。评估额外加入 same-class different-sample Key：若其结果接近 correct，说明路径主要提供类别语义；若显著更差，才支持 Key 含有可迁移的实例信息。
 4. `partial_temporal` 保留 active-aware 语义并单独报告，不与 v10f 静音尾部版本直接作强纵向比较。
 
-## F 阶段补充：v11c AudioRefiner-free 稳定基线
+**历史设计：F 阶段补充：v11c AudioRefiner-free 稳定基线**
 
-### 结果动机
+**历史设计：结果动机**
 
 v11b 五组实验共同表明：新增 coarse audio 监督已经把四个非
 `partial_temporal` family 的 coarse MaskMSE 恢复到约 `0.0071`，但外置
@@ -461,7 +513,7 @@ AudioRefiner 将 final 恶化到约 `0.0225`；五 family 则约为
 causal Cross-Key 中一致，demo 也显示多个缺失区的 final 比 coarse 更接近零能量。
 因此下一轮首先移除这一后处理混杂，再判断对侧 Key 是否影响 Decoder coarse。
 
-### v11c 假设
+**历史设计：v11c 假设**
 
 1. AudioDecoder 内部 gated/dilated refinement 已能形成可用 coarse audio；外置
    AudioRefiner 在当前训练目标下产生负增益，不应继续作为默认 final 路径。
@@ -472,7 +524,7 @@ causal Cross-Key 中一致，demo 也显示多个缺失区的 final 比 coarse �
 4. 本轮结论是“当前 AudioRefiner 暂时停用”，不是证明该结构永久无效；历史 v10f
    仍观察到过正向 refiner 增益，后续可在稳定 coarse 上单独重训。
 
-### 实验设计
+**历史设计：实验设计**
 
 为保持与 v11b 的严格可比性，AudioRefiner 模块仍构造以 strict 加载共同父模型，
 但通过 `bypass=true` 禁止前向并冻结参数。`v11c_control` 与 `v11c` 都从
@@ -490,16 +542,16 @@ aud_coarse_mask_mse` 且 final visible MSE 约为 0；再要求 v11c 相对 cont
 `E_correct < E_zero`、`E_correct < E_wrong`。若仍无差异，应停止扩大 Cross-Key，
 把结果表述为当前配对数据只提供类别语义、不能恢复音频实例细节。
 
-## F 阶段补充：v11c / v11d / v11e 仓库评价与后续路线
+**历史设计：F 阶段补充：v11c / v11d / v11e 仓库评价与后续路线**
 
-### 评价边界
+**历史设计：评价边界**
 
 本节根据仓库中的远端分支 `origin/v11c`、`origin/v11d` 与 `origin/v11e`
 进行方法与实验设计评价。当前本地 `outputs/` 未包含 v11c/v11d/v11e 的评估
 日志或 checkpoint，因此以下内容不是数值实验结论，而是下一轮实验前的设计
 诊断与归因口径整理。
 
-### v11c：AudioRefiner-free 稳定基线
+**历史设计：v11c：AudioRefiner-free 稳定基线**
 
 v11c 的合理性在于先去掉 v11b 中已经被诊断为负贡献的外置 AudioRefiner：
 配置仍构造 `AudioRefiner` 以兼容父 checkpoint，但 `audio_refiner.bypass=true`
@@ -521,7 +573,7 @@ Cross-Key enabled 是否优于同父 checkpoint 的 disabled control？
 如果 v11c 仍然不能形成稳定 Cross-Key 贡献，则说明对侧 Key 在 MNIST/FSDD
 配对任务中主要提供类别语义，而不是可迁移的实例细节。
 
-### v11d：固定伪配对与 Cross-Detail
+**历史设计：v11d：固定伪配对与 Cross-Detail**
 
 v11d 在 v11c 的基础上新增两项：固定一一伪配对和 Cross-Detail。固定配对使每个
 MNIST item 对应一个确定的 FSDD 基础录音及确定性增强种子，并返回稳定 `pair_id`。
@@ -557,7 +609,7 @@ v11d 的结果解释必须遵守以下口径：
 3. 若 same-class wrong 与 correct 接近，则说明模型主要使用类别线索，不能宣称
    恢复了配对实例细节。
 
-### v11e：真实 GRID 视听配对主线（已废止历史方案）
+**历史设计：v11e：真实 GRID 视听配对主线（已废止历史方案）**
 
 v11e 是当前更值得作为主线的版本。它把数据域改为 GRID，同一 manifest row 包含
 一次真实 utterance 的音频与视频帧；图像输入是 28x28 rank-pooled mouth-motion
@@ -587,7 +639,7 @@ v11e 需要特别注意一个实验设计风险：主配置的 validation score 
 2. 或统一 best checkpoint 的选择指标，再比较 main/control；
 3. 或明确声明 best 选择标准不同，仅将其作为模型内选择，不作强因果对照。
 
-### 后续路线建议
+**历史设计：后续路线建议**
 
 v11c 是必须补齐的稳定基线；v11d 适合作为伪配对负结果或机制审计；v11e 才是
 回答真实跨模态实例联想问题的主线。建议后续优先顺序为：
@@ -602,12 +654,12 @@ v11c 是必须补齐的稳定基线；v11d 适合作为伪配对负结果或机�
    pair Recall@1、ACC 与 masked MSE，并在 `docs/dev_log.md` 为每个配置写独立
    结论。
 
-## F 阶段修订：v11e 回归 MNIST/FSDD 类别级绑定
+**历史设计：F 阶段修订：v11e 回归 MNIST/FSDD 类别级绑定**
 
 > 本节覆盖上文“v11e 真实 GRID 视听配对主线”的当前实现建议。GRID 方案保留为
 > 独立的真实配对后续实验，不再占用 `v11e` 当前版本号。
 
-### 修订原因
+**历史设计：修订原因**
 
 项目的原始研究对象是 MNIST 手写数字与 FSDD spoken digit 的跨模态类别联想。
 两种数据只共享 digit label，不包含天然的一一实例对应。将任意 MNIST 样本与任意
@@ -618,7 +670,7 @@ FSDD 样本固定为 `sample/sample`，会把笔迹、说话人、语速和音�
 标签为 `c` 的训练录音组合；训练时音频从同类池随机抽取，不建立稳定 `pair_id`。
 绑定对象是共享的类别吸引子，而不是人工指定的跨模态实例。
 
-### 恢复目标
+**历史设计：恢复目标**
 
 | cue 类型 | image target | audio target | 科学含义 |
 |---|---|---|---|
@@ -631,7 +683,7 @@ FSDD 样本固定为 `sample/sample`，会把笔迹、说话人、语速和音�
 配置关闭 Cross-Detail、exact-pair alignment 及其 causal objective，因为这些模块
 原先依赖真实实例对应；`v11e_control` 改为关闭 Cross-Key 的同预算对照。
 
-### 数据量与解释边界
+**历史设计：数据量与解释边界**
 
 标准 MNIST 包含 60,000 个训练样本和 10,000 个测试样本。当前完整 FSDD 包含
 3,000 条录音；按文件 index 规则划分为 2,700 条训练录音和 300 条测试录音，即
@@ -643,3 +695,5 @@ FSDD 样本固定为 `sample/sample`，会把笔迹、说话人、语速和音�
 train/test 按 utterance index 而非 speaker 隔离。正式结论应限制为 FSDD 范围内的
 类别联想；若要强调说话人泛化，需要另设 speaker-disjoint 实验或引入更大的 spoken
 digit 数据集。
+
+</details>

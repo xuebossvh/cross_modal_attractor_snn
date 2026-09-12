@@ -153,6 +153,11 @@ class AudioSNNEncoder(nn.Module):
 
     def forward_with_detail(self, x_aud):
         """返回最终 Key 脉冲及 Key 前一层的实例细节脉冲。"""
+        key_spikes, instance_spikes, _ = self.forward_with_local(x_aud)
+        return key_spikes, instance_spikes
+
+    def forward_with_local(self, x_aud):
+        """返回 Key、实例细节及卷积局部时频脉冲。"""
         if self.encoder_type == "conv":
             x = x_aud.unsqueeze(1)
             xt = self._encode_input_4d(x)
@@ -161,7 +166,7 @@ class AudioSNNEncoder(nn.Module):
             flat = s2.reshape(self.T, x_aud.size(0), -1)
             s3, _ = self.l3(flat)
             s4, _ = self.l4(s3)
-            return s4, s3
+            return s4, s3, s2
 
         x = x_aud.reshape(x_aud.shape[0], -1)
         if self.encoding == "poisson":
@@ -170,7 +175,7 @@ class AudioSNNEncoder(nn.Module):
             xt = _to_time(x, self.T)
         s1, _ = self.l1(xt)
         s2, _ = self.l2(s1)
-        return s2, s1
+        return s2, s1, None
 
     def forward(self, x_aud):
         key_spikes, _ = self.forward_with_detail(x_aud)

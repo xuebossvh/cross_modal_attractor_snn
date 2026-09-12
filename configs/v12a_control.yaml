@@ -1,0 +1,17 @@
+# v11g parent reference: evaluation only, not a new training run.
+extends: v12a.yaml
+audio_refiner:
+  visible_paste_back: false
+audio_local_cue:
+  enabled: false
+cross_key_conditioning:
+  enabled: false
+  build_feature_modules: false
+  causal_training:
+    enabled: false
+train:
+  output_version: v12a_control
+  evaluation_only: true
+  trainable_prefixes: []
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v11g.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v11g.pt
