@@ -157,6 +157,12 @@ Key 只作诊断，不能作为负样本。v12a 的 `freeze_base=false` 仅表�
 结论，训练轮数、seed、mask 或 target 不一致时不能作强因果比较。完整结果直接追加到
 `docs/dev_log.md`，原始 CSV/log/PNG 只作为 `outputs/` 证据。
 
+Demo 抽样规则：`scripts/demo_inference.py` 的小样本只用于可视化，不参与全测试集指标。
+它必须使用固定 seed 从完整 test dataset 生成不重复的随机索引，再抽取 `--num` 个样本，
+不得直接取第一个 batch。seed 按 `eval.demo_seed`、`eval.random_seed`、顶层 `seed` 的顺序
+回退；日志必须记录实际使用的 seed 和样本索引。相同版本、数据集和 seed 应得到相同样本；
+`fixed_mask` 与 `legacy_random` 只改变 corruption protocol，不改变抽样样本。
+
 ### 5.1 结果展示与归档
 
 v11c 至 v11g 的统一评估入口为 [本地结果汇总](dev_log.md#evaluation-format-20260912)：

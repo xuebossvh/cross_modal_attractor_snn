@@ -15592,9 +15592,9 @@ random 不与 fixed 混算；表中整行 N/A 表示该实验未找到 random �
 - 仅修改三份核心文档：`dev_log.md`、`implementation.md`、`user_requirements.md`。
   未改模型、配置、原始 CSV/日志/图片、checkpoint，未重跑模型、未提交或推送。
 
-## 当前运行说明
+#### 历史运行说明（v11g，已归档）
 
-本次仅整理文档，运行命令未变；必须在项目根目录、激活对应 GPU 环境后执行。旧版本命令仍在各历史分支，不要使用当前 v11g 代码重跑旧权重来冒充原实验。
+本段是 v11g 历史运行说明，已归档；必须在项目根目录、激活对应 GPU 环境后执行。旧版本命令仍在各历史分支，不要使用当前 v12a 代码重跑旧权重来冒充原实验。
 
 ```bash
 # 主实验、control 和 no_causal 的顺序训练与评估
@@ -15605,7 +15605,7 @@ tail -f v11g_suite.log
 python -u scripts/run_v11g_suite.py --eval_only --with_ablations
 ```
 
-完整命令见 [实现指南](implementation.md#6-运行命令)。本次未执行这些命令，也未修改原始结果或上传 checkpoint。
+完整命令见 [实现指南](implementation.md#6-运行命令)。本段不属于当前 v12a 运行入口。
 
 ## 2026-09-13 v12a 实现记录
 
@@ -15646,3 +15646,136 @@ python -u scripts/run_v12a_suite.py --eval_only --with_ablations
 
 本次没有上传 `_data/`、`outputs/`、日志、临时目录或 v11g 旧配置；训练和评估结果待
 后续直接追加到本日志的 v12a 条目中。
+
+## 2026-09-13 v12a 评估归档
+
+**评估性质：** 审阅本地已完成的服务器产物，未在当前 CPU 工作站重复跑完整套件。
+三组实验均有 checkpoint、fixed/random normal、Cross-Key sweep、audio family breakdown
+和 demo；每个 cue 模式有效 `n=10000`。训练预算为 control 0 轮、v12a 30 轮、
+no-causal 30 轮，seed=`1234`，severity=`0.4`，`batch_size=128`。结果目标仍按
+MNIST/FSDD 类别级绑定区分 sample/category，不能解释为精确录音配对恢复。
+
+### fixed normal：8 个 cue 模式等权宏平均
+
+MSE 越低越好，SSIM/ACC 越高越好；百分数已换算为 `%`。`content-aud` 是冻结原模型
+对恢复音频的内部内容一致性，不是独立外部识别器。
+
+| 实验 | Index ACC | 图像 MSE | 图像 SSIM | 音频 MSE | 音频 SSIM | content-aud |
+|---|---:|---:|---:|---:|---:|---:|
+| control | 95.9905% | 0.00841228 | 0.944859 | 0.00380736 | 0.879315 | 90.3035% |
+| v12a | 95.9905% | 0.00823786 | 0.947081 | 0.00276268 | 0.905477 | 92.9930% |
+| no_causal | 95.9905% | 0.00822339 | 0.947435 | 0.00280953 | 0.904980 | 93.0490% |
+
+相对 control，v12a 音频 MSE 下降 `0.00104468`（相对 `27.43%`），音频 SSIM 提升
+`0.026162`，图像 MSE 下降 `0.00017442`；Index ACC 无变化，符合冻结 Index 的设计。
+no-causal 的音频 MSE 比 v12a 高 `0.00004685`，SSIM 低 `0.000497`，但 content-aud
+高 `0.056` 个百分点；这个差异只能作为同预算消融观察，不能单独证明 causal 项全面
+优于无 causal。
+
+### fixed normal：逐 cue 主指标
+
+| 输入模式 | 实验 | Index ACC | 图像 MSE | 图像 SSIM | 音频 MSE | 音频 SSIM |
+|---|---|---:|---:|---:|---:|---:|
+| corrupt_img_only | control | 87.790% | 0.005307 | 0.967732 | 0.000917 | 0.882853 |
+| corrupt_img_only | v12a | 87.790% | 0.005307 | 0.967732 | 0.000799 | 0.901195 |
+| corrupt_img_only | no_causal | 87.790% | 0.005307 | 0.967732 | 0.000818 | 0.901830 |
+| corrupt_aud_only | control | 96.770% | 0.003567 | 0.973989 | 0.003986 | 0.900188 |
+| corrupt_aud_only | v12a | 96.770% | 0.003473 | 0.974960 | 0.000853 | 0.979303 |
+| corrupt_aud_only | no_causal | 96.770% | 0.003512 | 0.974537 | 0.000863 | 0.979095 |
+| corrupt_both | control | 98.610% | 0.005257 | 0.968044 | 0.003972 | 0.900263 |
+| corrupt_both | v12a | 98.610% | 0.004948 | 0.969866 | 0.000788 | 0.980112 |
+| corrupt_both | no_causal | 98.610% | 0.004990 | 0.969639 | 0.000813 | 0.979637 |
+| clean_img_corrupt_aud | control | 99.180% | 0.009738 | 0.942714 | 0.003975 | 0.900494 |
+| clean_img_corrupt_aud | v12a | 99.180% | 0.009737 | 0.942714 | 0.000805 | 0.980240 |
+| clean_img_corrupt_aud | no_causal | 99.180% | 0.009737 | 0.942714 | 0.000832 | 0.979730 |
+| corrupt_img_clean_aud | control | 99.090% | 0.005243 | 0.968180 | 0.003650 | 0.911121 |
+| corrupt_img_clean_aud | v12a | 99.090% | 0.004921 | 0.970062 | 0.003502 | 0.911499 |
+| corrupt_img_clean_aud | no_causal | 99.090% | 0.004962 | 0.969804 | 0.003539 | 0.910949 |
+| clean_img_only | control | 97.700% | 0.009777 | 0.942646 | 0.000289 | 0.965964 |
+| clean_img_only | v12a | 97.700% | 0.009777 | 0.942646 | 0.000240 | 0.973681 |
+| clean_img_only | no_causal | 97.700% | 0.009777 | 0.942646 | 0.000246 | 0.973081 |
+| clean_aud_only | control | 98.830% | 0.002085 | 0.985595 | 0.003648 | 0.911157 |
+| clean_aud_only | v12a | 98.830% | 0.002039 | 0.986057 | 0.003497 | 0.911541 |
+| clean_aud_only | no_causal | 98.830% | 0.002072 | 0.985700 | 0.003535 | 0.911013 |
+| clean_both | control | 99.180% | 0.009732 | 0.942685 | 0.003643 | 0.911253 |
+| clean_both | v12a | 99.180% | 0.009732 | 0.942685 | 0.003503 | 0.911523 |
+| clean_both | no_causal | 99.180% | 0.009732 | 0.942685 | 0.003539 | 0.910961 |
+
+### random normal：8 个 cue 模式等权宏平均
+
+| 实验 | Index ACC | 图像 MSE | 图像 SSIM | 音频 MSE | 音频 SSIM | content-aud |
+|---|---:|---:|---:|---:|---:|---:|
+| control | 96.1575% | 0.00829207 | 0.945894 | 0.00371376 | 0.883882 | 90.6925% |
+| v12a | 96.1575% | 0.00812653 | 0.947936 | 0.00267065 | 0.910193 | 93.3300% |
+| no_causal | 96.1575% | 0.00811582 | 0.948236 | 0.00271537 | 0.909680 | 93.4113% |
+
+### 区域、Cross-Key、family 与 demo
+
+- v12a 的 fixed normal `aud_visible_mse` 在存在音频 cue 的模式为 `0.0`，说明可见区
+  回填生效；音频 `aud_masked_mse` 仍是缺失区恢复质量的主要判断指标，不能用全图 MSE
+  代替。逐模式的缺失区/可见区、PSNR、content classification、pair L2/Recall 和
+  `pix_var` 已保存在三组对应的 normal CSV 中。
+- v12a Cross-Key sweep 的 `img->aud` 与 `aud->img` 记录了 normal/zero/wrong/
+  same-class 绝对 MSE、gain/damage、gate、ratio、win_zero/win_wrong/win_both 和 n；
+  从 fixed 日志看 v12a 的 `img->aud` gain 约 `0.0000~0.0002`，说明当前 Cross-Key
+  仍是弱增益，不能仅凭 gate 非零宣布跨模态恢复成功。
+- 三组均有五类音频 family breakdown 和 fixed/random demo 图；其中
+  `partial_temporal` 是音频恢复最弱的 family，不能被其它四类均值掩盖。
+
+证据目录：`v12a_outputs/outputs/outputs_v12a/`、
+`v12a_outputs/outputs/outputs_v12a_control/`、
+`v12a_outputs/outputs/outputs_v12a_no_causal/`；本次没有修改原始 CSV、日志或图片。
+
+## 当前运行说明（v12a）
+
+当前活动版本为 `v12a`。训练和评估必须在项目根目录、已激活环境和可用 GPU 中执行；
+本机本次仅审阅已有服务器产物，没有继续使用 CPU 重跑完整套件。
+
+```bash
+# 训练主实验；加 --with_ablations 才顺序训练 no-causal
+nohup python -u scripts/run_v12a_suite.py --with_ablations > v12a_suite.log 2>&1 < /dev/null &
+tail -f v12a_suite.log
+
+# 已有三组 checkpoint 时只评估
+python -u scripts/run_v12a_suite.py --eval_only --with_ablations
+```
+
+当前输出目录为 `outputs/outputs_v12a/`、`outputs/outputs_v12a_control/` 和
+`outputs/outputs_v12a_no_causal/`；本地已审阅产物位于 `v12a_outputs/outputs/`。
+
+## 2026-09-13 v12a demo 抽样规则修订
+
+**改动类型**：评估 demo 逻辑与文档规范，不改变训练、模型前向或全量评估指标。
+
+**改动原因**：此前 `scripts/demo_inference.py` 直接取测试集第一个 batch 的前 `n` 个样本，
+样本位置固定且可能带来顺序偏差，不能代表从整个测试集抽取的可视化样本。
+
+**完成内容**：
+
+- 从完整 `test_loader.dataset` 生成固定 seed 的随机无重复索引，再用标准 batch collate
+  组装 demo batch；默认 `--num=10` 保持不变。
+- seed 按 `eval.demo_seed`、`eval.random_seed`、顶层 `seed` 顺序回退，并在日志中记录
+  实际 seed 与完整样本索引。
+- `fixed_mask` 与 `legacy_random` 使用同一组抽样索引，仅 corruption protocol 不同。
+- smoke test 新增固定 seed、全测试集范围、非前十样本和可复现性检查。
+
+**验证**：`py_compile`、`scripts/smoke_test_v12a.py` 和 `git diff --check` 均通过；没有重跑
+训练或全量评估，原有全测试集指标不变。完整 demo 指标仍只表示 `n=10` 可视化样本，不能
+替代全量测试集评估。
+
+## 当前运行说明（v12a）
+
+当前活动版本仍为 `v12a`。训练和评估必须在项目根目录、已激活环境和可用 GPU 中执行；
+demo 会从完整测试集按固定 seed 抽样并在日志记录 indices。
+
+```bash
+# 主实验 + control；加 --with_ablations 才顺序训练 no-causal
+nohup python -u scripts/run_v12a_suite.py --with_ablations > v12a_suite.log 2>&1 < /dev/null &
+tail -f v12a_suite.log
+
+# 已有 checkpoint 时只评估
+python -u scripts/run_v12a_suite.py --eval_only --with_ablations
+```
+
+当前输出目录为 `outputs/outputs_v12a/`、`outputs/outputs_v12a_control/` 和
+`outputs/outputs_v12a_no_causal/`；本地已审阅产物位于 `v12a_outputs/outputs/`。

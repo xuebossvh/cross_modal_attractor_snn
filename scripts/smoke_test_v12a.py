@@ -11,10 +11,44 @@ if str(ROOT) not in sys.path:
 
 from common import load_config
 from models.network import CrossModalSNN
+from scripts.demo_inference import _sample_demo_batch
 from scripts.train import _apply_trainable_prefixes
 
 
+def check_control_checkpoint_loading():
+    parent_cfg = load_config(ROOT / "configs/v12a.yaml")
+    # v11g contains Cross-Key adapters, but no v12a local-cue projector.
+    parent_cfg["audio_local_cue"]["enabled"] = False
+    parent = CrossModalSNN(parent_cfg)
+    control_cfg = load_config(ROOT / "configs/v12a_control.yaml")
+    control = CrossModalSNN(control_cfg)
+    control.load_state_dict(parent.state_dict(), strict=True)
+    assert control.img_cross_adapter is not None
+    assert control.aud_cross_adapter is not None
+    assert not control.use_cross_key_conditioning
+    assert not control.use_audio_local_cue
+    print("PASS v12a control strict loading with v11g-shaped adapter weights")
+
+
+def check_demo_sampling():
+    dataset = torch.utils.data.TensorDataset(
+        torch.arange(100, dtype=torch.float32).view(100, 1, 1, 1),
+        torch.arange(100, dtype=torch.float32).view(100, 1, 1),
+        torch.arange(100, dtype=torch.long),
+    )
+    _, _, labels_a, _, indices_a = _sample_demo_batch(dataset, 10, 4321)
+    _, _, labels_b, _, indices_b = _sample_demo_batch(dataset, 10, 4321)
+    assert indices_a == indices_b
+    assert len(indices_a) == 10 and len(set(indices_a)) == 10
+    assert all(0 <= index < len(dataset) for index in indices_a)
+    assert indices_a != list(range(10))
+    assert torch.equal(labels_a, labels_b)
+    print("PASS v12a demo fixed-seed full-test-set sampling")
+
+
 def main():
+    check_control_checkpoint_loading()
+    check_demo_sampling()
     cfg = load_config(ROOT / "configs/v12a.yaml")
     cfg["device"] = "cpu"
     model = CrossModalSNN(cfg).to("cpu")
