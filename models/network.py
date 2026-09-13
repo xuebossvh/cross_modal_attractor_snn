@@ -318,6 +318,8 @@ class CrossModalSNN(nn.Module):
                     "64": self.audio_local_cue_multiscale["64"](full_cue, mask),
                 }
             elif self.audio_local_cue_projector is not None:
+                if isinstance(local_cue, dict):
+                    local_cue = local_cue["conv2"]
                 local_cue = local_cue.detach()
 
         mid_adapter = getattr(self, "aud_cross_adapter_mid", None)

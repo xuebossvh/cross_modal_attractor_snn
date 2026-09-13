@@ -124,6 +124,12 @@ zero Key、缺少对侧 cue 或目标没有缺失区时不产生修正。音频�
 head/refiner 后再次用 mask 保护可见位置，音频输出为 `M * prediction + (1-M) * cue`。
 v12b 的 Cross-Key 不写回 Value，也不改变分类 logits；恢复 loss 仍不能通过 Value 影响 Index。
 
+单尺度兼容接口：`forward_with_local` 返回 `{"conv1": spikes1, "conv2": spikes2}`，
+network 将各项转成 rate。`v12b_control` 关闭 multiscale 时必须取 `local_cue["conv2"]`
+再 detach，送入原 v12a 单尺度 projector；仍兼容直接传入 conv2 tensor 的旧调用。
+修复此接口不改变 checkpoint 参数名称、shape 或主实验的多尺度计算。回归测试必须覆盖
+三份配置的全部八种 cue，并验证 control 的字典输入与旧 tensor 路径结果一致。
+
 ## 4. 训练与三组实验
 
 | 配置 | 父权重 | 额外训练 | 可训练参数 | causal |
@@ -194,6 +200,10 @@ tail -f v12b_suite.log
 # 只评估已有三组 checkpoint
 python -u scripts/run_v12b_suite.py --eval_only --with_ablations
 
+# 主实验已完成、control 评估中断：重跑 control 评估，然后训练/评估 no-causal
+nohup python -u scripts/run_v12b_suite.py --start_from control --with_ablations > v12b_suite_continue.log 2>&1 < /dev/null &
+tail -f v12b_suite_continue.log
+
 # 单独评估；--family_breakdown 额外输出音频 family 表
 python -u scripts/evaluate.py --config configs/v12b.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep --family_breakdown
 python -u scripts/evaluate.py --config configs/v12b.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
@@ -203,6 +213,9 @@ python -u scripts/demo_inference.py --config configs/v12b.yaml --protocol legacy
 
 去掉 `--with_ablations` 时只运行 main 和冻结 control。`--max_batches` 只能限制评估，
 不能缩短训练；`--resume` 只在目标训练 checkpoint 已存在时使用。
+`--start_from` 可选 `main`（默认）、`control`、`no_causal`，只执行该实验及后续实验；
+`no_causal` 需要同时指定 `--with_ablations`。它不会自动跳过所选实验的训练：若相应
+checkpoint 已训练完成，添加 `--eval_only`；仅部分训练完成则添加 `--resume`。
 
 输出目录为 `outputs/outputs_v12b/`、`outputs/outputs_v12b_control/` 和
 `outputs/outputs_v12b_no_causal/`；checkpoint 为 `outputs/checkpoints/` 下对应文件。

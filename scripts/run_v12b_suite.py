@@ -13,6 +13,18 @@ from models.frozen_base import file_sha256
 from paths import PROJECT_ROOT, ensure_output_dirs, logs_dir, resolve_from_root
 
 
+def select_configs(with_ablations=False, start_from="main"):
+    names = ["main", "control"]
+    if with_ablations:
+        names.append("no_causal")
+    if start_from not in names:
+        raise ValueError("--start_from no_causal requires --with_ablations")
+    selected = names[names.index(start_from):]
+    return [PROJECT_ROOT / "configs" / (
+        "v12b.yaml" if name == "main" else f"v12b_{name}.yaml")
+        for name in selected]
+
+
 def build_jobs(configs, eval_only=False, resume=False, severity=0.4,
                max_batches=None):
     jobs = []
@@ -73,15 +85,18 @@ def main():
     ap.add_argument("--with_ablations", action="store_true",
                     help="Also train/evaluate v12b_no_causal from the same parent")
     ap.add_argument("--eval_only", action="store_true")
+    ap.add_argument("--start_from", choices=("main", "control", "no_causal"),
+                    default="main", help="Start at this experiment; skip earlier experiments")
     ap.add_argument("--resume", action="store_true", help="Require existing training checkpoints")
     ap.add_argument("--severity", type=float, default=0.4)
     ap.add_argument("--max_batches", type=int, default=None,
                     help="Evaluation smoke limit only; never shortens training")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
-    configs = [PROJECT_ROOT / "configs/v12b.yaml", PROJECT_ROOT / "configs/v12b_control.yaml"]
-    if args.with_ablations:
-        configs.append(PROJECT_ROOT / "configs/v12b_no_causal.yaml")
+    try:
+        configs = select_configs(args.with_ablations, args.start_from)
+    except ValueError as exc:
+        ap.error(str(exc))
     jobs = build_jobs(configs, args.eval_only, args.resume, args.severity, args.max_batches)
     if args.dry_run:
         for command, logfile in jobs:

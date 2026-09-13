@@ -15785,3 +15785,40 @@ python -u scripts/run_v12b_suite.py --eval_only --with_ablations
 
 输出目录为 `outputs/outputs_v12b/`、`outputs/outputs_v12b_control/` 和
 `outputs/outputs_v12b_no_causal/`；当前尚无 v12b 训练或评估结果。
+
+### 2026-09-14 05:56 control 评估兼容修复
+
+**触发与诊断**：用户服务器在 `v12b_control.yaml` 的 fixed normal 评估中，完成
+`corrupt_img_only` 后进入 `corrupt_aud_only`，于 `models/network.py` 报
+`AttributeError: 'dict' object has no attribute 'detach'`。本地复现相同异常。
+原因是 v12b encoder 返回 conv1/conv2 字典，而 control 的单尺度 projector 仍按
+tensor 调用 detach；此前只检查主模型前向和 control 参数加载，遗漏 control 实际前向。
+
+**修改与文档同步**：先更新 `implementation.md` 的 cue 接口和续跑说明，再修改：
+
+- `models/network.py`：单尺度路径从字典取 conv2 后 detach，兼容原 tensor 输入。
+  checkpoint 的参数名称、shape 及主实验多尺度计算保持原样；本修复无需重训主模型。
+- `scripts/run_v12b_suite.py`：新增 `--start_from main/control/no_causal`，从指定实验
+  开始构建和检查任务。默认流程保持不变，选择 no_causal 必须启用 `--with_ablations`。
+- `scripts/smoke_test_v12b.py`：增加三组配置各八种 cue 前向、control 新旧输入等价性
+  和 suite 任务选择回归；control 使用非零 projector 权重，避免零输出掩盖问题。
+
+**验证**：三组共 24 个 cue 场景通过；control 字典路径与旧 tensor 路径逐元素一致；
+本地真实 v12a checkpoint 严格加载后，八种 cue 及新旧路径等价性检查均通过。
+Python 语法检查、suite dry-run 和 diff 检查通过。本次为代码回归检查，未在本地重跑
+全测试集评估，不能将这些测试记作模型指标。用户截图确认 control 评估中断；若按默认
+顺序运行，主实验训练/评估已先执行，后续 no-causal 尚未启动。
+
+#### 运行说明
+
+服务器拉取 v12b 修复后，在项目根目录继续 control 评估，然后训练/评估 no-causal：
+
+```bash
+git pull --ff-only origin v12b
+nohup python -u scripts/run_v12b_suite.py --start_from control --with_ablations > v12b_suite_continue.log 2>&1 < /dev/null &
+tail -f v12b_suite_continue.log
+```
+
+该命令不会重跑 main，control 的失败评估日志会重新生成；使用新的总日志保存续跑输出。
+如果 no-causal checkpoint 也已训练完成，则添加 `--eval_only`；部分训练则使用
+`--resume`。两者都要求所选的训练实验已有对应 checkpoint。
