@@ -420,7 +420,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/v9b.yaml")
     ap.add_argument("--ckpt", default=None)
-    ap.add_argument("--num", type=int, default=8, help="可视化样本数（默认 8）")
+    ap.add_argument("--num", type=int, default=10, help="可视化样本数（默认 10）")
     ap.add_argument("--severity", type=float, default=0.5)
     ap.add_argument("--aud_corrupt_mode", default="time_mask")
     ap.add_argument("--img_corrupt_mode", default="occlusion")
