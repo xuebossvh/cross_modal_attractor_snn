@@ -166,7 +166,7 @@ class AudioSNNEncoder(nn.Module):
             flat = s2.reshape(self.T, x_aud.size(0), -1)
             s3, _ = self.l3(flat)
             s4, _ = self.l4(s3)
-            return s4, s3, s2
+            return s4, s3, {"conv1": s1, "conv2": s2}
 
         x = x_aud.reshape(x_aud.shape[0], -1)
         if self.encoding == "poisson":

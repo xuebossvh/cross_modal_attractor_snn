@@ -1,29 +1,32 @@
 # 实现指南：Cross-Modal Attractor SNN
 
-> 当前实现分支：`v12a`
-> 当前目标：从 v11g 启动，修复音频可见区回填并训练局部时频 cue 音频恢复路径。
+> 当前实现分支：`v12b`
+> 当前目标：在 v12a 的音频恢复路径上增加多尺度 mask-aware 局部 cue 与中间尺度 Cross-Key。
 > 文档关系：初始设计见 `docs/idea_report.md`，过程与结果见 `docs/dev_log.md`，用户约束见 `docs/user_requirements.md`。
 
 ## 0. 当前版本边界
 
-v12a 保留 MNIST + FSDD 类别级绑定、`Key -> simultaneous recurrent Index -> Value`、
+v12b 保留 v12a 的 MNIST + FSDD 类别级绑定、`Key -> simultaneous recurrent Index -> Value`、
 `Value + same-modal cue detail` decoder 输入、`detach_value_for_recon=true`、
-`batch_size=128` 和五类均衡缺失采样。它只增加一个受 mask 限制的 decoder 特征调制层，
-不增加 GRID、固定伪配对、Cross-Detail、pair alignment 或新的 residual decoder。
+`batch_size=128` 和五类均衡缺失采样。它只增强音频 decoder 的局部特征注入与现有
+Masked Cross-Key 的中间尺度条件，不增加 GRID、固定伪配对、Cross-Detail、pair alignment
+或独立 residual decoder。
 
-v12a 的五个研究动作是：
+v12b 的五个研究动作是：
 
-1. 从 v11g checkpoint 启动，冻结 Encoder、Key、Index、Value、Classifier 和图像路径。
+1. 从 v12a checkpoint 启动，冻结 Encoder、Key、Index、Value、Classifier 和图像路径。
 2. 在音频 decoder 输出处执行 mask 回填：可见区直接使用输入音频，缺失区使用预测。
-3. 暴露 Audio Encoder 的局部卷积脉冲率，经零初始化投影后作为 Audio Decoder 局部 cue。
-4. 保留对侧 `K_img -> audio` 的 Masked Cross-Key，只在音频缺失区调制 decoder feature。
-5. 音频 loss 增强缺失区 MSE/L1、时频梯度和高能量区域约束，Index 不参与更新。
+3. 暴露 Audio Encoder 的 `conv1/conv2` 局部脉冲率，在 decoder 的 `16/32/64` 尺度使用
+   零初始化、带 mask 的局部 cue projector。
+4. 保留对侧 `K_img -> audio` 的 Masked Cross-Key，并在 `32x32` 中间特征和最终特征上调制，
+   仍只作用于音频缺失区；不写回 Value 或 Index。
+5. 修正时频梯度损失的缺失边界对称性，并继续使用缺失区 MSE/L1、能量和结构约束。
 
 历史版本的设计动机和结果仍在 `idea_report.md`、`dev_log.md` 中；本文不重复展开已经
 废止的版本配置。旧配置只能在对应 Git 分支中使用。
 
-文档阅读顺序固定为：先看当前 v12a 的第 0-6 节，再按 `dev_log.md` 的
-`v11c → v11d → v11e → v11f → v11g → v12a` 统一评估入口查看结果；旧版本索引只用于追溯，
+文档阅读顺序固定为：先看当前 v12b 的第 0-6 节，再按 `dev_log.md` 的
+`v11c → v11d → v11e → v11f → v11g → v12a → v12b` 统一评估入口查看结果；旧版本索引只用于追溯，
 不作为当前运行入口。
 
 ## 1. 真实目录与职责
@@ -31,9 +34,9 @@ v12a 的五个研究动作是：
 ```text
 cross_modal_attractor_snn/
 ├── configs/
-│   ├── v12a.yaml
-│   ├── v12a_control.yaml
-│   └── v12a_no_causal.yaml
+│   ├── v12b.yaml
+│   ├── v12b_control.yaml
+│   └── v12b_no_causal.yaml
 ├── data/                 # MNIST/FSDD、log-mel 和 corruption
 ├── models/               # LIF、encoder、memory、decoder、顶层网络
 ├── scripts/              # train/evaluate/demo/suite/smoke
@@ -56,8 +59,8 @@ cross_modal_attractor_snn/
 | `scripts/train.py` | decoder/主训练、重建损失、causal margin |
 | `scripts/evaluate.py` | fixed/random、family、Cross-Key sweep 和 CSV |
 | `scripts/demo_inference.py` | fixed/random 小样本可视化 |
-| `scripts/run_v12a_suite.py` | 顺序执行 train、eval、demo，可选 no-causal |
-| `scripts/smoke_test_v12a.py` | v12a 的 shape、回填、梯度、严格加载和 CLI 回归 |
+| `scripts/run_v12b_suite.py` | 顺序执行 train、eval、demo，可选 no-causal |
+| `scripts/smoke_test_v12b.py` | v12b 的 shape、回填、多尺度 cue、梯度和严格加载回归 |
 
 ## 2. 数据、target 与张量
 
@@ -84,8 +87,8 @@ digit label，因此同类别内随机组合；没有人工 instance pair。缺�
 | image/audio own detail | `[B,128]` / `[B,256]` | cue rate 经 projector |
 | image/audio decoder state | `[B,512]` / `[B,1024]` | Value 与 gated detail 拼接 |
 | decoder feature | `[B,32,28,28]` / `[B,16,64,64]` | Cross-Key 调制前特征 |
-| audio local cue | `[20,B,64,16,16] -> [B,64,16,16]` | Audio Encoder `conv2` 脉冲率 |
-| projected audio local cue | `[B,16,64,64]` | 零初始化 projector，加到 audio decoder feature |
+| audio local cue | `conv1: [20,B,32,32,32]`, `conv2: [20,B,64,16,16]` | Audio Encoder 局部脉冲率 |
+| projected audio local cue | `16/32/64` 尺度分别匹配 decoder stage | 带 mask、零初始化 projector |
 | final output | `[B,1,28,28]` / `[B,64,64]` | 图像概率图 / log-mel |
 
 ## 3. 前向计算
@@ -100,8 +103,8 @@ V_img + gated image detail -> ImageDecoder feature F_img
 K_aud -> masked feature adapter -> F_img' -> image head/refiner
 
 V_aud + gated audio detail -> AudioDecoder feature F_aud
-audio conv2 rate -> zero-init local projector -> F_aud + local cue
-K_img -> masked feature adapter -> F_aud' -> audio head
+audio conv1/conv2 rate + mask -> multi-scale local projectors -> F_aud
+K_img -> intermediate/final masked feature adapters -> F_aud' -> audio head
 ```
 
 `_fuse_decoder_state` 先根据 `detach_value_for_recon` detach `V_from_A`，再把本模态
@@ -119,15 +122,15 @@ F' = F + M * gate(F, cue, M, source_quality) * delta(F, K_other)
 zero Key、缺少对侧 cue 或目标没有缺失区时不产生修正。音频局部 cue 的最后投影层也
 零初始化，加载 v11g 权重时不会突然改变 decoder；该分支只影响音频 decoder feature。
 head/refiner 后再次用 mask 保护可见位置，音频输出为 `M * prediction + (1-M) * cue`。
-v12a 的 Cross-Key 不写回 Value，也不改变分类 logits。
+v12b 的 Cross-Key 不写回 Value，也不改变分类 logits；恢复 loss 仍不能通过 Value 影响 Index。
 
 ## 4. 训练与三组实验
 
 | 配置 | 父权重 | 额外训练 | 可训练参数 | causal |
 |---|---|---:|---|---|
-| `v12a_control` | v11g checkpoint | 0 轮，仅评估 | 无；关闭局部 cue | 关 |
-| `v12a` | v11g checkpoint | 30 轮 | audio decoder、local cue projector、两个 Cross-Key adapter | 开，0.5 |
-| `v12a_no_causal` | v11g checkpoint | 30 轮 | 同 v12a | 关 |
+| `v12b_control` | v12a checkpoint | 0 轮，仅评估 | 无；关闭 v12b 新增 cue/中间 adapter | 关 |
+| `v12b` | v12a checkpoint | 30 轮起步 | audio decoder、多尺度 local cue projector、Cross-Key adapters | 开，0.5 |
+| `v12b_no_causal` | v12a checkpoint | 30 轮起步 | 同 v12b | 关 |
 
 三组固定 `seed=1234`、`batch_size=128`、`severity=0.4`、五类图像/音频 family 均衡
 采样。control 是 v11g 冻结父模型参考，不是等预算重训。causal loss 只在有效缺失区比较
@@ -175,6 +178,9 @@ Index ACC、图像 MSE/SSIM、音频 MSE/SSIM。fixed 与 random 分表，区域
 内容分类、干预、family、训练及 demo 另列。历史版本缺项明确标注，不使用新版本
 字段假装补齐旧实验。完整要求见 `user_requirements.md` 的“统一评估版式”。
 
+v12b 的新增多尺度 cue 只读取残缺输入及其 mask，不读取 target；mask 以最近邻方式对齐到
+各 decoder 尺度。时频梯度损失对相邻差分的 mask 使用两端并集，避免只监督一侧边界。
+
 ## 6. 运行命令
 
 必须在项目根目录、已激活环境和可用 GPU 中运行。suite 会按顺序运行，并把每个阶段的
@@ -182,24 +188,24 @@ stdout 同时写入对应日志；任何阶段失败都会停止后续任务。
 
 ```bash
 # 主实验 + control；加 --with_ablations 才运行 no_causal
-nohup python -u scripts/run_v12a_suite.py --with_ablations > v12a_suite.log 2>&1 < /dev/null &
-tail -f v12a_suite.log
+nohup python -u scripts/run_v12b_suite.py --with_ablations > v12b_suite.log 2>&1 < /dev/null &
+tail -f v12b_suite.log
 
 # 只评估已有三组 checkpoint
-python -u scripts/run_v12a_suite.py --eval_only --with_ablations
+python -u scripts/run_v12b_suite.py --eval_only --with_ablations
 
 # 单独评估；--family_breakdown 额外输出音频 family 表
-python -u scripts/evaluate.py --config configs/v12a.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep --family_breakdown
-python -u scripts/evaluate.py --config configs/v12a.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
-python -u scripts/demo_inference.py --config configs/v12a.yaml --protocol fixed_mask --severity 0.4
-python -u scripts/demo_inference.py --config configs/v12a.yaml --protocol legacy_random --severity 0.4
+python -u scripts/evaluate.py --config configs/v12b.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep --family_breakdown
+python -u scripts/evaluate.py --config configs/v12b.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
+python -u scripts/demo_inference.py --config configs/v12b.yaml --protocol fixed_mask --severity 0.4 --num 10
+python -u scripts/demo_inference.py --config configs/v12b.yaml --protocol legacy_random --severity 0.4 --num 10
 ```
 
 去掉 `--with_ablations` 时只运行 main 和冻结 control。`--max_batches` 只能限制评估，
 不能缩短训练；`--resume` 只在目标训练 checkpoint 已存在时使用。
 
-输出目录为 `outputs/outputs_v12a/`、`outputs/outputs_v12a_control/` 和
-`outputs/outputs_v12a_no_causal/`；checkpoint 为 `outputs/checkpoints/` 下对应文件。
+输出目录为 `outputs/outputs_v12b/`、`outputs/outputs_v12b_control/` 和
+`outputs/outputs_v12b_no_causal/`；checkpoint 为 `outputs/checkpoints/` 下对应文件。
 `outputs/`、`_data/` 和 checkpoint 默认不进入代码仓库。
 
 ## 7. 历史版本索引
@@ -210,10 +216,11 @@ python -u scripts/demo_inference.py --config configs/v12a.yaml --protocol legacy
 | v10a-v10f | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验 |
 | v11a-v11e | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验/已废止配置 |
 | v11g | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验 |
-| v12a | 本文第 0-6 节及 `docs/dev_log.md` 当前条目 | 当前实现 |
+| v12a | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验 |
+| v12b | 本文第 0-6 节及 `docs/dev_log.md` 当前条目 | 当前实现 |
 
-历史条目中的旧命令、旧输出路径和旧配置名称只用于追溯，不能复制到 v12a 运行。
-当前分支 `configs/` 只保留 v12a 三个 YAML，避免把旧版本配置带入新分支。
+历史条目中的旧命令、旧输出路径和旧配置名称只用于追溯，不能复制到 v12b 运行。
+当前分支 `configs/` 的 v12b 三个 YAML 是当前运行入口，避免把旧版本配置带入新分支。
 
 ## 8. 实现检查表
 

@@ -160,6 +160,32 @@ class AudioLocalCueProjector(nn.Module):
         return projected
 
 
+class MaskedLocalCueProjector(nn.Module):
+    """Project a local cue together with its missing-region mask."""
+
+    def __init__(self, in_channels, out_channels, hidden_channels=32):
+        super().__init__()
+        self.body = nn.Sequential(
+            nn.Conv2d(in_channels + 1, hidden_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_channels, out_channels, 3, padding=1),
+        )
+        nn.init.zeros_(self.body[-1].weight)
+        nn.init.zeros_(self.body[-1].bias)
+
+    def forward(self, local_cue, mask=None):
+        if mask is None:
+            mask = torch.zeros(
+                local_cue.size(0), 1, local_cue.size(2), local_cue.size(3),
+                device=local_cue.device, dtype=local_cue.dtype)
+        else:
+            if mask.dim() == 3:
+                mask = mask.unsqueeze(1)
+            if mask.shape[-2:] != local_cue.shape[-2:]:
+                mask = F.interpolate(mask, size=local_cue.shape[-2:], mode="nearest")
+        return self.body(torch.cat([local_cue, mask], dim=1))
+
+
 class AudioDecoder(nn.Module):
     """Audio decoder input state -> log-mel reconstruction [B, n_mels, n_frames]."""
 
@@ -180,12 +206,14 @@ class AudioDecoder(nn.Module):
 
         layers = []
         cur_ch = base_ch
+        self.stage_channels = []
         for i in range(n_up):
             next_ch = 16 if i == n_up - 1 else max(cur_ch // 2, 32)
             layers.append(nn.ReLU(inplace=True))
             layers.append(nn.ConvTranspose2d(
                 cur_ch, next_ch, kernel_size=4, stride=2, padding=1))
             cur_ch = next_ch
+            self.stage_channels.append(cur_ch)
 
         dilations = [1, 2, 4]
         for bi in range(refine_blocks):
@@ -207,10 +235,19 @@ class AudioDecoder(nn.Module):
     def forward(self, value_state):
         return self.decode_features(self.forward_features(value_state))
 
-    def forward_features(self, value_state):
+    def forward_features(self, value_state, local_cues=None,
+                         feature_modifiers=None):
         x = self.fc(value_state)
         x = x.view(-1, self.base_ch, self.start_hw, self.start_hw)
-        return self.cnn[:-1](x)
+        for layer in self.cnn[:-1]:
+            x = layer(x)
+            if isinstance(layer, nn.ConvTranspose2d):
+                scale = str(x.shape[-1])
+                if local_cues is not None and scale in local_cues:
+                    x = x + local_cues[scale]
+                if feature_modifiers is not None and scale in feature_modifiers:
+                    x = feature_modifiers[scale](x)
+        return x
 
     def decode_features(self, features):
         x = self.cnn[-1](features)

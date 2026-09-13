@@ -23,7 +23,7 @@ from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
 from models.lif import rate
-from models.frozen_base import (ADAPTER_PREFIXES, load_frozen_parent,
+from models.frozen_base import (ADAPTER_PREFIXES, file_sha256, load_frozen_parent,
                                 frozen_metadata, verify_frozen_resume,
                                 verify_audio_normalization)
 
@@ -267,9 +267,9 @@ def _masked_tf_grad_loss(rec, target, mask):
     """缺失区时频一阶差分 L1（F4，逐样本归一）。"""
     m = mask.to(device=rec.device, dtype=rec.dtype)
     dt = (rec[:, :, 1:] - rec[:, :, :-1]) - (target[:, :, 1:] - target[:, :, :-1])
-    mt = m[:, :, 1:]
+    mt = torch.maximum(m[:, :, 1:], m[:, :, :-1])
     df = (rec[:, 1:, :] - rec[:, :-1, :]) - (target[:, 1:, :] - target[:, :-1, :])
-    mf = m[:, 1:, :]
+    mf = torch.maximum(m[:, 1:, :], m[:, :-1, :])
     lt = (dt.abs() * mt).flatten(1).sum(1) / mt.flatten(1).sum(1).clamp_min(1.0)
     lf = (df.abs() * mf).flatten(1).sum(1) / mf.flatten(1).sum(1).clamp_min(1.0)
     return (lt + lf).mean()
@@ -406,8 +406,10 @@ def _set_decoder_pretrain_requires_grad(model, cfg, freeze_non_decoders=True):
     decoder_prefixes = (
         "image_decoder.", "audio_decoder.",
         "audio_local_cue_projector.",
+        "audio_local_cue_multiscale.",
         "img_detail_projector.", "aud_detail_projector.",
         "img_detail_gate.", "aud_detail_gate.",
+        "aud_cross_adapter_mid.",
     )
     if train_img_refiner:
         decoder_prefixes = decoder_prefixes + ("image_refiner.",)
@@ -673,6 +675,7 @@ def _build_train_optimizer(model, cfg):
     pair_mult = float(cfg.get("pair_alignment", {}).get("lr_mult", 1.0))
     cross_prefixes = (
         "img_cross_adapter.", "aud_cross_adapter.",
+        "aud_cross_adapter_mid.",
         "aud_to_img_cross_proj.", "img_to_aud_cross_proj.",
         "aud_to_img_cross_gate.", "img_to_aud_cross_gate.",
     )

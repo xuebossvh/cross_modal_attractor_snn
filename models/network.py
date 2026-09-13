@@ -8,7 +8,7 @@ from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
 from .decoders import (ClassifierHead, ImageDecoder, ImageRefiner,
                        AudioDecoder, AudioRefiner, AudioLocalCueProjector,
-                       MaskedCrossKeyAdapter)
+                       MaskedLocalCueProjector, MaskedCrossKeyAdapter)
 from .lif import rate
 
 
@@ -196,6 +196,24 @@ class CrossModalSNN(nn.Module):
                 int(local_cfg.get("hidden_channels", 32)))
         else:
             self.audio_local_cue_projector = None
+        self.use_audio_local_cue_multiscale = bool(
+            local_cfg.get("multiscale", False))
+        if self.use_audio_local_cue and self.use_audio_local_cue_multiscale:
+            stage_channels = self.audio_decoder.stage_channels
+            if len(stage_channels) < 3:
+                raise ValueError(
+                    "Multi-scale audio cue requires three decoder stages")
+            local_hidden = int(local_cfg.get("hidden_channels", 32))
+            self.audio_local_cue_multiscale = nn.ModuleDict({
+                "16": MaskedLocalCueProjector(
+                    int(s.get("aud_conv_ch2", 32)), stage_channels[0], local_hidden),
+                "32": MaskedLocalCueProjector(
+                    int(s.get("aud_conv_ch1", 16)), stage_channels[1], local_hidden),
+                "64": MaskedLocalCueProjector(
+                    int(s.get("aud_conv_ch2", 32)), stage_channels[2], local_hidden),
+            })
+        else:
+            self.audio_local_cue_multiscale = None
 
         refiner_cfg = cfg.get("audio_refiner", {})
         self.use_audio_refiner = refiner_cfg.get("enabled", False)
@@ -241,9 +259,20 @@ class CrossModalSNN(nn.Module):
                 32, d["N_key_aud"], hidden, key_ch)
             self.aud_cross_adapter = MaskedCrossKeyAdapter(
                 self.audio_decoder.feature_channels, d["N_key_img"], hidden, key_ch)
+            self.use_cross_key_intermediate = bool(
+                cross_cfg.get("intermediate", False))
+            if (self.use_cross_key_intermediate
+                    and len(self.audio_decoder.stage_channels) >= 2):
+                self.aud_cross_adapter_mid = MaskedCrossKeyAdapter(
+                    self.audio_decoder.stage_channels[1], d["N_key_img"],
+                    hidden, key_ch)
+            else:
+                self.aud_cross_adapter_mid = None
         else:
             self.img_cross_adapter = None
             self.aud_cross_adapter = None
+            self.use_cross_key_intermediate = False
+            self.aud_cross_adapter_mid = None
         if self.freeze_base:
             self.train(False)
 
@@ -271,17 +300,73 @@ class CrossModalSNN(nn.Module):
         decoder = self.image_decoder if modality == "img" else self.audio_decoder
         adapter = self.img_cross_adapter if modality == "img" else self.aud_cross_adapter
         finalize = self._apply_image_refiner if modality == "img" else self._finalize_audio
-        features = decoder.forward_features(state)
+        local_features = None
+        feature_modifiers = None
         if (modality == "aud" and self.use_audio_local_cue
-                and self.audio_local_cue_projector is not None
                 and local_cue is not None):
-            local_cue = local_cue.detach()
-            features = features + self.audio_local_cue_projector(
-                local_cue, features.shape[-2:])
+            if (isinstance(local_cue, dict)
+                    and self.audio_local_cue_multiscale is not None):
+                conv1 = local_cue["conv1"].detach()
+                conv2 = local_cue["conv2"].detach()
+                full_cue = F.interpolate(
+                    conv2, size=(self.audio_decoder.n_mels,
+                                 self.audio_decoder.n_frames),
+                    mode="bilinear", align_corners=False)
+                local_features = {
+                    "16": self.audio_local_cue_multiscale["16"](conv2, mask),
+                    "32": self.audio_local_cue_multiscale["32"](conv1, mask),
+                    "64": self.audio_local_cue_multiscale["64"](full_cue, mask),
+                }
+            elif self.audio_local_cue_projector is not None:
+                local_cue = local_cue.detach()
+
+        mid_adapter = getattr(self, "aud_cross_adapter_mid", None)
+        if (modality == "aud" and mid_adapter is not None
+                and self.use_cross_key_conditioning and not disabled
+                and key is not None and mask is not None):
+            mid_mask = mask.to(device=state.device, dtype=state.dtype)
+            if mid_mask.dim() == 3:
+                mid_mask = mid_mask.unsqueeze(1)
+            mid_mask = F.interpolate(mid_mask, size=(32, 32), mode="nearest")
+            if cue is None:
+                mid_cue = torch.zeros(
+                    state.size(0), 1, 32, 32, device=state.device,
+                    dtype=state.dtype)
+            else:
+                mid_cue = cue.to(device=state.device, dtype=state.dtype)
+                if mid_cue.dim() == 3:
+                    mid_cue = mid_cue.unsqueeze(1)
+                mid_cue = F.interpolate(mid_cue, size=(32, 32), mode="nearest")
+            if mid_mask.any():
+                mid_stats = {}
+
+                def apply_mid(value):
+                    updated, stats = mid_adapter(
+                        value, key, mid_cue, mid_mask, source_missing_ratio)
+                    mid_stats.update(stats)
+                    return updated
+
+                feature_modifiers = {"32": apply_mid}
+            else:
+                mid_stats = {}
+        else:
+            mid_stats = {}
+
+        if modality == "aud":
+            features = decoder.forward_features(
+                state, local_cues=local_features,
+                feature_modifiers=feature_modifiers)
+            if local_features is None and self.use_audio_local_cue \
+                    and self.audio_local_cue_projector is not None \
+                    and local_cue is not None:
+                features = features + self.audio_local_cue_projector(
+                    local_cue, features.shape[-2:])
+        else:
+            features = decoder.forward_features(state)
         coarse = decoder.decode_features(features)
         base = finalize(coarse, cue, mask)
         if disabled or not self.use_cross_key_conditioning or key is None or adapter is None:
-            return base, coarse, None
+            return base, coarse, mid_stats or None
         region = torch.ones_like(base) if cue is None else (
             torch.zeros_like(base) if mask is None else mask.to(base))
         if not region.any():
@@ -298,6 +383,10 @@ class CrossModalSNN(nn.Module):
         # Protect visible baseline pixels after both the head and refiner receptive fields.
         corrected = torch.where(output_mask.bool(), corrected, base)
         corrected_coarse = torch.where(output_mask.bool(), corrected_coarse, coarse)
+        if mid_stats:
+            stats = dict(stats)
+            for name, value in mid_stats.items():
+                stats[f"mid_{name}"] = value
         return corrected, corrected_coarse, stats
 
     def _normalize_audio_for_encoder(self, x_aud):
@@ -632,7 +721,13 @@ class CrossModalSNN(nn.Module):
             aud_detail = self._cue_detail_state(
                 spike_aud_cue, self.cfg["dims"]["D_aud"], batch, device, dtype)
             if self.use_audio_local_cue and spike_aud_local is not None:
-                aud_local_cue = rate(spike_aud_local)
+                if isinstance(spike_aud_local, dict):
+                    aud_local_cue = {
+                        name: rate(value)
+                        for name, value in spike_aud_local.items()
+                    }
+                else:
+                    aud_local_cue = rate(spike_aud_local)
 
         img_key_rate = cross_key_img_rate_override
         if img_key_rate is None and mem.get("key_img") is not None:

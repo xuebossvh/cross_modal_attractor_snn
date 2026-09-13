@@ -15743,39 +15743,45 @@ python -u scripts/run_v12a_suite.py --eval_only --with_ablations
 当前输出目录为 `outputs/outputs_v12a/`、`outputs/outputs_v12a_control/` 和
 `outputs/outputs_v12a_no_causal/`；本地已审阅产物位于 `v12a_outputs/outputs/`。
 
-## 2026-09-13 v12a demo 抽样规则修订
+## 2026-09-14 v12b 实现记录
 
-**改动类型**：评估 demo 逻辑与文档规范，不改变训练、模型前向或全量评估指标。
+**改动类型**：在 v12a 音频恢复路径上增加多尺度局部 cue 和中间尺度 Cross-Key；不改变
+MNIST/FSDD 类别级绑定，不把恢复梯度经 Value 传回 Index。
 
-**改动原因**：此前 `scripts/demo_inference.py` 直接取测试集第一个 batch 的前 `n` 个样本，
-样本位置固定且可能带来顺序偏差，不能代表从整个测试集抽取的可视化样本。
+**实现内容**：
 
-**完成内容**：
+- Audio Encoder 暴露 `conv1`、`conv2` 局部脉冲序列，经过 rate 后由带 mask 的零初始化
+  projector 注入 Audio Decoder 的 `16/32/64` 三个特征尺度；旧的单尺度 projector 保留为
+  v12a 兼容 fallback。
+- 在音频 decoder 的 `32x32` 中间特征增加零初始化 `aud_cross_adapter_mid`，与最终
+  Cross-Key 一样只调制音频缺失区，不写回 Value 或 Index。
+- 时频梯度损失的相邻差分 mask 改为两端并集，补足缺失区域边界的对称监督。
+- 新增 `configs/v12b.yaml`、`v12b_control.yaml`、`v12b_no_causal.yaml`、
+  `scripts/run_v12b_suite.py` 和 `scripts/smoke_test_v12b.py`。
 
-- 从完整 `test_loader.dataset` 生成固定 seed 的随机无重复索引，再用标准 batch collate
-  组装 demo batch；默认 `--num=10` 保持不变。
-- seed 按 `eval.demo_seed`、`eval.random_seed`、顶层 `seed` 顺序回退，并在日志中记录
-  实际 seed 与完整样本索引。
-- `fixed_mask` 与 `legacy_random` 使用同一组抽样索引，仅 corruption protocol 不同。
-- smoke test 新增固定 seed、全测试集范围、非前十样本和可复现性检查。
+**训练协议**：从 `outputs/checkpoints/cross_modal_snn_v12a.pt` 启动，父权重 SHA256 为
+`0a49aaf709ed257d7a6361ec5c09dcdd7b3e01ce90548070a3ff178a5402290e`；主实验和
+`no_causal` 先额外训练 30 轮，control 为同一 v12a 权重的冻结评估；保持
+`batch_size=128`、五类 audio family 均衡采样和 `severity=0.4`。
 
-**验证**：`py_compile`、`scripts/smoke_test_v12a.py` 和 `git diff --check` 均通过；没有重跑
-训练或全量评估，原有全测试集指标不变。完整 demo 指标仍只表示 `n=10` 可视化样本，不能
-替代全量测试集评估。
+**验证**：已通过 Python 语法检查、v12b CPU shape/pasteback/local-cue/Cross-Key smoke
+检查和 `git diff --check`。本次未上传数据、outputs 或 checkpoint；训练与全量评估待在
+GPU 实例执行，结果按统一 fixed/random、逐 family、Cross-Key、训练统计和 demo 指标
+追加到本文件，不另建独立结果文件。
 
-## 当前运行说明（v12a）
+## 当前运行说明（v12b）
 
-当前活动版本仍为 `v12a`。训练和评估必须在项目根目录、已激活环境和可用 GPU 中执行；
-demo 会从完整测试集按固定 seed 抽样并在日志记录 indices。
+当前活动版本为 `v12b`。必须在项目根目录、已激活环境和可用 GPU 中运行；父 checkpoint
+需先存在于 `outputs/checkpoints/cross_modal_snn_v12a.pt`。
 
 ```bash
-# 主实验 + control；加 --with_ablations 才顺序训练 no-causal
-nohup python -u scripts/run_v12a_suite.py --with_ablations > v12a_suite.log 2>&1 < /dev/null &
-tail -f v12a_suite.log
+# 主实验、control，并可选顺序训练 no-causal
+nohup python -u scripts/run_v12b_suite.py --with_ablations > v12b_suite.log 2>&1 < /dev/null &
+tail -f v12b_suite.log
 
-# 已有 checkpoint 时只评估
-python -u scripts/run_v12a_suite.py --eval_only --with_ablations
+# 三组已有 checkpoint 时只评估
+python -u scripts/run_v12b_suite.py --eval_only --with_ablations
 ```
 
-当前输出目录为 `outputs/outputs_v12a/`、`outputs/outputs_v12a_control/` 和
-`outputs/outputs_v12a_no_causal/`；本地已审阅产物位于 `v12a_outputs/outputs/`。
+输出目录为 `outputs/outputs_v12b/`、`outputs/outputs_v12b_control/` 和
+`outputs/outputs_v12b_no_causal/`；当前尚无 v12b 训练或评估结果。
