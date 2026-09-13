@@ -597,6 +597,29 @@ def _plot_both(k, labels, img_cue, aud_cue, rec_img, rec_aud, tgt_img, tgt_aud,
     )
 
 
+def _sample_demo_batch(test_dataset, num, seed):
+    """从完整测试集可复现地抽取 demo 样本，而不是固定取第一个 batch。"""
+    total = len(test_dataset)
+    if total <= 0:
+        raise ValueError("test dataset is empty")
+    k = min(int(num), total)
+    if k <= 0:
+        raise ValueError("--num must be positive")
+
+    generator = torch.Generator()
+    generator.manual_seed(int(seed))
+    indices = torch.randperm(total, generator=generator)[:k].tolist()
+    samples = [test_dataset[index] for index in indices]
+    batch = torch.utils.data.default_collate(samples)
+    if len(batch) == 3:
+        x_img, x_aud, labels = batch
+        pair_ids = None
+    elif len(batch) == 4:
+        x_img, x_aud, labels, pair_ids = batch
+    else:
+        raise ValueError(f"demo batch must have 3 or 4 fields, got {len(batch)}")
+    return x_img, x_aud, labels, pair_ids, indices
+
 def main():
     fix_console_encoding()
     setup_matplotlib_chinese()
@@ -651,13 +674,18 @@ def main():
     proto_img = test_loader.dataset.prototype_img.to(device)
     proto_aud = test_loader.dataset.prototype_aud.to(device)
 
-    x_img, x_aud, labels, _ = unpack_paired_batch(next(iter(test_loader)))
-    k = min(args.num, x_img.size(0))
-    x_img = x_img[:k].to(device)
-    x_aud = x_aud[:k].to(device)
-    labels = labels[:k].to(device)
+    eval_cfg = cfg.get("eval", {}) or {}
+    demo_seed = int(eval_cfg.get(
+        "demo_seed", eval_cfg.get("random_seed", cfg.get("seed", 0))))
+    x_img, x_aud, labels, _, sample_indices = _sample_demo_batch(
+        test_loader.dataset, args.num, demo_seed)
+    k = x_img.size(0)
+    x_img = x_img.to(device)
+    x_aud = x_aud.to(device)
+    labels = labels.to(device)
 
-    log(f"[demo] 可视化 {k} 个样本  protocol={args.protocol}")
+    log(f"[demo] 可视化 {k} 个样本  protocol={args.protocol} "
+        f"sample_seed={demo_seed} indices={sample_indices}")
 
     img_mask_i = img_mask_b = None
     aud_mask_a = aud_mask_b = None
