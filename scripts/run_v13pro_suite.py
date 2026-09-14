@@ -18,7 +18,21 @@ from scripts.job_runner import run_job
 
 
 RECOVERY = ("control", "main", "no_causal", "no_cross")
-BASELINES = ("recognizer", "classifier", "cue_cnn", "conditioned_cnn")
+BASELINES = ("recognizer", "classifier", "cue_cnn", "conditioned_cnn", "matched_cnn")
+
+
+def matched_ann_width(cfg):
+    """Choose ANN width once from architecture size, before seeing validation/test data."""
+    from models.network import CrossModalSNN
+    from models.paper_baselines import RecoveryCNN
+    target = sum(p.numel() for p in CrossModalSNN(cfg).parameters())
+    candidates = tuple(range(16, 257, 8))
+    scored = []
+    for width in candidates:
+        count = sum(p.numel() for p in RecoveryCNN(width=width).parameters())
+        scored.append((abs(count - target), width, count))
+    _, width, count = min(scored)
+    return width, target, count
 
 
 def code_fingerprint():
@@ -35,10 +49,11 @@ def code_fingerprint():
 
 
 def build_plan(base, root, seeds=(1234, 2345, 3456), parent_epochs=100,
-               epochs=30, baseline_epochs=30, mechanism=False,
+               epochs=30, baseline_epochs=30, matched_ann_epochs=130, mechanism=False,
                speakers=None, holdout=None):
     root = Path(root).resolve()
     configs, training, testing = {}, [], []
+    ann_width, snn_params, ann_params = matched_ann_width(base)
     for seed in seeds:
         names = ["parent", *RECOVERY, *BASELINES]
         if mechanism:
@@ -54,7 +69,9 @@ def build_plan(base, root, seeds=(1234, 2345, 3456), parent_epochs=100,
             cfg["data"]["pairing"].update(enabled=False, return_pair_id=False, sample_targets_for_missing=False)
             cfg["audio"]["norm_stats_path"] = str(root / "train_audio_norm.pt")
             cfg["paper"] = dict(experiment=name, seed=seed, root=str(root),
-                                primary_endpoint="audio partial-cue masked MSE", init="fresh_lineage")
+                                primary_endpoint="audio partial-cue masked MSE", init="fresh_lineage",
+                                ann_width=ann_width, matched_ann_snn_parameters=snn_params,
+                                matched_ann_parameters=ann_params)
             cfg["validation"].update(enabled=True, split="val", max_batches=0, every_epochs=1)
             cfg["validation"]["score"] = dict(lambda_img=1., lambda_aud=4., lambda_pair=0., lambda_cls=.5)
             cfg["train"].update(epochs=epochs, start_epoch=0, init_required=True, init_load_optimizer=False,
@@ -83,6 +100,8 @@ def build_plan(base, root, seeds=(1234, 2345, 3456), parent_epochs=100,
                 cfg["cross_key_conditioning"]["enabled"] = False
             if name in BASELINES:
                 cfg["train"].update(epochs=baseline_epochs, lr=.001, init_ckpt_path="", init_required=False)
+            if name == "matched_cnn":
+                cfg["train"]["epochs"] = matched_ann_epochs
             if holdout:
                 for key in ("aud_train_modes",):
                     cfg["corruption"][key] = [x for x in cfg["corruption"][key] if x != holdout]
@@ -140,6 +159,7 @@ def main():
     ap.add_argument("--parent_epochs", type=int, default=100)
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--baseline_epochs", type=int, default=30)
+    ap.add_argument("--matched_ann_epochs", type=int, default=130)
     ap.add_argument("--mechanism_ablations", action="store_true")
     ap.add_argument("--speaker_test", nargs="+")
     ap.add_argument("--speaker_val", nargs="+")
@@ -157,14 +177,16 @@ def main():
         ap.error("Validation and test speakers must be disjoint")
     if any(not 0 <= seed < 2**31 for seed in args.seeds):
         ap.error("Training seeds must be within [0,2**31)")
-    if len(set(args.seeds)) != len(args.seeds) or min(args.parent_epochs, args.epochs, args.baseline_epochs) < 1:
+    if len(set(args.seeds)) != len(args.seeds) or min(args.parent_epochs, args.epochs,
+                                                       args.baseline_epochs, args.matched_ann_epochs) < 1:
         ap.error("Unique seeds and positive epoch budgets are required")
     root = Path(args.output).resolve()
     base = load_config(args.config)
     if not base["audio"].get("use_real_audio") or not base["data"].get("use_mnist"):
         ap.error("The formal suite requires real MNIST and FSDD")
     configs, training, testing = build_plan(base, root, args.seeds,
-        args.parent_epochs, args.epochs, args.baseline_epochs, args.mechanism_ablations,
+        args.parent_epochs, args.epochs, args.baseline_epochs, args.matched_ann_epochs,
+        args.mechanism_ablations,
         (args.speaker_test, args.speaker_val) if args.speaker_test else None, args.holdout_audio_family)
     for job in testing:
         job["command"] += ["--severities", *map(str, args.severities), "--mask_seeds", *map(str, args.mask_seeds)]
@@ -202,6 +224,7 @@ def main():
         marker.write_text(json.dumps(dict(fingerprint=fingerprint,
             output_sha256=file_sha256(job["output"])), indent=2), encoding="utf-8")
     run_job(["scripts/paper_statistics.py", "--root", str(root)], root / "logs" / "statistics.log")
+    run_job(["scripts/paper_profile.py", "--root", str(root)], root / "logs" / "complexity_profile.log")
     print("[paper] ALL REQUESTED TASKS COMPLETED; paper claims still require reviewing the results.", flush=True)
 
 

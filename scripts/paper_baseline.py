@@ -16,8 +16,12 @@ from models.paper_baselines import CleanRecognizers, RecoveryCNN
 from paths import resolve_from_root
 
 
-def make_model(kind):
-    return CleanRecognizers() if kind in ("recognizer", "classifier") else RecoveryCNN(conditioned=kind == "conditioned_cnn")
+def make_model(kind, cfg=None):
+    if kind in ("recognizer", "classifier"):
+        return CleanRecognizers()
+    width = int((cfg or {}).get("paper", {}).get("ann_width", 32))
+    conditioned = kind in ("conditioned_cnn", "matched_cnn")
+    return RecoveryCNN(conditioned=conditioned, width=width)
 
 
 def region_mse(rec, target, mask):
@@ -49,7 +53,7 @@ def batch_loss(model, batch, cfg, kind, mode, family, device, protos):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--kind", choices=("recognizer", "classifier", "cue_cnn", "conditioned_cnn"), required=True)
+    ap.add_argument("--kind", choices=("recognizer", "classifier", "cue_cnn", "conditioned_cnn", "matched_cnn"), required=True)
     ap.add_argument("--resume", action="store_true")
     args = ap.parse_args()
     cfg = load_config(args.config)
@@ -59,7 +63,7 @@ def main():
     set_seed(cfg["seed"] + (100000 if args.kind == "recognizer" else 0))
     train, val = build_loaders(cfg, eval_split="val")
     protos = (train.dataset.prototype_img.to(device), train.dataset.prototype_aud.to(device))
-    model = make_model(args.kind).to(device)
+    model = make_model(args.kind, cfg).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=cfg["train"]["lr"])
     last, best = (resolve_from_root(cfg["train"][k]) for k in ("ckpt_path", "best_ckpt_path"))
     last.parent.mkdir(parents=True, exist_ok=True)

@@ -130,8 +130,10 @@ class PaperTests(unittest.TestCase):
         self.assertFalse(by_name["parent_no_kwta"]["ablation"]["use_kwta"])
         self.assertFalse(by_name["control"]["audio_local_cue"]["multiscale"])
         self.assertTrue(by_name["main"]["audio_local_cue"]["multiscale"])
-        self.assertEqual(len(training), 13)
-        self.assertEqual(len(testing), 9)
+        self.assertEqual(by_name["matched_cnn"]["train"]["epochs"], 130)
+        self.assertGreater(by_name["matched_cnn"]["paper"]["ann_width"], 32)
+        self.assertEqual(len(training), 14)
+        self.assertEqual(len(testing), 10)
         self.assertNotEqual(by_name["recognizer"]["train"]["ckpt_path"], by_name["classifier"]["train"]["ckpt_path"])
 
     def test_holdout_removed_from_all_training(self):

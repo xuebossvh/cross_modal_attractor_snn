@@ -14,13 +14,14 @@ v13pro 在 v12b 模型结构上补充面向论文的实验基础设施，不宣�
 | no_causal | 同一 parent 后 30 轮 | 去掉排名正则，保留 Cross-Key |
 | no_cross | 同一 parent 后 30 轮 | 去掉 decoder Cross-Key，保留多模态 Index |
 | classifier | 从头 30 轮 | predicted/soft medoid 基线；oracle medoid 只作诊断 |
-| cue_cnn / conditioned_cnn | 各从头 30 轮 | 本模态 mask-aware / 预测类别条件 CNN |
+| cue_cnn / conditioned_cnn | 各从头 30 轮 | 输入公平的轻量 mask-aware / 类别条件 CNN |
+| matched_cnn | 从头 130 轮 | 按 SNN 参数量自动匹配宽度的 ANN 对照 |
 | recognizer | 独立从头 30 轮 | 只看 clean 训练集，不参与恢复 loss |
 
-默认 3 seeds：1234、2345、3456，共 27 个训练任务、累计 1020 model-epochs。
-不同结构每轮耗时不同，不能把 model-epochs 当 GPU 小时。CNN 是简单筛查基线，
-不是参数匹配 ANN；其 30 轮也不等于 SNN 的 100+30 轮总预算。
-可用 `--baseline_epochs 130` 补做更充分的 CNN 预算对照，不用测试集挑预算。
+默认 3 seeds：1234、2345、3456，共 30 个训练任务、累计 1410 model-epochs。
+不同结构每轮耗时不同，不能把 model-epochs 当 GPU 小时。`matched_cnn` 是参数规模
+公平对照；其它 CNN 仍是轻量筛查基线。matched CNN 的 130 轮预算在运行前固定，
+不使用测试集挑预算。
 
 ## 数据与统计
 
@@ -65,11 +66,13 @@ best.pt 用于评估，last.pt 用于恢复。不要直接训练 `configs/v13pro
 - `--speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker`：指定说话人留出。
 - `--holdout_audio_family partial_temporal --output outputs/v13pro_ood`：训练不见该 family，测试仍覆盖。
 - `--eval_only --run`：只评估已完成权重；须保持原来的 seeds、预算及协议参数。
+- `python scripts/paper_profile.py --root outputs/v13pro`：汇总每个 checkpoint 的参数、
+  延迟、操作估计、脉冲率和 CUDA 峰值显存。
 
 机制探针包含撤去完整外部电流、膜电位扰动、活动轨迹与保类统计；它们是操作性证据，
 不是吸引子存在定理或能耗优势证明。默认记录完整前向的耗时与参数量，不宣称硬件能效。
 
 完整设计见 [idea_report](docs/idea_report.md)，实现与参数见
 [implementation](docs/implementation.md)，工程检查及真实实验结果只归档到
-[dev_log](docs/dev_log.md)。第二数据集、参数/预算匹配 ANN、正式文献基线和实际多 seed
-训练结果仍需完成；工程测试通过不等于这些研究证据已经具备。
+[dev_log](docs/dev_log.md)。CCF-C 级真实多 seed 训练仍需执行；CCF-B 的第二数据集和
+正式文献基线仍需具备真实数据/实现后运行。工程测试通过不等于这些研究证据已经具备。

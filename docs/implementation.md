@@ -10,8 +10,9 @@ MNIST/FSDD 仍是类别级 many-to-many；保留 simultaneous、batch 128、
 Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cue 和 Cross-Key。
 正式套件从新划分重新训练父模型，不加载曾看过新验证子集的旧版本权重。
 
-实现可运行不代表论文实验已完成，更不代表已经达到 CCF C 录用要求。
-第二数据集、参数/预算匹配 ANN、正式文献方法对照尚未提供，不能宣称已补齐全部证据。
+实现可运行不代表论文实验已完成，更不代表已经达到 CCF C 或 CCF B 录用要求。
+本轮补充 CCF-C 所需的参数匹配 ANN 与复杂度报告；CCF-B 的第二真实数据集和正式
+文献方法对照仍需真实数据/代码后运行，不能以占位脚本冒充完成。
 
 ## 1. 文件职责
 
@@ -24,12 +25,13 @@ Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cu
 | `data/dataset.py` | 类别组合、训练集 medoid、稳定测试身份 |
 | `data/audio_features.py` | 64x64 log-mel；仅新训练录音的归一化 |
 | `models/network.py` / `memory.py` | 原 SNN 前向、可选 Index 动态探针 |
-| `models/paper_baselines.py` | Clean CNN、mask-aware CNN、类别条件 CNN |
+| `models/paper_baselines.py` | Clean CNN、mask-aware CNN、类别条件 CNN、参数匹配 ANN |
 | `scripts/train.py` | SNN 父模型/恢复分支训练和 best/last checkpoint |
 | `scripts/paper_baseline.py` | 分类、独立识别器与 CNN 恢复训练 |
 | `scripts/paper_validation.py` | 新验证集上的音频部分缺失主要终点 |
 | `scripts/paper_evaluate.py` | 全测试集、逐样本指标、Cross-Key、机制和耗时 |
 | `scripts/paper_statistics.py` | 跨 seed 均值/标准差、配对聚类 bootstrap |
+| `scripts/paper_profile.py` | 参数、MAC 上界、激活操作估计、脉冲率、延迟和 CUDA 显存 |
 | `scripts/test_paper_protocol.py` / `smoke_test.py` | CPU 离线回归与完整链路测试 |
 
 逐实验配置和产物只在 `outputs/v13pro/`，不进代码仓库。旧版本 YAML/专用 suite/smoke
@@ -96,9 +98,11 @@ no-cross 仅禁用 decoder Cross-Key，Index 仍接受双模态，不能叫“�
 | no_cross | 同 seed parent best | 30 | decoder 跨 Key 条件关闭 |
 | classifier | 从头、与 external 不同种子偏移 | 30 | 预测类别/soft medoid |
 | recognizer | clean-only 独立 CNN | 30 | 不参与恢复 loss 的外部内容识别 |
-| cue_cnn / conditioned_cnn | 从头 | 各 30 | 简单筛查基线，不是参数匹配 ANN |
+| cue_cnn / conditioned_cnn | 从头 | 各 30 | 输入公平的轻量 ANN 基线 |
+| matched_cnn | 从头 | 130 | 按 SNN 参数量选宽度的 ANN 公平基线 |
 
-默认 seeds=1234/2345/3456，27 个训练任务，累计 1020 model-epochs。
+默认 seeds=1234/2345/3456，30 个训练任务，累计 1410 model-epochs；其中
+`matched_cnn` 使用 130 轮，避免把低预算 CNN 当作公平强基线。
 `--baseline_epochs 130` 可提高四个 CNN/分类任务预算；不能将其默认 30 轮与 SNN
 100+30 轮称为总预算匹配。`--mechanism_ablations` 另加每 seed 两组 100+30 轮：
 no-recurrence 和 no-kWTA 的父模型也重新训练，默认合计 1800 model-epochs。
@@ -126,8 +130,10 @@ random。fixed 默认为五组配对 family，不是完整 25 组合；`--all_fa
   source 不存在或没有有效区域/匹配时为 NaN，不用 0 替代。
 - 外部识别器另报 clean test ACC；较差识别器不能作为可信恢复质量证据。oracle medoid
   使用真值标签，仅为诊断，不能列为可部署方法。
-- `global_ssim` 明确是原全局简化定义，不是标准滑窗 SSIM。latency 记录批次前向耗时，
-  参数量注明配置允许训练范围；没有 FLOPs/SOP、能耗或参数匹配优势的结论。
+- `global_ssim` 明确是原全局简化定义，不是标准滑窗 SSIM。`paper_profile.py` 记录
+  批次前向 latency、参数量、模块 MAC 上界、按非零输入比例加权的操作估计、各级脉冲率
+  和 CUDA 峰值显存；操作估计不是精确 FLOPs/SOP，显存/延迟需在目标 GPU 实测，不能据此
+  宣称芯片能耗或能效优势。
 - 每个 SNN 额外全测试集运行 Index 探针：撤去 1/4、1/2、完整 T 后的外部输入电流
   （包含 bias），继续 10 步并施加 std=0.2 膜电位扰动。报告 5 步窗口 rate 的分类、
   一致率、膜电位/活动距离。未扰动变静默也可能“一致”，不能据此宣称吸引子已证实。
@@ -163,11 +169,14 @@ python scripts/run_v13pro_suite.py --run --mechanism_ablations --output outputs/
 python scripts/run_v13pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker
 python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v13pro_ood
 python scripts/paper_statistics.py --root outputs/v13pro --cluster speaker
+python scripts/paper_profile.py --root outputs/v13pro
 python scripts/smoke_test.py
 ```
 
 预算、强度和 seeds 请在训练前确定。例如 `--severities 0.2 0.4 0.6 --mask_seeds 5678 6789 7890`
-会显著增加评估量。第二数据集、现代关联记忆基线和参数匹配 ANN 不在本套件中冒充完成。
+会显著增加评估量。`--speaker_test/--speaker_val` 与 `--holdout_audio_family` 是
+CCF-B 泛化扩展；第二数据集和正式文献基线必须在真实数据/实现可用后单独运行，当前不
+冒充已经完成。
 
 ## 7. 文档归档
 

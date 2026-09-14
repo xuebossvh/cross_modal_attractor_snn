@@ -19987,3 +19987,63 @@ tail -f v13pro_suite.log
 完成标记校验计划、代码、checkpoint 和评估产物，未完成训练恢复 last。更改计划
 须另设 `--output`；不同时运行两份。数据/输出路径均来自当前项目，不使用旧服务器
 绝对路径。详细可选预算、speaker/OOD/机制开关见 `implementation.md` 第 6 节。
+
+## 2026-09-15
+
+### v13pro：CCF-C 实验完整性补充与 CCF-B 扩展边界
+
+**改动原因**：审稿人视角检查后，原 v13pro 虽已有独立划分、三 seed、消融、全量
+指标和 bootstrap，但 CNN 仍是明确标注的轻量筛查基线，且没有独立的参数/操作/脉冲率
+报告。因此不能把原套件称为 CCF-C 证据已经齐全，更不能直接声称达到 CCF-B。
+
+**文档先行**：代码修改前已更新 `docs/idea_report.md` 当前 v13pro 设计和
+`docs/implementation.md` 的实验/文件职责/预算/运行说明。CCF-C 与 CCF-B 的验收边界
+分别写明；第二真实数据集和正式文献基线仍标记为待真实数据/实现，不用占位代码代替。
+
+**实现变更**：
+
+- `models/paper_baselines.py` 的 `RecoveryCNN` 与 `CleanRecognizers` 支持显式 width。
+- `scripts/run_v13pro_suite.py` 新增 `matched_cnn`，在不查看验证/测试指标的情况下，
+  根据 v13pro SNN 总参数量从固定候选宽度中选最接近的 ANN；每 seed 默认额外训练 130 轮。
+- `scripts/paper_baseline.py` 和 `scripts/paper_evaluate.py` 接入 `matched_cnn`，其输入、
+  paste-back、target 与主套件一致；它是参数规模公平的 ANN 对照，不宣称 SOTA。
+- 新增 `scripts/paper_profile.py`，对每个已完成 checkpoint 输出参数量、实际可训练参数、
+  批次延迟、dense MAC 上界、按非零输入比例加权的操作估计、Key/Index 脉冲率和 CUDA
+  峰值显存。操作估计不是精确 SOP/FLOPs，也不是芯片能耗测量。
+- 套件完成训练/评估/统计后自动运行复杂度 profile，结果仍写入 `outputs/`，不进入仓库。
+
+**预算变化**：默认每 seed 为 parent 100 轮、control/main/no-causal/no-cross 各 30 轮、
+四个原有 CNN/分类任务各 30 轮、matched_cnn 130 轮；共 10 个训练任务、470 model-epochs。
+三 seed 共 30 个训练任务、1410 model-epochs。`matched_cnn` 的预算在运行前固定，不能
+通过测试集挑选。
+
+**验证**：
+
+- `python -m compileall -q common.py data models scripts`：通过。
+- `python scripts/test_paper_protocol.py`：15/15 通过。
+- 单 seed dry-run：训练任务 10、评估任务 8，成功生成 matched_cnn 命令；缩小轮数仅用于
+  检查计划，不是正式结果。
+- `paper_profile.py --help`：通过；RecoveryCNN width=16 的最小 hook 前向通过。
+
+**结论边界**：本条只证明实验工程补齐了 CCF-C 所需的关键对照和成本记录入口，尚无真实
+CUDA 多 seed 指标，因此不能写成“满足 CCF-C”。CCF-B 还必须实际运行 speaker-disjoint /
+corruption-OOD、加入第二真实数据集/任务、实现并公平运行至少一个正式文献基线，并将其
+逐实验指标追加到本文件；当前这些仍是待运行项。
+
+#### 运行说明
+
+CCF-C 级主套件仍使用：
+
+```bash
+python scripts/run_v13pro_suite.py --dry_run
+nohup python -u scripts/run_v13pro_suite.py --run > v13pro_suite.log 2>&1 < /dev/null &
+tail -f v13pro_suite.log
+```
+
+全部任务完成后，套件会自动执行 `paper_statistics.py` 和 `paper_profile.py`。CCF-B 扩展
+使用新的输出目录，避免覆盖 C 级结果：
+
+```bash
+python scripts/run_v13pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker
+python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v13pro_ood
+```

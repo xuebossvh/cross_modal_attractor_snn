@@ -154,7 +154,7 @@ def main():
         raise ValueError("Formal v13pro evaluation requires real MNIST and FSDD")
     protos = (dataset.prototype_img.to(device), dataset.prototype_aud.to(device))
     kind = cfg["paper"]["experiment"]
-    is_snn = kind not in ("classifier", "cue_cnn", "conditioned_cnn")
+    is_snn = kind not in ("classifier", "cue_cnn", "conditioned_cnn", "matched_cnn")
     state = torch.load(resolve_from_root(cfg["train"]["eval_ckpt_path"]), map_location="cpu")
     if state.get("cfg", {}).get("_audio_norm_stats") != cfg.get("_audio_norm_stats"):
         raise ValueError("Evaluation normalization differs from training checkpoint")
@@ -162,7 +162,7 @@ def main():
         for section in ("paper", "dims", "snn", "index", "ablation", "audio_local_cue", "cross_key_conditioning"):
             if state.get("cfg", {}).get(section) != cfg.get(section):
                 raise ValueError(f"Checkpoint configuration mismatch: {section}")
-    model = (CrossModalSNN(cfg) if is_snn else make_model(kind)).to(device)
+    model = (CrossModalSNN(cfg) if is_snn else make_model(kind, cfg)).to(device)
     model.load_state_dict(state["model"], strict=True)
     model.eval()
     external_state = torch.load(args.recognizer, map_location="cpu")

@@ -22,10 +22,10 @@ class DigitCNN(nn.Module):
 
 
 class CleanRecognizers(nn.Module):
-    def __init__(self, classes=10):
+    def __init__(self, classes=10, width=32):
         super().__init__()
-        self.img = DigitCNN(classes)
-        self.aud = DigitCNN(classes)
+        self.img = DigitCNN(classes, width=width)
+        self.aud = DigitCNN(classes, width=width)
 
 
 class MaskedConvDecoder(nn.Module):
@@ -59,11 +59,11 @@ def pasteback(pred, cue, mask):
 
 
 class RecoveryCNN(nn.Module):
-    def __init__(self, classes=10, conditioned=True):
+    def __init__(self, classes=10, conditioned=True, width=32):
         super().__init__()
-        self.recognizers = CleanRecognizers(classes)
-        self.img_decoder = MaskedConvDecoder(classes)
-        self.aud_decoder = MaskedConvDecoder(classes)
+        self.recognizers = CleanRecognizers(classes, width=width)
+        self.img_decoder = MaskedConvDecoder(classes, width=width)
+        self.aud_decoder = MaskedConvDecoder(classes, width=width)
         self.conditioned = conditioned
 
     def forward(self, img, aud, masks, proto_img, proto_aud):
