@@ -49,7 +49,7 @@ def _load_output_cfg(config_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v12a.yaml")
+    ap.add_argument("--config", required=True)
     args = ap.parse_args()
 
     cfg = _load_output_cfg(args.config)

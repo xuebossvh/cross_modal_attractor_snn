@@ -71,7 +71,7 @@ def _deep_merge_config(base, override):
     return merged
 
 
-def load_config(path="configs/v12a.yaml", _seen=None):
+def load_config(path="configs/v13pro.yaml", _seen=None):
     """Load YAML with an optional relative ``extends`` parent."""
     config_path = Path(path).resolve()
     seen = set() if _seen is None else set(_seen)
@@ -95,6 +95,15 @@ def set_seed(seed):
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def save_checkpoint_atomic(state, path):
+    """A killed writer must not replace the last complete checkpoint."""
+    import os
+    path = Path(path)
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save(state, temporary)
+    os.replace(temporary, path)
 
 
 def unpack_paired_batch(batch):

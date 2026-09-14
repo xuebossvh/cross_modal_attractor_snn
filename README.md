@@ -1,152 +1,75 @@
-# 跨模态循环吸引子 SNN：v11g
+# 跨模态循环吸引子 SNN：v13pro
 
-当前分支为 **v11g**。在已训练的 v11e_control 上冻结基础网络，只训练
-**缺失区域 Cross-Key 特征调制**。研究目标是让正确的对侧 Key 改善部分残缺和
-全缺失恢复，同时避免基础分类能力因恢复训练而漂移。
+v13pro 在 v12b 模型结构上补充面向论文的实验基础设施，不宣称已经达到 CCF C 录用标准。
+保留 MNIST/FSDD 类别级绑定、Value + gated own cue、simultaneous、batch 128，以及
+恢复 loss 经 Value 到 Index 的梯度隔离。默认不需要 v11g/v12a/v12b 的旧权重。
 
-详细设计、实验协议与结果归档统一记录在
-[implementation](docs/implementation.md) 和 [dev_log](docs/dev_log.md)；
-历史版本配置请切换对应分支查看。
+## 实验内容
 
-文档闭环：v11g 的初始方案与研究假设在
-[idea_report](docs/idea_report.md)，最终实现与真实配置在
-[implementation](docs/implementation.md)，逐实验完整评估和结论在
-[dev_log](docs/dev_log.md)。不再创建版本专用协议或结果 Markdown。
+| 实验 | 每个 seed 的训练预算 | 含义 |
+|---|---:|---|
+| parent | 从头 100 轮 | 新划分、单尺度结构，验证集选 best |
+| control | 同一 parent 后 30 轮 | 单尺度等额外预算对照，不再是零轮冻结参考 |
+| main | 同一 parent 后 30 轮 | 多尺度局部 cue + 中间 Cross-Key |
+| no_causal | 同一 parent 后 30 轮 | 去掉排名正则，保留 Cross-Key |
+| no_cross | 同一 parent 后 30 轮 | 去掉 decoder Cross-Key，保留多模态 Index |
+| classifier | 从头 30 轮 | predicted/soft medoid 基线；oracle medoid 只作诊断 |
+| cue_cnn / conditioned_cnn | 各从头 30 轮 | 本模态 mask-aware / 预测类别条件 CNN |
+| recognizer | 独立从头 30 轮 | 只看 clean 训练集，不参与恢复 loss |
 
-## 1. 四项修改
+默认 3 seeds：1234、2345、3456，共 27 个训练任务、累计 1020 model-epochs。
+不同结构每轮耗时不同，不能把 model-epochs 当 GPU 小时。CNN 是简单筛查基线，
+不是参数匹配 ANN；其 30 轮也不等于 SNN 的 100+30 轮总预算。
+可用 `--baseline_epochs 130` 补做更充分的 CNN 预算对照，不用测试集挑预算。
 
-1. **局部条件化**：不再全局修改 Value。Value + gated own cue detail 经原
-   decoder 得到特征，在末层卷积前用对侧 Key 调制缺失区域的空间/时频特征。
-   仍是同一个 decoder，不增加独立的图像/音频输出 residual 分支。
-2. **冻结基础模型**：Encoder、Key、Index、Value、Classifier、原 Decoder/Refiner
-   和 own-detail fusion 的参数与运行状态均固定，只训练两个新 adapter。
-   重建不能通过 Value 影响 Index，`detach_value_for_recon=true` 保持不变。
-3. **正向因果目标**：正确 Key 的绝对恢复 loss，加上相对 zero/wrong-class 的
-   margin loss；参考输出不反传，归一化有 batch floor，避免除以单样本近零误差。
-   同类别其它实例不是负样本，不能通过降低 zero 基线质量制造收益。
-4. **分开评价**：Index ACC、恢复内容类别一致性、masked MSE、normal/zero/wrong/
-   same-class 对照及改善比例。门控非零不等于成功，必须看 normal 是否优于冻结 zero。
+## 数据与统计
 
-```text
-MNIST -> Image Encoder -> Image Key --+
-                                     +-> recurrent Index -> Value states
-FSDD  -> Audio Encoder -> Audio Key --+        |
-                                              +-> Classifier (frozen)
+MNIST 官方训练集分层留出约 6000 张作验证，其余约 54000 张训练，官方 10000 张测试。
+FSDD index 10-49 训练、5-9 验证、0-4 测试；完整数据对应 2400/300/300 条录音。
+归一化和类别 medoid 只来自新训练集。验证集负责选权重，不使用测试集选择 epoch。
 
-Value_img + gated own image detail -> Image Decoder features F_img
-  F_img + masked Cross-Key modulation(K_aud) -> same decoder head -> image
+mask seed 与训练 seed 分离，mask 按测试样本身份生成，不受 batch 大小影响。
+全测试集逐样本指标包括分类、图像/音频误差、缺失/可见区、能量、独立内容识别和
+Cross-Key 干预。全局简化 SSIM 明确命名 `global_ssim`，不是标准滑窗 SSIM。
+三种音频部分残缺 cue 的 masked MSE 是预先指定主要终点，partial_temporal 单列。
 
-Value_aud + gated own audio detail -> Audio Decoder features F_aud
-  F_aud + masked Cross-Key modulation(K_img) -> same decoder head -> log-mel
-```
+bootstrap 按录音或 speaker 聚类，不能将 10000 次音频配对当作 10000 条独立录音。
+训练 seed 标准差与固定模型的测试集区间分开报告。
 
-adapter 使用目标 cue、缺失 mask、基础特征和对侧已知损坏比例作为上下文。
-对侧 Key 投影后乘性调制局部特征；输出层零初始化。对侧不存在则该方向没有
-Cross-Key；目标完全干净则不修改恢复。部分残缺时通路参与训练，是否真的帮助
-由 paired 指标判断，不能把“允许模型忽略它”当作实验结论。
+## 一条命令
 
-输出端再次按 mask 选择，保证可见位置和关闭通路时的输出与冻结基线一致。
-这里的保护是保持**基线输出**，不意味着音频可见区一定等于原始 cue。
-
-## 2. 数据与维度
-
-MNIST 和 FSDD 仍采用同数字类别内的 many-to-many 随机组合。没有人工固定
-实例对，不启用 GRID、Cross-Detail 或 exact-pair alignment。
-
-| cue | 图像 target | 音频 target |
-|---|---|---|
-| audio-only | 训练集类别 medoid | 当前 clean sample |
-| image-only | 当前 clean sample | 训练集类别 medoid |
-| image+audio | 当前 clean sample | 当前 clean sample |
-
-| 模块 | 图像 | 音频 |
-|---|---:|---:|
-| 输入 | 1x28x28 | 64x64 log-mel |
-| cue encoder rate / Key rate | 128 / 128 | 128 / 128 |
-| Value state | 384 | 768 |
-| own detail 投影 | 128 | 256 |
-| decoder 输入 | 512 | 1024 |
-| adapter 所在特征图 | 32x28x28 | 16x64x64 |
-
-Index=512、T=20、simultaneous、batch_size=128 保持不变。
-五种图像 family：occlusion、pixel_delete、mask_vertical、mask_horizontal、salt_mask。
-五种音频 family：time_mask、freq_mask、feature_dropout、partial_temporal、time_freq_block。
-训练均衡轮转 family，severity 固定 0.4，不重复父模型低强度暖启动。
-
-## 3. 前置条件
-
-在**项目根目录**运行，使用已验证可 GPU 训练的环境。训练入口不再静默回退 CPU。
-本分支不要求更换已工作的 PyTorch/CUDA；依赖见 `requirements.txt`。
-
-- 数据：`_data/MNIST/`、`_data/fsdd/recordings/`、父模型使用的音频归一化统计。
-- 父权重：`outputs/checkpoints/cross_modal_snn_v11e_control.pt`。
-- 父权重 SHA256：
-  `5a792f10e57a95947c8e51bd915b09897baee01475103010826f25275b71501b`。
-- checkpoint 来自独立 checkpoint 仓库或已有 v11e 输出，不随代码仓库上传。
-- 父模型缺失、摘要或关键配置不匹配直接失败；不要删掉这些检查来从随机模型起跑。
-
-## 4. 一条命令顺序执行
+在 GPU 服务器的项目根目录运行；无需套用旧服务器的绝对路径：
 
 ```bash
-nohup python -u scripts/run_v11g_suite.py --with_ablations > v11g_suite.log 2>&1 < /dev/null &
+nohup python -u scripts/run_v13pro_suite.py --run > v13pro_suite.log 2>&1 < /dev/null &
 ```
 
-执行顺序：main 训练及评估/可视化 -> 冻结 control 评估/可视化 ->
-no_causal 训练及评估/可视化。去掉 `--with_ablations` 不运行 no_causal。
-主实验和 no_causal 各额外训练 30 轮；control 是父模型的固定零通路参考，
-**0 轮额外优化，不是等预算重训的 control**。
-
-每个配置运行 fixed normal+family breakdown、fixed sweep、random normal、
-random sweep，以及 fixed/random 的三张 demo。日志同时输出终端并写入各自目录，
-失败停止后续步骤；最后会输出 `[suite] ALL STAGES COMPLETED`。
+先完成训练，再全量评估和统计。SSH 断开后先检查进程；任务确实退出时重敲同一命令，
+会校验完成记录并跳过已完成任务，未完成训练从 last checkpoint 续训。不要同时启动两份。
 
 ```bash
-tail -f v11g_suite.log
-python -u scripts/run_v11g_suite.py --eval_only --with_ablations
-python -u scripts/run_v11g_suite.py --resume
-python scripts/run_v11g_suite.py --with_ablations --dry_run
+tail -f v13pro_suite.log
+python scripts/run_v13pro_suite.py --dry_run
+python scripts/smoke_test.py
 ```
 
-`--resume` 要求对应训练 checkpoint 已存在。若主实验已完成但 no_causal 尚未
-开始，不要给整个套件加 `--resume --with_ablations`；单独启动 no_causal。
+输出在 `outputs/v13pro/`，逐实验 YAML 自动生成，不向 `configs/` 添加旧版本副本。
+best.pt 用于评估，last.pt 用于恢复。不要直接训练 `configs/v13pro.yaml`，它只是套件模板。
+更改代码、配置或协议时用新的 `--output`，不覆盖已有实验清单。
 
-## 5. 单独运行
+## 可选扩展
 
-```bash
-python -u scripts/train.py --config configs/v11g.yaml
-python -u scripts/train.py --config configs/v11g.yaml --resume
-python -u scripts/train.py --config configs/v11g_no_causal.yaml
+- `--mechanism_ablations`：无循环/无 kWTA 的父模型也从头训练，各 100+30 轮。
+- `--severities 0.2 0.4 0.6 --mask_seeds 5678 6789 7890`：多强度、多 mask 重复。
+- `--all_family_pairs`：五类图像 × 五类音频的 25 组合，显著增加评估量。
+- `--speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker`：指定说话人留出。
+- `--holdout_audio_family partial_temporal --output outputs/v13pro_ood`：训练不见该 family，测试仍覆盖。
+- `--eval_only --run`：只评估已完成权重；须保持原来的 seeds、预算及协议参数。
 
-python -u scripts/evaluate.py --config configs/v11g_control.yaml --protocol fixed_mask --severity 0.4
-python -u scripts/evaluate.py --config configs/v11g.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep
-python -u scripts/evaluate.py --config configs/v11g.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
-python -u scripts/demo_inference.py --config configs/v11g.yaml --protocol fixed_mask --severity 0.4
-python -u scripts/demo_inference.py --config configs/v11g.yaml --protocol legacy_random --severity 0.4
-```
+机制探针包含撤去完整外部电流、膜电位扰动、活动轨迹与保类统计；它们是操作性证据，
+不是吸引子存在定理或能耗优势证明。默认记录完整前向的耗时与参数量，不宣称硬件能效。
 
-fixed_mask 对每种 family 用确定性 mask；random 在每 batch 随机抽取 family 和
-mask，使用独立 `eval.random_seed=4321` 以便重复比较。
-`evaluate.py --random_seed 5678` 可换一组抽样；random demo 是小样本展示，
-不等于全量 random 评估。十张示例不能替代全测试集统计。
-
-## 6. 输出与验收
-
-产物在 `outputs/outputs_v11g{,_control,_no_causal}/`：
-`logs/`、`tables/`、`figures/`。随机 demo 带 `_random.png` 后缀。
-
-`tables/eval_<protocol>_sev0.4_key_<normal|sweep>_detail_normal.csv` 为长表，
-包含 family、cue、target 粒度、metric、value、有效样本数。
-sweep 重点检查 `*_normal_mse`、`*_zero_mse`、`*_wrong_mse`、
-`*_correct_gain`、`*_win_zero` 和 `*_win_both`。正 gain 才代表相对基线改善。
-
-`content_img_*_acc` / `content_aud_*_acc` 是恢复内容经冻结原模型单模态再分类
-的准确率，**只是内部一致性代理，不是独立识别器**；它与 Index ACC 不同。
-原 demo 的 pred 注释仍来自 Index，不能据此声称恢复内容类别正确。
-
-```bash
-python -u scripts/smoke_test_v11g.py --cli
-python -u scripts/smoke_test_v11g.py --parent outputs/checkpoints/cross_modal_snn_v11e_control.pt
-```
-
-上述为离线 CPU 回归，不下载数据，也不改现有训练 checkpoint。
-完整 3080 GPU 收敛、各 family 的真实收益仍需正式训练与评估验证。
+完整设计见 [idea_report](docs/idea_report.md)，实现与参数见
+[implementation](docs/implementation.md)，工程检查及真实实验结果只归档到
+[dev_log](docs/dev_log.md)。第二数据集、参数/预算匹配 ANN、正式文献基线和实际多 seed
+训练结果仍需完成；工程测试通过不等于这些研究证据已经具备。

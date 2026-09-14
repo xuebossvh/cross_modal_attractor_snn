@@ -1,7 +1,8 @@
 """Run the current offline regression suite."""
 
 import bootstrap  # noqa: F401
-from smoke_test_v12a import main
+import unittest
+import test_paper_protocol
 
 if __name__ == "__main__":
-    main()
+    unittest.main(module=test_paper_protocol)

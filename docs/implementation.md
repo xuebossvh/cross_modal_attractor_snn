@@ -1,245 +1,176 @@
 # 实现指南：Cross-Modal Attractor SNN
 
-> 当前实现分支：`v12b`
-> 当前目标：在 v12a 的音频恢复路径上增加多尺度 mask-aware 局部 cue 与中间尺度 Cross-Key。
-> 文档关系：初始设计见 `docs/idea_report.md`，过程与结果见 `docs/dev_log.md`，用户约束见 `docs/user_requirements.md`。
+> 当前实现分支：`v13pro`。先看本文，再看 `docs/dev_log.md` 的真实结果。
+> 研究假设见 `docs/idea_report.md`；用户约束见 `docs/user_requirements.md`。
 
-## 0. 当前版本边界
+## 0. 当前边界
 
-v12b 保留 v12a 的 MNIST + FSDD 类别级绑定、`Key -> simultaneous recurrent Index -> Value`、
-`Value + same-modal cue detail` decoder 输入、`detach_value_for_recon=true`、
-`batch_size=128` 和五类均衡缺失采样。它只增强音频 decoder 的局部特征注入与现有
-Masked Cross-Key 的中间尺度条件，不增加 GRID、固定伪配对、Cross-Detail、pair alignment
-或独立 residual decoder。
+v13pro 保留 v12b 模型主线，新增论文实验协议，而不是新的恢复结构。
+MNIST/FSDD 仍是类别级 many-to-many；保留 simultaneous、batch 128、
+Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cue 和 Cross-Key。
+正式套件从新划分重新训练父模型，不加载曾看过新验证子集的旧版本权重。
 
-v12b 的五个研究动作是：
+实现可运行不代表论文实验已完成，更不代表已经达到 CCF C 录用要求。
+第二数据集、参数/预算匹配 ANN、正式文献方法对照尚未提供，不能宣称已补齐全部证据。
 
-1. 从 v12a checkpoint 启动，冻结 Encoder、Key、Index、Value、Classifier 和图像路径。
-2. 在音频 decoder 输出处执行 mask 回填：可见区直接使用输入音频，缺失区使用预测。
-3. 暴露 Audio Encoder 的 `conv1/conv2` 局部脉冲率，在 decoder 的 `16/32/64` 尺度使用
-   零初始化、带 mask 的局部 cue projector。
-4. 保留对侧 `K_img -> audio` 的 Masked Cross-Key，并在 `32x32` 中间特征和最终特征上调制，
-   仍只作用于音频缺失区；不写回 Value 或 Index。
-5. 修正时频梯度损失的缺失边界对称性，并继续使用缺失区 MSE/L1、能量和结构约束。
-
-历史版本的设计动机和结果仍在 `idea_report.md`、`dev_log.md` 中；本文不重复展开已经
-废止的版本配置。旧配置只能在对应 Git 分支中使用。
-
-文档阅读顺序固定为：先看当前 v12b 的第 0-6 节，再按 `dev_log.md` 的
-`v11c → v11d → v11e → v11f → v11g → v12a → v12b` 统一评估入口查看结果；旧版本索引只用于追溯，
-不作为当前运行入口。
-
-## 1. 真实目录与职责
-
-```text
-cross_modal_attractor_snn/
-├── configs/
-│   ├── v12b.yaml
-│   ├── v12b_control.yaml
-│   └── v12b_no_causal.yaml
-├── data/                 # MNIST/FSDD、log-mel 和 corruption
-├── models/               # LIF、encoder、memory、decoder、顶层网络
-├── scripts/              # train/evaluate/demo/suite/smoke
-├── docs/                 # 核心设计、实现、日志和用户约束
-├── _data/                # 本地数据，不进代码仓库
-└── outputs/              # 本地运行产物，不进代码仓库
-```
+## 1. 文件职责
 
 | 路径 | 职责 |
 |---|---|
-| `common.py` | 配置合并、seed、cue、target、公共指标 |
-| `data/dataset.py` | MNIST/FSDD 类别级 many-to-many 数据集与 train medoid |
-| `data/audio_features.py` | WAV 到 64x64 log-mel 及训练集归一化统计 |
-| `data/corruption.py` | 五类图像和五类音频缺失，返回 `1=missing` mask |
-| `models/encoders.py` | 图像/音频 SNN encoder，输出时间脉冲序列和音频局部脉冲 |
-| `models/memory.py` | Key、循环 Index、Value 和 binding/readout |
-| `models/decoders.py` | decoder、refiner 和 `MaskedCrossKeyAdapter` |
-| `models/network.py` | 前向接线、冻结父模型、门控融合、局部音频 cue、Cross-Key 干预 |
-| `models/frozen_base.py` | 父 checkpoint SHA256、配置和冻结 state 校验 |
-| `scripts/train.py` | decoder/主训练、重建损失、causal margin |
-| `scripts/evaluate.py` | fixed/random、family、Cross-Key sweep 和 CSV |
-| `scripts/demo_inference.py` | fixed/random 小样本可视化 |
-| `scripts/run_v12b_suite.py` | 顺序执行 train、eval、demo，可选 no-causal |
-| `scripts/smoke_test_v12b.py` | v12b 的 shape、回填、多尺度 cue、梯度和严格加载回归 |
+| `configs/v13pro.yaml` | 唯一活动模板，禁止直接用于 train.py |
+| `scripts/run_v13pro_suite.py` | 生成逐实验 YAML、锁定计划、顺序训练/评估/统计、重启 |
+| `scripts/job_runner.py` | 记录子进程日志，失败停止，清理子进程 |
+| `data/splits.py` | train/val/test 划分、音频内容指纹、划分审计 |
+| `data/dataset.py` | 类别组合、训练集 medoid、稳定测试身份 |
+| `data/audio_features.py` | 64x64 log-mel；仅新训练录音的归一化 |
+| `models/network.py` / `memory.py` | 原 SNN 前向、可选 Index 动态探针 |
+| `models/paper_baselines.py` | Clean CNN、mask-aware CNN、类别条件 CNN |
+| `scripts/train.py` | SNN 父模型/恢复分支训练和 best/last checkpoint |
+| `scripts/paper_baseline.py` | 分类、独立识别器与 CNN 恢复训练 |
+| `scripts/paper_validation.py` | 新验证集上的音频部分缺失主要终点 |
+| `scripts/paper_evaluate.py` | 全测试集、逐样本指标、Cross-Key、机制和耗时 |
+| `scripts/paper_statistics.py` | 跨 seed 均值/标准差、配对聚类 bootstrap |
+| `scripts/test_paper_protocol.py` / `smoke_test.py` | CPU 离线回归与完整链路测试 |
 
-## 2. 数据、target 与张量
+逐实验配置和产物只在 `outputs/v13pro/`，不进代码仓库。旧版本 YAML/专用 suite/smoke
+保留在旧分支；迁移时本地旧文件可保留但不跟踪，不能再作为当前命令入口。
 
-MNIST 图像为 `[B,1,28,28]`，FSDD 音频先转成 `[B,64,64]` 的 log-mel。两种模态只共享
-digit label，因此同类别内随机组合；没有人工 instance pair。缺失模态的类别 target
-是只由训练集构建的 class medoid，不能使用测试集样本构建原型。
+## 2. 数据与目标
 
-| cue | 图像 target | 音频 target |
+默认 `data.paper_split.enabled=true` 由 suite 注入，旧默认数据协议不被暗中修改。
+
+| 数据 | train | validation | test |
+|---|---|---|---|
+| MNIST | 官方训练集按类别留出后约 54000 | 约 6000，固定 split seed=20260915 | 官方 10000 |
+| FSDD official | index 10-49，完整数据 2400 条 | index 5-9，300 条 | index 0-4，300 条 |
+| FSDD speaker | 除留出 speaker 外全部录音 | 明确 val speaker | 明确 test speaker |
+
+音频归一化的缓存指纹包含训练录音内容 SHA256、划分和特征参数；不匹配则重算。
+medoid 只由新 train 子集构建。MNIST 加载失败不允许静默切换为合成图像。
+`split_val.json`、`split_test.json` 保存图像索引和录音列表，阻止同一计划中途换数据。
+
+| cue | image target | audio target |
 |---|---|---|
-| `image-only` | 当前图像 sample | 训练集音频 category medoid |
-| `audio-only` | 训练集图像 category medoid | 当前音频 sample |
-| `image+audio` | 当前图像 sample | 当前音频 sample |
+| image-only | 当前 sample | train category medoid |
+| audio-only | train category medoid | 当前 sample |
+| image+audio | 当前 sample | 当前 sample |
 
-脉冲序列使用 `[T,B,D]`，rate/state 使用 `[B,D]`，当前 `T=20`。
+没有真实实例绑定，不启用 exact-pair InfoNCE/Cross-Detail。测试配对是稳定的同类组合，
+`evaluation_identity` 保存 image_id、audio_id、speaker；复用录音不算独立新音频样本。
 
-| 信号 | shape | 说明 |
-|---|---:|---|
-| image/audio encoder output | `[20,B,128]` | 模态编码脉冲 |
-| `K_img`, `K_aud` | `[20,B,128]` | Key LIF 输出脉冲 |
-| `Index A` | `[20,B,512]` | 两个 Key 同时驱动的循环层 |
-| `index_state` | `[B,512]` | Index rate，送分类器 |
-| `V_img_from_A` | `[B,384]` | 图像 Value state |
-| `V_aud_from_A` | `[B,768]` | 音频 Value state |
-| image/audio own detail | `[B,128]` / `[B,256]` | cue rate 经 projector |
-| image/audio decoder state | `[B,512]` / `[B,1024]` | Value 与 gated detail 拼接 |
-| decoder feature | `[B,32,28,28]` / `[B,16,64,64]` | Cross-Key 调制前特征 |
-| audio local cue | `conv1: [20,B,32,32,32]`, `conv2: [20,B,64,16,16]` | Audio Encoder 局部脉冲率 |
-| projected audio local cue | `16/32/64` 尺度分别匹配 decoder stage | 带 mask、零初始化 projector |
-| final output | `[B,1,28,28]` / `[B,64,64]` | 图像概率图 / log-mel |
+## 3. 模型与梯度
 
-## 3. 前向计算
+| 信号 | 维度 |
+|---|---|
+| image / audio | [B,1,28,28] / [B,64,64] |
+| encoder / Key spikes | [20,B,128]，各模态独立 |
+| Index spikes / rate | [20,B,512] / [B,512] |
+| image / audio Value state | [B,384] / [B,768] |
+| own detail | [B,128] / [B,256] |
+| decoder input | [B,512] / [B,1024] |
+| audio local rates | conv1 [B,32,32,32]；conv2 [B,64,16,16] |
 
 ```text
-image cue -> image encoder -> K_img -+
-                                      +-> simultaneous recurrent Index -> V_img/V_aud
-audio cue -> audio encoder -> K_aud -+                         |
-                                                                +-> classifier
-
-V_img + gated image detail -> ImageDecoder feature F_img
-K_aud -> masked feature adapter -> F_img' -> image head/refiner
-
-V_aud + gated audio detail -> AudioDecoder feature F_aud
-audio conv1/conv2 rate + mask -> multi-scale local projectors -> F_aud
-K_img -> intermediate/final masked feature adapters -> F_aud' -> audio head
+cue -> SNN Encoder -> Key -> simultaneous recurrent Index -> Value -> Decoder
+  |                                         |                  ^
+  +-> own detail / local rates              +-> classifier     |
+opposite Key -> masked Cross-Key feature modulation ------------+
 ```
 
-`_fuse_decoder_state` 先根据 `detach_value_for_recon` detach `V_from_A`，再把本模态
-cue rate 投影到 detail channel，并用 `sigmoid(Linear([Value,detail]))` 做逐维 detail
-门控。门控只改变送入 decoder 的 detail，不改变 Key、Index 或原始 Value。
+父模型从头训练全部可训练参数；恢复分支仅放开 audio decoder、local projectors、
+image/audio Cross-Key adapters。图像基础 decoder/refiner 冻结，但图像 Cross-Key adapter
+仍可训练，不能称整个图像路径冻结。恢复 loss 经 Value 回到 Index 的路径始终 detach；
+从头训练阶段 own cue 等其它梯度路径仍存在，不能说整个基础模型从一开始都冻结。
 
-当 `cross_key_conditioning.mode=masked_feature` 时，decoder 先得到基础特征 `F`。
-`MaskedCrossKeyAdapter` 将对侧 Key rate 投影为 `key_channels=16` 的条件，并计算：
+control 使用单尺度局部 cue、末层 Cross-Key；main 使用多尺度和中间 Cross-Key。
+no-cross 仅禁用 decoder Cross-Key，Index 仍接受双模态，不能叫“完全无跨模态联系”。
 
-```text
-F' = F + M * gate(F, cue, M, source_quality) * delta(F, K_other)
-```
+## 4. 预算与模型选择
 
-其中 `M=1` 是目标缺失区。adapter 的输出层零初始化，所以未训练时与父模型一致；
-zero Key、缺少对侧 cue 或目标没有缺失区时不产生修正。音频局部 cue 的最后投影层也
-零初始化，加载 v11g 权重时不会突然改变 decoder；该分支只影响音频 decoder feature。
-head/refiner 后再次用 mask 保护可见位置，音频输出为 `M * prediction + (1-M) * cue`。
-v12b 的 Cross-Key 不写回 Value，也不改变分类 logits；恢复 loss 仍不能通过 Value 影响 Index。
+| 实验 | 初始化 | 默认轮数 | 比较边界 |
+|---|---|---:|---|
+| parent | 从头 | 100 | 新划分重新学习，不是原 v12a checkpoint |
+| control | 同 seed parent best | 30 | 与 main 相同额外优化预算 |
+| main | 同 seed parent best | 30 | v12b 多尺度结构 |
+| no_causal | 同 seed parent best | 30 | Cross-Key 排名正则关闭 |
+| no_cross | 同 seed parent best | 30 | decoder 跨 Key 条件关闭 |
+| classifier | 从头、与 external 不同种子偏移 | 30 | 预测类别/soft medoid |
+| recognizer | clean-only 独立 CNN | 30 | 不参与恢复 loss 的外部内容识别 |
+| cue_cnn / conditioned_cnn | 从头 | 各 30 | 简单筛查基线，不是参数匹配 ANN |
 
-单尺度兼容接口：`forward_with_local` 返回 `{"conv1": spikes1, "conv2": spikes2}`，
-network 将各项转成 rate。`v12b_control` 关闭 multiscale 时必须取 `local_cue["conv2"]`
-再 detach，送入原 v12a 单尺度 projector；仍兼容直接传入 conv2 tensor 的旧调用。
-修复此接口不改变 checkpoint 参数名称、shape 或主实验的多尺度计算。回归测试必须覆盖
-三份配置的全部八种 cue，并验证 control 的字典输入与旧 tensor 路径结果一致。
+默认 seeds=1234/2345/3456，27 个训练任务，累计 1020 model-epochs。
+`--baseline_epochs 130` 可提高四个 CNN/分类任务预算；不能将其默认 30 轮与 SNN
+100+30 轮称为总预算匹配。`--mechanism_ablations` 另加每 seed 两组 100+30 轮：
+no-recurrence 和 no-kWTA 的父模型也重新训练，默认合计 1800 model-epochs。
 
-## 4. 训练与三组实验
+所有恢复模型只用 val 的三个音频部分缺失 cue 的 masked MSE 选择 best：
+corrupt_aud_only、clean_img_corrupt_aud、corrupt_both。全验证集参与；family 按 batch
+均衡轮转、分组等权宏平均，不是每条验证样本都遍历五个 family。留出 family 不参与
+训练或验证选择。分类/外部识别器按 clean val 错误率选择。
 
-| 配置 | 父权重 | 额外训练 | 可训练参数 | causal |
-|---|---|---:|---|---|
-| `v12b_control` | v12a checkpoint | 0 轮，仅评估 | 无；关闭 v12b 新增 cue/中间 adapter | 关 |
-| `v12b` | v12a checkpoint | 30 轮起步 | audio decoder、多尺度 local cue projector、Cross-Key adapters | 开，0.5 |
-| `v12b_no_causal` | v12a checkpoint | 30 轮起步 | 同 v12b | 关 |
+`last.pt` 恢复优化器、scheduler 和 epoch；`best.pt` 只用于评估。checkpoint 原子替换，
+先保存 best 再保存 last。新 suite 的训练 RNG 按 epoch/step 固定，避免模型额外随机
+计算改变下一步 cue；不能承诺所有 CUDA 算子跨硬件逐位一致。实际轮数、seed 和预算
+必须随最终结果报告；100/30 是预算，不是收敛保证。
 
-三组固定 `seed=1234`、`batch_size=128`、`severity=0.4`、五类图像/音频 family 均衡
-采样。control 是 v11g 冻结父模型参考，不是等预算重训。causal loss 只在有效缺失区比较
-正确 Key、zero Key 和异类 wrong Key；zero/wrong 前向在 `no_grad` 中执行，same-class
-Key 只作诊断，不能作为负样本。v12a 的 `freeze_base=false` 仅表示允许显式列出的
-恢复模块训练；`trainable_prefixes` 仍冻结 Encoder、Key、Index、Value 和 Classifier。
+## 5. 全量评估与统计
 
-父权重必须通过配置中的 SHA256 和关键 forward 配置检查。冻结参数和 buffers 每次保存
-前都计算摘要；缺失父权重、错误摘要或不兼容 checkpoint 直接失败。
+默认在全部训练完成后，遍历全部 10000 个测试组合、8 cue、fixed 五组 family 和
+random。fixed 默认为五组配对 family，不是完整 25 组合；`--all_family_pairs` 展开 25。
+`--severities`、`--mask_seeds` 可扩展强度和重复，mask 由样本身份生成，独立于模型 seed。
 
-## 5. 评估口径
+- 主指标：Index ACC（SNN）、classifier ACC（CNN）、image/audio MSE、global SSIM、
+  PSNR、missing/visible MSE/L1、missing fraction、独立恢复内容 ACC。
+- 音频辅助：foreground missing MSE、top15 recall、rec/target mean/std/max。
+- Cross-Key：normal/zero/wrong/same-class 绝对 missing MSE、gain/damage、win、gate/ratio。
+  source 不存在或没有有效区域/匹配时为 NaN，不用 0 替代。
+- 外部识别器另报 clean test ACC；较差识别器不能作为可信恢复质量证据。oracle medoid
+  使用真值标签，仅为诊断，不能列为可部署方法。
+- `global_ssim` 明确是原全局简化定义，不是标准滑窗 SSIM。latency 记录批次前向耗时，
+  参数量注明配置允许训练范围；没有 FLOPs/SOP、能耗或参数匹配优势的结论。
+- 每个 SNN 额外全测试集运行 Index 探针：撤去 1/4、1/2、完整 T 后的外部输入电流
+  （包含 bias），继续 10 步并施加 std=0.2 膜电位扰动。报告 5 步窗口 rate 的分类、
+  一致率、膜电位/活动距离。未扰动变静默也可能“一致”，不能据此宣称吸引子已证实。
 
-`fixed_mask` 为主协议：按 `seed`、family 和 batch 确定 mask，同一位置可跨模型比较。
-`legacy_random` 使用 `eval.random_seed=4321` 每个 batch 抽取 family 和 mask；相同 seed
-可复现，但它不是单一固定 mask。两者不能混成一个平均值。
+`per_item.csv.gz` 保存身份、family、seed 和所有已计算指标；`summary.json` 保存各场景
+全量均值和有效 n；`index_probes.json` 保存动态曲线；`complete.json` 保存配置、权重、
+外部识别器、测试清单及产物校验和。`--smoke_batches` 强制写入 smoke_evaluation，
+明确 full_test=false，不能进入正式汇总。
 
-每个实验都必须逐 cue、逐 family 记录以下字段中实际存在的值：
-
-- Index ACC；图像/音频 MSE、SSIM、PSNR；缺失区和可见区 MSE/L1。
-- 恢复图像/音频经冻结原模型再分类的内部内容 ACC，并与 Index ACC 分开。
-- Cross-Key `normal/zero/wrong/same-class` 绝对误差、relative gain、
-  `win_zero/win_wrong/win_both`、gate、ratio 和有效 `n`。
-- 音频 rec/tgt mean、std、max、top15% energy recall、family breakdown。
-- 训练 loss、学习率、轮数和 demo 小样本统计，单独标记其非全测试集性质。
-
-数值缺失写 `N/A` 并说明原因；不能用 0 替代。主实验、control 和每个消融必须有独立
-结论，训练轮数、seed、mask 或 target 不一致时不能作强因果比较。完整结果直接追加到
-`docs/dev_log.md`，原始 CSV/log/PNG 只作为 `outputs/` 证据。
-
-Demo 抽样规则：`scripts/demo_inference.py` 的小样本只用于可视化，不参与全测试集指标。
-它必须使用固定 seed 从完整 test dataset 生成不重复的随机索引，再抽取 `--num` 个样本，
-不得直接取第一个 batch。seed 按 `eval.demo_seed`、`eval.random_seed`、顶层 `seed` 的顺序
-回退；日志必须记录实际使用的 seed 和样本索引。相同版本、数据集和 seed 应得到相同样本；
-`fixed_mask` 与 `legacy_random` 只改变 corruption protocol，不改变抽样样本。
-
-### 5.1 结果展示与归档
-
-v11c 至 v11g 的统一评估入口为 [本地结果汇总](dev_log.md#evaluation-format-20260912)：
-[v11c](dev_log.md#evaluation-v11c)、[v11d](dev_log.md#evaluation-v11d)、
-[v11e](dev_log.md#evaluation-v11e)、[v11f](dev_log.md#evaluation-v11f)、
-[v11g](dev_log.md#evaluation-v11g)。这是已有 CSV/日志的重新排版，不是重跑评估。
-
-每版先列真实实验组和训练预算；“分类与恢复”表按输入模式、实验排列，固定分列
-Index ACC、图像 MSE/SSIM、音频 MSE/SSIM。fixed 与 random 分表，区域误差、
-内容分类、干预、family、训练及 demo 另列。历史版本缺项明确标注，不使用新版本
-字段假装补齐旧实验。完整要求见 `user_requirements.md` 的“统一评估版式”。
-
-v12b 的新增多尺度 cue 只读取残缺输入及其 mask，不读取 target；mask 以最近邻方式对齐到
-各 decoder 尺度。时频梯度损失对相邻差分的 mask 使用两端并集，避免只监督一侧边界。
+`statistics.json` 分开报告训练种子的均值/样本标准差、每个固定模型的配对聚类区间。
+主要终点是 fixed severity=0.4 下三种音频部分残缺 cue 的 missing MSE，partial_temporal
+单列。比较 main/control、no-causal/control、no-cross/control、main/no-causal、main/no-cross。
+bootstrap 对 cluster 内配对曝光先取均值，再等权重采 cluster；不是曝光加权估计。
+录音 cluster 不处理同 speaker 内相关性，`--cluster speaker` 可补敏感性分析；六个
+speaker 的区间也很不稳定。多指标探索不自动产生显著性结论。
 
 ## 6. 运行命令
 
-必须在项目根目录、已激活环境和可用 GPU 中运行。suite 会按顺序运行，并把每个阶段的
-stdout 同时写入对应日志；任何阶段失败都会停止后续任务。
+在服务器当前项目根目录，先激活已有 CUDA Python 环境。默认无旧权重依赖：
 
 ```bash
-# 主实验 + control；加 --with_ablations 才运行 no_causal
-nohup python -u scripts/run_v12b_suite.py --with_ablations > v12b_suite.log 2>&1 < /dev/null &
-tail -f v12b_suite.log
-
-# 只评估已有三组 checkpoint
-python -u scripts/run_v12b_suite.py --eval_only --with_ablations
-
-# 主实验已完成、control 评估中断：重跑 control 评估，然后训练/评估 no-causal
-nohup python -u scripts/run_v12b_suite.py --start_from control --with_ablations > v12b_suite_continue.log 2>&1 < /dev/null &
-tail -f v12b_suite_continue.log
-
-# 单独评估；--family_breakdown 额外输出音频 family 表
-python -u scripts/evaluate.py --config configs/v12b.yaml --protocol fixed_mask --severity 0.4 --cross_key sweep --family_breakdown
-python -u scripts/evaluate.py --config configs/v12b.yaml --protocol legacy_random --severity 0.4 --cross_key sweep
-python -u scripts/demo_inference.py --config configs/v12b.yaml --protocol fixed_mask --severity 0.4 --num 10
-python -u scripts/demo_inference.py --config configs/v12b.yaml --protocol legacy_random --severity 0.4 --num 10
+python scripts/run_v13pro_suite.py --dry_run
+nohup python -u scripts/run_v13pro_suite.py --run > v13pro_suite.log 2>&1 < /dev/null &
+tail -f v13pro_suite.log
 ```
 
-去掉 `--with_ablations` 时只运行 main 和冻结 control。`--max_batches` 只能限制评估，
-不能缩短训练；`--resume` 只在目标训练 checkpoint 已存在时使用。
-`--start_from` 可选 `main`（默认）、`control`、`no_causal`，只执行该实验及后续实验；
-`no_causal` 需要同时指定 `--with_ablations`。它不会自动跳过所选实验的训练：若相应
-checkpoint 已训练完成，添加 `--eval_only`；仅部分训练完成则添加 `--resume`。
+确实退出后重跑同一命令；先检查旧进程，禁止同时运行两份。已完成任务检查配置/代码/
+权重及评估产物 SHA 后跳过，未完成训练恢复 last。修改计划要用新的 --output。
+同样参数加 `--eval_only` 可只评估。任务异常中止，不把日志存在当完成。
 
-输出目录为 `outputs/outputs_v12b/`、`outputs/outputs_v12b_control/` 和
-`outputs/outputs_v12b_no_causal/`；checkpoint 为 `outputs/checkpoints/` 下对应文件。
-`outputs/`、`_data/` 和 checkpoint 默认不进入代码仓库。
+```bash
+python scripts/run_v13pro_suite.py --run --mechanism_ablations --output outputs/v13pro_mechanism
+python scripts/run_v13pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker
+python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v13pro_ood
+python scripts/paper_statistics.py --root outputs/v13pro --cluster speaker
+python scripts/smoke_test.py
+```
 
-## 7. 历史版本索引
+预算、强度和 seeds 请在训练前确定。例如 `--severities 0.2 0.4 0.6 --mask_seeds 5678 6789 7890`
+会显著增加评估量。第二数据集、现代关联记忆基线和参数匹配 ANN 不在本套件中冒充完成。
 
-| 版本 | 当前文档中的唯一入口 | 状态 |
-|---|---|---|
-| v9/v9a/v9b/v9c | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验 |
-| v10a-v10f | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验 |
-| v11a-v11e | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验/已废止配置 |
-| v11g | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验 |
-| v12a | `docs/idea_report.md` 与 `docs/dev_log.md` | 历史实验 |
-| v12b | 本文第 0-6 节及 `docs/dev_log.md` 当前条目 | 当前实现 |
+## 7. 文档归档
 
-历史条目中的旧命令、旧输出路径和旧配置名称只用于追溯，不能复制到 v12b 运行。
-当前分支 `configs/` 的 v12b 三个 YAML 是当前运行入口，避免把旧版本配置带入新分支。
-
-## 8. 实现检查表
-
-- [x] 当前目录树、模块职责和三份 v12a 配置与仓库一致。
-- [x] MNIST/FSDD 64x64 log-mel、category target 和 tensor shape 已明确。
-- [x] `Value + own detail`、`detach_value_for_recon` 和 masked Cross-Key 已明确。
-- [x] main/control/no-causal 的父权重、预算、可训练范围和 causal 语义已明确。
-- [x] fixed/random、逐实验指标和结果归档位置已明确。
-- [x] v12a 初始假设在 `idea_report.md`，训练完成后的完整实测结果追加到 `dev_log.md` 的统一汇总。
+历史版本的完整结果按日期留在 `dev_log.md`，不要把旧运行说明作为当前入口。
+v13pro 的代码验证与状态追加在 2026-09-15 下；CUDA 正式实验、逐实验各指标、异常及
+限制待实际运行后再归档。不要另建版本专用结果 Markdown，也不要伪造缺失指标。

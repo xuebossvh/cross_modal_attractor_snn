@@ -125,7 +125,9 @@ class RecurrentIndexLayer(nn.Module):
             return (0.0, scale) if (t % 2 == 0) else (scale, 0.0)
         raise ValueError(f"Unknown index.input_schedule: {mode}")
 
-    def forward(self, key_img_spikes=None, key_aud_spikes=None):
+    def forward(self, key_img_spikes=None, key_aud_spikes=None, *,
+                external_steps=None, extra_steps=0, perturb_step=None,
+                perturbation=None, return_trace=False):
         assert (key_img_spikes is not None) or (key_aud_spikes is not None), \
             "Index 层至少需要一种模态输入。"
         ref = key_img_spikes if key_img_spikes is not None else key_aud_spikes
@@ -133,13 +135,24 @@ class RecurrentIndexLayer(nn.Module):
         device, dtype = ref.device, ref.dtype
         has_img = key_img_spikes is not None
         has_aud = key_aud_spikes is not None
+        external_steps = T if external_steps is None else int(external_steps)
+        if not 0 <= external_steps <= T or extra_steps < 0:
+            raise ValueError("Invalid probe duration")
+        if perturbation is not None and perturbation.shape != (B, self.n_index):
+            raise ValueError("perturbation must have shape [B,N_index]")
 
         v = self.neuron.init_state((B, self.n_index), device, dtype)
         prev_spikes = torch.zeros((B, self.n_index), device=device, dtype=dtype)
 
         spikes_out = []
-        for t in range(T):
+        voltages = []
+        for t in range(T + int(extra_steps)):
             img_gate, aud_gate = self._input_gates(t, T, has_img, has_aud)
+            # Withdraw the whole afferent current, including Linear biases.
+            if t >= external_steps:
+                img_gate = aud_gate = 0.0
+            if perturbation is not None and t == perturb_step:
+                v = v + perturbation
             if self.use_recurrent:
                 current = self.W_rec(prev_spikes)
             else:
@@ -150,6 +163,8 @@ class RecurrentIndexLayer(nn.Module):
                 current = current + aud_gate * self.alpha_aud * self.W_aud_to_A(key_aud_spikes[t])
 
             v = self.neuron.beta * v + current
+            if return_trace:
+                voltages.append(v.detach().clone())
             raw_spikes = spike_fn(v - self.neuron.v_threshold,
                                   self.neuron.surrogate_alpha)
             s = self._competition(v, raw_spikes) if self.use_kwta else raw_spikes
@@ -158,6 +173,9 @@ class RecurrentIndexLayer(nn.Module):
             spikes_out.append(s)
 
         index_spikes = torch.stack(spikes_out, dim=0)
+        if return_trace:
+            return {"spikes": index_spikes, "voltage": torch.stack(voltages),
+                    "rate": rate(index_spikes)}
         return index_spikes, rate(index_spikes)
 
 

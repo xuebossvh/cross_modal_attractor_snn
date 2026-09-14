@@ -6,6 +6,7 @@ import os
 import torch
 
 from paths import resolve_from_root
+from data.splits import audio_split, norm_fingerprint, paper_split
 
 
 def normalize_feature_per_sample(feat):
@@ -114,7 +115,7 @@ def _fsdd_train_wav_paths(cfg):
     paths = []
     for f in sorted(glob.glob(os.path.join(rec, "*.wav"))):
         idx = _parse(f)
-        if idx is not None and idx >= 5:
+        if idx is not None and audio_split(f, cfg) == "train":
             paths.append(f)
     return paths
 
@@ -139,12 +140,15 @@ def compute_audio_norm_stats(cfg):
     hi = torch.quantile(allv, p_hi / 100.0).item()
     if hi <= lo:
         hi = lo + 1e-6
-    return {
+    stats = {
         "lo": lo, "hi": hi,
         "n_mels": n_mels, "n_frames": n_frames,
         "percentile_lo": p_lo, "percentile_hi": p_hi,
         "n_wavs": len(paths),
     }
+    if paper_split(cfg).get("enabled", False):
+        stats["train_fingerprint"] = norm_fingerprint(paths, cfg)
+    return stats
 
 
 def save_audio_norm_stats(stats, path):
@@ -166,10 +170,15 @@ def ensure_audio_norm_stats(cfg):
         ac.get("norm_stats_path", "_data/audio_norm_stats.pt")))
     n_mels, n_frames = audio_feature_shape(cfg)
 
+    fingerprint = None
+    if paper_split(cfg).get("enabled", False):
+        fingerprint = norm_fingerprint(_fsdd_train_wav_paths(cfg), cfg)
+
     if os.path.isfile(stats_path):
         stats = load_audio_norm_stats(stats_path)
         if (stats.get("n_mels") == n_mels
-                and stats.get("n_frames") == n_frames):
+                and stats.get("n_frames") == n_frames
+                and (fingerprint is None or stats.get("train_fingerprint") == fingerprint)):
             return stats
         print(f"[audio] norm stats 尺寸不匹配，重新统计 -> {stats_path}", flush=True)
 

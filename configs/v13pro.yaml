@@ -1,4 +1,6 @@
-# v12b: v12a parent + multi-scale masked local audio cue and intermediate Cross-Key.
+# v13pro suite template: use scripts/run_v13pro_suite.py, not train.py directly.
+paper_template: true
+# v13pro: v12b architecture with independent paper splits and fresh lineages.
 # Self-contained config; missing modalities use train-set class medoids.
 seed: 1234
 device: cuda
@@ -101,7 +103,7 @@ decoder_pretrain:
   lambda_aud: 4.0
   lambda_aud_active: 1.0
   save_ckpt: true
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v12b_decoder_pretrain.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v13pro_decoder_pretrain.pt
 dims:
   img_in: 784
   img_hidden: 256
@@ -302,7 +304,7 @@ data:
     manifest_dir: ''
     augment: null
 train:
-  output_version: v12b
+  output_version: v13pro
   freeze_base: false
   require_cuda: true
   evaluation_only: false
@@ -315,13 +317,13 @@ train:
   lr_min: 1.0e-05
   lr_step_size: 15
   lr_gamma: 0.5
-  init_ckpt_path: outputs/checkpoints/cross_modal_snn_v12a.pt
-  parent_sha256: 0a49aaf709ed257d7a6361ec5c09dcdd7b3e01ce90548070a3ff178a5402290e
+  init_ckpt_path: ''
+  parent_sha256: ''
   init_strict: false
   init_allowed_missing_prefixes:
   - audio_local_cue_multiscale.
   - aud_cross_adapter_mid.
-  init_required: true
+  init_required: false
   init_load_optimizer: false
   start_epoch: 0
   trainable_prefixes:
@@ -332,8 +334,8 @@ train:
   - aud_cross_adapter.
   - aud_cross_adapter_mid.
   save_milestone_epochs: []
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v12b.pt
-  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v12b.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v13pro.pt
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v13pro.pt
 eval:
   recovery_classification: true
   random_seed: 4321

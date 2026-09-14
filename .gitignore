@@ -10,3 +10,9 @@ outputs/
 
 *.log
 *.tmp
+
+# Historical local files stay on disk, but not in the active version branch.
+configs/v12*.yaml
+scripts/run_v12*_suite.py
+scripts/smoke_test_v12*.py
+tmp/

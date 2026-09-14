@@ -819,7 +819,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v12a.yaml")
+    ap.add_argument("--config", required=True, help="Generated experiment YAML; v13pro full suite uses paper_evaluate.py")
     ap.add_argument("--ckpt", default=None)
     ap.add_argument("--max_batches", type=int, default=None)
     ap.add_argument("--random_seed", type=int, default=None)

@@ -19,6 +19,7 @@ from data.audio_features import (
 )
 from data.fsdd import ensure_fsdd, fsdd_recordings_dir
 from paths import resolve_from_root
+from data.splits import audio_split, image_indices, paper_split, write_split_audit
 
 
 class _SyntheticImages:
@@ -63,7 +64,7 @@ def _parse_fsdd_name(path):
     return digit, idx
 
 
-def _load_fsdd_by_digit(cfg, train):
+def _load_fsdd_by_digit(cfg, train, split=None):
     """加载 FSDD log-mel，返回特征池及与其同序的 wav 路径池。"""
     ac = cfg["audio"]
     try:
@@ -106,8 +107,7 @@ def _load_fsdd_by_digit(cfg, train):
             n_parse_skip += 1
             continue
         # FSDD 官方划分：index 0-4 为 test，5-49 为 train
-        is_test = idx < 5
-        if is_test != (not train):
+        if audio_split(f, cfg) != (split or ("train" if train else "test")):
             n_split_skip += 1
             continue
         try:
@@ -118,6 +118,8 @@ def _load_fsdd_by_digit(cfg, train):
             by_digit[digit].append(feat)
             paths_by_digit[digit].append(f)
         except Exception as e:
+            if paper_split(cfg).get("enabled", False):
+                raise RuntimeError(f"Publication data cannot silently skip {f}") from e
             if len(mel_errors) < 3:
                 mel_errors.append(f"{os.path.basename(f)}: {e}")
             continue
@@ -190,13 +192,15 @@ def _deterministic_audio_augment(feature, seed, augment_cfg):
 
 
 class PairedAudioVisualDataset(Dataset):
-    def __init__(self, cfg, train=True):
+    def __init__(self, cfg, train=True, split=None):
         data_cfg = cfg["data"]
         ac = cfg["audio"]
         self.num_classes = cfg["dims"]["num_classes"]
         self.n_mels, self.n_frames = audio_feature_shape(cfg)
         self.noise_std = ac["noise_std"]
-        self.train = train
+        self.split = split or ("train" if train else "test")
+        self.train = train = self.split == "train"
+        self.paper = paper_split(cfg).get("enabled", False)
         self.pairing_cfg = data_cfg.get("pairing", {}) or {}
         self.fixed_augmented_pairing = bool(
             self.pairing_cfg.get("enabled", False)
@@ -209,7 +213,7 @@ class PairedAudioVisualDataset(Dataset):
         self._fsdd = None
         self._fsdd_paths = None
         if self.use_real_audio:
-            self._fsdd, self._fsdd_paths = _load_fsdd_by_digit(cfg, train)
+            self._fsdd, self._fsdd_paths = _load_fsdd_by_digit(cfg, train, self.split)
         self.toy_audio_prototype = not self.use_real_audio
 
         self.audio_protos = _make_audio_prototypes(
@@ -220,10 +224,12 @@ class PairedAudioVisualDataset(Dataset):
             try:
                 from torchvision import datasets, transforms
                 tfm = transforms.ToTensor()
-                self._base = datasets.MNIST(root=data_cfg["root"], train=train,
+                self._base = datasets.MNIST(root=data_cfg["root"], train=self.split != "test",
                                             download=True, transform=tfm)
                 self._mode = "mnist"
             except Exception as e:
+                if self.paper:
+                    raise RuntimeError("Publication runs require real MNIST; no synthetic fallback") from e
                 print(f"[dataset] MNIST 不可用 ({e})，改用合成图像。", flush=True)
         if self._base is None:
             n = 6000 if train else 1000
@@ -237,13 +243,19 @@ class PairedAudioVisualDataset(Dataset):
         else:
             self._indices = list(range(len(self._base)))
 
-        self._rng = np.random.default_rng(0 if train else 1)
+        if self.paper:
+            labels = (self._base.targets if self._mode == "mnist" else self._base.labels)
+            self._indices = image_indices(labels, self.split, cfg)
+            if train and subset:
+                self._indices = self._indices[:subset]
+
+        self._rng = np.random.default_rng(cfg.get("seed", 0) if self.paper else (0 if train else 1))
         # 类别代表原型（class medoid），由 build_prototypes() 懒构建；
         # test 集通常复用 train 集原型（见 build_loaders）。
         self.prototype_img = None     # [C, 1, 28, 28]，真实 MNIST 样本
         self.prototype_aud = None     # [C, n_mels, n_frames]，真实 log-mel
         src = "FSDD+log-mel" if self.use_real_audio else "toy"
-        print(f"[dataset] {'train' if train else 'test'} | 图像={self._mode} "
+        print(f"[dataset] {self.split} | 图像={self._mode} "
               f"n={len(self)} | 音频={src} shape=[{self.n_mels},{self.n_frames}]",
               flush=True)
         if self.fixed_augmented_pairing:
@@ -380,6 +392,19 @@ class PairedAudioVisualDataset(Dataset):
         if hasattr(self._base, "labels"):
             return int(self._base.labels[int(item_index)])
         return int(self._base[int(item_index)][1])
+
+    def evaluation_identity(self, idx):
+        if self.train:
+            raise ValueError("Training audio pairing is random, not a stable evaluation identity")
+        item = self._indices[int(idx)]
+        label = self._label_for_item(item)
+        result = {"image_id": f"mnist_{self.split}_{item}", "label": label}
+        if not self.use_real_audio:
+            return dict(result, audio_id=f"synthetic_{label}_{item}", speaker="synthetic")
+        pool = self._fsdd_paths[label]
+        j = (item * 104729 + label * 1009) % len(pool)
+        name = os.path.basename(pool[j])
+        return dict(result, audio_id=name, speaker="_".join(name[:-4].split("_")[1:-1]))
 
     def export_pair_manifest(self, path):
         """导出可审计的一一配对清单，不实际复制扩增音频文件。"""
@@ -733,7 +758,12 @@ def build_loaders(cfg, eval_split=None, train_required=True):
         else:
             cfg["_audio_norm_stats"] = None
         train_set = PairedAudioVisualDataset(cfg, train=True)
-        test_set = PairedAudioVisualDataset(cfg, train=False)
+        split = (eval_split or "test") if paper_split(cfg).get("enabled", False) else "test"
+        if split not in ("val", "test"):
+            raise ValueError(f"Invalid evaluation split: {split}")
+        test_set = PairedAudioVisualDataset(cfg, train=False, split=split)
+        if paper_split(cfg).get("enabled", False):
+            write_split_audit(train_set, test_set, cfg)
     else:
         raise ValueError(f"unknown data.dataset: {dataset_kind}")
 

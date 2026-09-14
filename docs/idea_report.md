@@ -2,7 +2,7 @@
 > 创建时间：2026-07-07 | 当前用途：F 阶段迭代补充记录
 > 说明：本文件先记录当前 D-F 迭代中已经确认的实验设计，不回填完整 A/B/C 阶段长报告。
 > **纪律**：每次 F 阶段版本迭代（新配置、结构改动、消融设计）须同步更新本文件，与 `docs/implementation.md`（先写）和 `docs/dev_log.md`（后写）配套。
-> **文档导航**：本文记录研究问题、方案和预期实验；实际实现以 `docs/implementation.md` 为准；训练、评估和最终结论只追加到 `docs/dev_log.md`。当前版本为 `v12b`，带“已废止”标记的历史方案不属于当前运行入口。
+> **文档导航**：本文记录研究问题、方案和预期实验；实际实现以 `docs/implementation.md` 为准；训练、评估和最终结论只追加到 `docs/dev_log.md`。当前版本为 `v13pro`，带“已废止”标记的历史方案不属于当前运行入口。
 
 ---
 
@@ -12,21 +12,38 @@
 但不再作为当前运行入口。完整实现看 `docs/implementation.md`，完整训练和评估结果
 看 `docs/dev_log.md`。
 
-### v12b
+### v13pro（2026-09-15）
 
-v12b 针对 v12a 的音频缺失区长时段恢复不足：保留 `Value + gated own cue detail`、
-可见区回填和现有 Masked Cross-Key，不改变 Index/Value 分类链。Audio Encoder 的
-`conv1/conv2` 局部脉冲率经过带 mask 的多尺度 projector，分别进入 Audio Decoder 的
-`16/32/64` 特征尺度；现有 Cross-Key 增加零初始化的 `32x32` 中间尺度 adapter。
+本次按用户要求创建并推送 `v13pro` 分支，沿用 v12b 模型结构，不覆盖历史评估。目标是补齐可执行的公平性、统计和
+机制验证，而不是通过增加模块宣称达到 CCF C 录用要求。实验结果尚待实际训练。
 
-训练仍冻结 Encoder、Key、Index、Value、Classifier，Value 不受恢复 loss 反向影响；五类
-audio family 均衡采样、`batch_size=128` 和类别级 MNIST/FSDD 绑定保持不变。时频梯度
-损失改为对称监督缺失边界。主实验、control、no-causal 从同一 v12a checkpoint 启动，
-先额外训练 30 轮，使用 fixed/random、逐 family、Cross-Key 和完整 demo 评估。
+1. **独立数据划分**：MNIST 官方训练集按类别固定抽取 10% 为验证集；FSDD 官方测试
+   index 0-4 保留，index 5-9 为验证、10-49 为训练。可切换为显式指定验证/测试
+   speaker 的完全说话人隔离划分。归一化和 medoid 只能使用新的训练子集。
+   旧父权重看过新验证子集，不能作为“无泄漏从头训练”的证据；正式套件重新训练父模型。
+2. **同预算比较**：每个 seed 先训练单尺度父结构，再从该 seed 的同一 best-validation
+   父权重开展 30 轮 equal-budget control、main、no-causal、no-cross-key；可选
+   no-recurrence/no-kWTA 必须连父模型一起重新训练，不只在测试时关开关。
+3. **简单基线**：独立 CNN 分类器、预测类别 medoid、类别概率加权 medoid、oracle
+   label medoid（仅诊断上界）、本模态 mask-aware CNN 和类别条件 CNN。复制可见区
+   的处理保持一致；CNN 不是参数匹配 ANN，也不能冒充现成 U-Net 或 SOTA。
+4. **统计与泛化**：默认 3 个训练 seed；固定 mask seed 独立于训练 seed。保存逐样本
+   image/audio 身份、speaker、目标类型及区域指标。配对差值按录音聚类 bootstrap，
+   与训练 seed 的均值/标准差分开；重用录音和重采 mask 不增加独立训练次数。
+5. **机制和鲁棒性**：支持 severity 曲线、25 种图像/音频 family 组合及训练留出 family；
+   循环层记录膜电位/脉冲轨迹，撤去全部外部电流（包括投影 bias），加入固定扰动，
+   与未扰动同输入轨迹比较。轨迹稳定和保类只是操作性证据，不等于证明吸引子定理。
 
-验收优先级：`partial_temporal` 缺失区 MSE/SSIM、五类宏平均、Cross-Key 的正确 Key
-相对 zero/wrong 的选择性，以及 Index ACC 与可见区回填不退化。当前只提出方案，真实
-结论必须在训练和全量评估后追加到 `docs/dev_log.md`。
+主要终点预先指定为三个音频部分残缺 cue 的缺失区 MSE，单列 partial_temporal；
+辅助报告分类、全图误差、可见区、能量及独立 CNN 内容识别。Cross-Key 必须同时比较
+correct/zero/wrong 与重新训练的 no-cross-key，不能把 wrong-key 损害当作正向收益。
+独立识别器仅使用 clean 训练集和验证集选择，不参与恢复 loss。
+
+仍需真实结果和研究工作才能补齐的项目：外部第二数据集、参数/预算匹配 ANN、已有
+关联记忆方法的正式实现对照、至少三个独立训练结果、论文新颖性论证。未执行的项目
+不得写成“已通过”；本补充套件是实验基础设施，不是录用保证。
+
+## 历史版本索引（按版本顺序）
 
 ### v11c
 
@@ -50,8 +67,8 @@ MNIST/FSDD 类别级 many-to-many 主线，检验类别绑定下的 Cross-Key �
 
 ### v11g
 
-v11f 的可复现实验入口，在相同父权重和预算下比较 causal；当前实现见
-[`implementation.md`](implementation.md#0-当前版本边界)。
+v11f 的可复现实验入口，在相同父权重和预算下比较 causal；历史结果见
+[`dev_log.md`](dev_log.md#evaluation-v11g)。
 
 ### v12a
 
@@ -65,8 +82,22 @@ v12a 的验收重点是：可见区误差接近输入复制基线；缺失区 MS
 与 FSDD 是类别级绑定，Cross-Key 只能提供类别级音频条件，不能承诺从图像恢复某条
 录音的说话人和精确时序细节。
 
-当前活动版本是 `v12b`。只有 v12b 的配置和命令作为当前运行入口；v11c–v11g 以及 v12a 的方案和
-结果仅用于按上面顺序追溯，不能把不同 target、配对或训练预算混成一条实验。
+### v12b
+
+v12b 针对 v12a 的音频缺失区长时段恢复不足：保留 `Value + gated own cue detail`、
+可见区回填和现有 Masked Cross-Key，不改变 Index/Value 分类链。Audio Encoder 的
+`conv1/conv2` 局部脉冲率经过带 mask 的多尺度 projector，分别进入 Audio Decoder 的
+`16/32/64` 特征尺度；现有 Cross-Key 增加零初始化的 `32x32` 中间尺度 adapter。
+
+训练仍冻结 Encoder、Key、Index、Value、Classifier，Value 不受恢复 loss 反向影响；五类
+audio family 均衡采样、`batch_size=128` 和类别级 MNIST/FSDD 绑定保持不变。时频梯度
+损失改为对称监督缺失边界。主实验、control、no-causal 从同一 v12a checkpoint 启动，
+先额外训练 30 轮，使用 fixed/random、逐 family、Cross-Key 和完整 demo 评估。
+
+验收优先级：`partial_temporal` 缺失区 MSE/SSIM、五类宏平均、Cross-Key 的正确 Key
+相对 zero/wrong 的选择性，以及 Index ACC 与可见区回填不退化。这是历史设计，实际评估已归档到 `docs/dev_log.md` 的 v12b 条目。
+
+当前活动版本为 `v13pro`；旧配置和旧命令只用于历史追溯。
 
 ## 历史设计记录（内容保留）
 

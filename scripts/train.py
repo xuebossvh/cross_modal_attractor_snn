@@ -1,8 +1,8 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/train.py --config configs/v12a.yaml
-    python -u scripts/train.py --epochs 30
+    python -u scripts/run_v13pro_suite.py --run
+    python -u scripts/train.py --config outputs/v13pro/seed_1234/main/config.yaml
 """
 
 import bootstrap  # noqa: F401
@@ -10,6 +10,7 @@ import bootstrap  # noqa: F401
 import argparse
 import os
 import random
+import numpy as np
 
 import torch
 import torch.nn.functional as F
@@ -18,7 +19,7 @@ from common import (fix_console_encoding, log, load_config, set_seed,
                     sample_cue_mode, sample_train_severity, build_cue,
                     select_targets, is_aud_only_mode, spike_reg,
                     resolve_train_corrupt_modes, batch_ssim,
-                    unpack_paired_batch)
+                    unpack_paired_batch, save_checkpoint_atomic)
 from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
@@ -1332,6 +1333,9 @@ def _validate_model(model, loader, cfg, device):
     validation = cfg.get("validation", {}) or {}
     if not validation.get("enabled", False):
         return None
+    if cfg.get("data", {}).get("paper_split", {}).get("enabled", False):
+        from scripts.paper_validation import validate_recovery
+        return validate_recovery(model, loader, cfg, device)
     max_batches = int(validation.get("max_batches", 20))
     severity = float(validation.get("severity", 0.4))
     fixed = cfg.get("corruption", {}).get("eval_fixed", {}) or {}
@@ -1357,9 +1361,10 @@ def _validate_model(model, loader, cfg, device):
         x_img = x_img.to(device)
         x_aud = x_aud.to(device)
         labels = labels.to(device)
-        if pair_ids is None:
+        if pair_ids is None and cfg.get("data", {}).get("dataset") == "paired_manifest":
             raise RuntimeError("v11e validation requires pair_id")
-        pair_ids = pair_ids.to(device)
+        if pair_ids is not None:
+            pair_ids = pair_ids.to(device)
 
         devices = []
         if device.type == "cuda":
@@ -1420,7 +1425,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v12a.yaml")
+    ap.add_argument("--config", required=True, help="Generated v13pro experiment YAML")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -1428,12 +1433,14 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if cfg.get("paper_template", False):
+        ap.error("v13pro is a suite template; use scripts/run_v13pro_suite.py --run")
     frozen = bool(cfg["train"].get("freeze_base", False))
     if cfg["train"].get("evaluation_only", False):
         ap.error("This is a frozen reference; use evaluate.py, not train.py")
     if cfg["train"].get("require_cuda", False) and (
             not torch.cuda.is_available() or not str(cfg["device"]).startswith("cuda")):
-        raise RuntimeError("v12a requires CUDA for training; CPU fallback is disabled")
+        raise RuntimeError("This experiment requires CUDA; CPU training fallback is disabled")
     if frozen:
         required = cfg["train"]["ckpt_path" if args.resume else "init_ckpt_path"]
         if not required or not resolve_from_root(required).is_file():
@@ -1597,6 +1604,10 @@ def main():
     best_validation_score = float("inf")
     if args.resume and os.path.isfile(ckpt):
         state = torch.load(ckpt, map_location=device)
+        if cfg.get("paper"):
+            for section in ("paper", "train", "data", "snn", "dims", "ablation", "audio_local_cue", "cross_key_conditioning"):
+                if state.get("cfg", {}).get(section) != cfg.get(section):
+                    raise RuntimeError(f"Publication resume configuration mismatch: {section}")
         model.load_state_dict(state["model"])
         if frozen:
             verify_frozen_resume(model, state)
@@ -1624,10 +1635,19 @@ def main():
             "save_milestone_epochs", [])
     }
     for epoch in range(start_epoch, total_epochs):
+        if cfg["train"].get("epoch_seeded", False):
+            epoch_seed = int(cfg["seed"]) + epoch * 1009
+            set_seed(epoch_seed)
+            generator = train_loader.generator or getattr(train_loader.sampler, "generator", None)
+            if generator is not None:
+                generator.manual_seed(epoch_seed)
+            train_loader.dataset._rng = np.random.default_rng(epoch_seed)
         model.train()
         epoch_loss = 0.0
         log(f"[epoch {epoch}/{total_epochs - 1}] 开始 ({steps_per_epoch} steps)")
         for step, batch in enumerate(train_loader):
+            if cfg["train"].get("epoch_seeded", False):
+                set_seed(((int(cfg["seed"]) + epoch * 1009) * 100003 + step) % (2**32))
             x_img, x_aud, labels, pair_ids = unpack_paired_batch(batch)
             x_img = x_img.to(device)
             x_aud = x_aud.to(device)
@@ -1695,15 +1715,15 @@ def main():
         payload["best_validation_score"] = best_validation_score
         if validation_metrics is not None:
             payload["validation"] = validation_metrics
-        torch.save(payload, ckpt)
         if is_best:
             os.makedirs(os.path.dirname(best_ckpt), exist_ok=True)
-            torch.save(payload, best_ckpt)
+            save_checkpoint_atomic(payload, best_ckpt)
             log(f"[val epoch {epoch}] best checkpoint 已保存 -> {best_ckpt}")
+        save_checkpoint_atomic(payload, ckpt)
         if completed_epochs in milestone_epochs:
             milestone_path = _milestone_checkpoint_path(
                 ckpt, completed_epochs)
-            torch.save(payload, milestone_path)
+            save_checkpoint_atomic(payload, milestone_path)
             log(f"[epoch {epoch}] milestone 已保存 -> {milestone_path}")
         log(f"[epoch {epoch}] 平均 loss={avg_loss:.4f}  lr={cur_lr:.6f}  "
             f"checkpoint 已保存 -> {ckpt}")
