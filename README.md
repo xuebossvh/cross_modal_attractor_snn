@@ -1,6 +1,7 @@
-# 跨模态循环吸引子 SNN：v13pro
+# 跨模态循环吸引子 SNN：v14pro
 
-v13pro 在 v12b 模型结构上补充面向论文的实验基础设施，不宣称已经达到 CCF C 录用标准。
+v14pro 在 v13pro/v12b 模型结构上补充面向 CCF-B 的双轨论文实验协议，不宣称代码本身
+已经达到任何会议录用标准。
 保留 MNIST/FSDD 类别级绑定、Value + gated own cue、simultaneous、batch 128，以及
 恢复 loss 经 Value 到 Index 的梯度隔离。默认不需要 v11g/v12a/v12b 的旧权重。
 
@@ -18,7 +19,8 @@ v13pro 在 v12b 模型结构上补充面向论文的实验基础设施，不宣�
 | matched_cnn | 从头 130 轮 | 按 SNN 参数量自动匹配宽度的 ANN 对照 |
 | recognizer | 独立从头 30 轮 | 只看 clean 训练集，不参与恢复 loss |
 
-默认 3 seeds：1234、2345、3456，共 30 个训练任务、累计 1410 model-epochs。
+默认 3 seeds：1234、2345、3456，共 30 个训练任务、累计 1410 model-epochs；另有
+speaker-disjoint、留出 family 和 paired manifest 扩展任务。
 不同结构每轮耗时不同，不能把 model-epochs 当 GPU 小时。`matched_cnn` 是参数规模
 公平对照；其它 CNN 仍是轻量筛查基线。matched CNN 的 130 轮预算在运行前固定，
 不使用测试集挑预算。
@@ -42,20 +44,20 @@ bootstrap 按录音或 speaker 聚类，不能将 10000 次音频配对当作 10
 在 GPU 服务器的项目根目录运行；无需套用旧服务器的绝对路径：
 
 ```bash
-nohup python -u scripts/run_v13pro_suite.py --run > v13pro_suite.log 2>&1 < /dev/null &
+nohup python -u scripts/run_v14pro_suite.py --run > v14pro_suite.log 2>&1 < /dev/null &
 ```
 
 先完成训练，再全量评估和统计。SSH 断开后先检查进程；任务确实退出时重敲同一命令，
 会校验完成记录并跳过已完成任务，未完成训练从 last checkpoint 续训。不要同时启动两份。
 
 ```bash
-tail -f v13pro_suite.log
-python scripts/run_v13pro_suite.py --dry_run
+tail -f v14pro_suite.log
+python scripts/run_v14pro_suite.py --dry_run
 python scripts/smoke_test.py
 ```
 
-输出在 `outputs/v13pro/`，逐实验 YAML 自动生成，不向 `configs/` 添加旧版本副本。
-best.pt 用于评估，last.pt 用于恢复。不要直接训练 `configs/v13pro.yaml`，它只是套件模板。
+输出在 `outputs/v14pro*/`，逐实验 YAML 自动生成，不向 `configs/` 添加旧版本副本。
+best.pt 用于评估，last.pt 用于恢复。不要直接训练 `configs/v14pro.yaml`，它只是套件模板。
 更改代码、配置或协议时用新的 `--output`，不覆盖已有实验清单。
 
 ## 可选扩展
@@ -63,10 +65,11 @@ best.pt 用于评估，last.pt 用于恢复。不要直接训练 `configs/v13pro
 - `--mechanism_ablations`：无循环/无 kWTA 的父模型也从头训练，各 100+30 轮。
 - `--severities 0.2 0.4 0.6 --mask_seeds 5678 6789 7890`：多强度、多 mask 重复。
 - `--all_family_pairs`：五类图像 × 五类音频的 25 组合，显著增加评估量。
-- `--speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker`：指定说话人留出。
-- `--holdout_audio_family partial_temporal --output outputs/v13pro_ood`：训练不见该 family，测试仍覆盖。
+- `--speaker_test jackson --speaker_val nicolas --output outputs/v14pro_speaker`：指定说话人留出。
+- `--holdout_audio_family partial_temporal --output outputs/v14pro_ood`：训练不见该 family，测试仍覆盖。
+- `--dataset paired_manifest --manifest /path/to/paired_manifest.csv --output outputs/v14pro_paired`：运行第二个真实视听数据集；manifest 不存在或不合法时严格失败。
 - `--eval_only --run`：只评估已完成权重；须保持原来的 seeds、预算及协议参数。
-- `python scripts/paper_profile.py --root outputs/v13pro`：汇总每个 checkpoint 的参数、
+- `python scripts/paper_profile.py --root outputs/v14pro`：汇总每个 checkpoint 的参数、
   延迟、操作估计、脉冲率和 CUDA 峰值显存。
 
 机制探针包含撤去完整外部电流、膜电位扰动、活动轨迹与保类统计；它们是操作性证据，
@@ -74,5 +77,5 @@ best.pt 用于评估，last.pt 用于恢复。不要直接训练 `configs/v13pro
 
 完整设计见 [idea_report](docs/idea_report.md)，实现与参数见
 [implementation](docs/implementation.md)，工程检查及真实实验结果只归档到
-[dev_log](docs/dev_log.md)。CCF-C 级真实多 seed 训练仍需执行；CCF-B 的第二数据集和
-正式文献基线仍需具备真实数据/实现后运行。工程测试通过不等于这些研究证据已经具备。
+[dev_log](docs/dev_log.md)。CCF-B 的第二数据集和正式文献基线仍需具备真实数据/实现后
+运行。工程测试通过不等于这些研究证据已经具备。

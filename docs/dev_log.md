@@ -1,6 +1,6 @@
 # 开发日志：Cross-Modal Attractor SNN
 
-> 创建时间：2026-07-06 18:43 | 当前活动版本：v13pro | 最后整理：2026-09-15
+> 创建时间：2026-07-06 18:43 | 当前活动版本：v14pro | 最后整理：2026-09-15
 > 关联实现指南：`docs/implementation.md`
 > 当前阶段：ResearchPilot F 阶段补档与迭代
 > 本文件原则上只追加，不删除。每次代码修改都必须追加新的日志条目。
@@ -12,22 +12,22 @@
 | --------------- | --------------------------------------------- |
 | 研究方向            | 跨模态 attractor SNN 联想记忆                        |
 | 当前阶段            | F：代码迭代                                        |
-| 当前配置            | `configs/v13pro.yaml` 套件模板；逐实验配置生成到输出目录 |
+| 当前配置            | `configs/v14pro.yaml` 套件模板；逐实验配置生成到输出目录 |
 | 代码结构            | 根目录下的 `data/`、`models/`、`scripts/`、`configs/` |
 | 主要任务            | MNIST 图像 + FSDD 音频 cue -> digit 分类 + 图像/音频恢复  |
 | 框架              | PyTorch                                       |
-| 主 checkpoint 目标 | `outputs/v13pro/seed_<seed>/<experiment>/best.pt` |
-| 版本化输出目标         | `outputs/v13pro/`                       |
+| 主 checkpoint 目标 | `outputs/v14pro*/seed_<seed>/<experiment>/best.pt` |
+| 版本化输出目标         | `outputs/v14pro*/`                       |
 | 硬性工作流           | 先改文档，再改代码；每次改代码后追加本日志                         |
 
 ## 当前版本导航
 
-当前活动版本为 `v13pro`。按文档职责定位内容：
+当前活动版本为 `v14pro`。按文档职责定位内容：
 
 | 内容 | 入口 |
 |---|---|
-| v13pro 初始方案、研究问题、预期验收 | `docs/idea_report.md` 顶部 v13pro 条目 |
-| v13pro 实际结构、配置、张量和命令 | `docs/implementation.md` |
+| v14pro 初始方案、研究问题、预期验收 | `docs/idea_report.md` 顶部 v14pro 条目 |
+| v14pro 实际结构、配置、张量和命令 | `docs/implementation.md` |
 | 统一评估入口（按版本顺序） | [统一汇总导航](#evaluation-format-20260912) |
 | v11c 两组实验 | [v11c 完整指标](#evaluation-v11c) |
 | v11d 两组实验 | [v11d 完整指标](#evaluation-v11d) |
@@ -37,7 +37,7 @@
 | v12a 三组实验 | [v12a 评估归档](#evaluation-v12a) |
 | v12b 三组实验 | [v12b 完整指标与结论](#evaluation-v12b) |
 | v13pro 实现与验证 | [2026-09-15 实现记录](#implementation-v13pro) |
-| v13pro 当前运行命令 | `docs/implementation.md` 第 6 节 |
+| v14pro 实现与运行命令 | `docs/implementation.md` 第 6 节 |
 
 本文件前部的 v10a 状态表和中部各版本条目是历史记录；其中出现的旧配置、旧路径或
 已删除文档名不能作为当前运行入口。历史日志只追加，不通过移动或删除旧条目修订。
@@ -20046,4 +20046,68 @@ tail -f v13pro_suite.log
 ```bash
 python scripts/run_v13pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker
 python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v13pro_ood
+```
+
+## 2026-09-15
+
+### v14pro：CCF-B 双轨实验入口
+
+**改动原因**：v13pro 已补齐 CCF-C 级实验工程，但仍缺少第二个真实视听任务的严格
+数据入口和外部文献基线审计。用户要求在 v13pro 基础上创建并推送 v14pro。
+
+**文档先行**：代码修改前已更新 `docs/idea_report.md`、`docs/implementation.md` 和
+`docs/user_requirements.md`。v14pro 的验收条件明确为：轨道 A 的 MNIST/FSDD 主协议与
+speaker/OOD、轨道 B 的真实 `paired_manifest`、至少一个可审计外部基线、三 seed 全指标
+和资源统计。没有真实第二数据集或外部基线时，只能标记待运行，不能宣称满足 CCF-B。
+
+**实现变更**：
+
+- 创建 `configs/v14pro.yaml` 和 `scripts/run_v14pro_suite.py`；v13pro 配置和 suite
+  不在 v14pro 当前分支中重复保留。
+- v14pro 默认仍运行 v13pro 的 3-seed、parent/control/main/no-causal/no-cross、
+  matched ANN、recognizer 和全量评估/profile 任务。
+- 新增 `--dataset paired_manifest --manifest PATH`；第二轨道使用已有严格
+  `TruePairedManifestDataset`，要求唯一 `source_id`、图像/音频同 source、speaker/source
+  不跨 split、所有路径存在、每个 split 覆盖十个类别。
+- 新增 `scripts/validate_paired_manifest.py`，在训练前审计 train/val/test 行数和 speaker。
+- 新增 `scripts/audit_external_baseline.py`，强制记录论文来源、代码 commit、数据 split
+  哈希、预算、seed、参数量、checkpoint 哈希和指标文件，防止把内部 CNN 冒充文献基线。
+- `paper_evaluate.py` 支持正式 `paired_manifest` 检查；缺 manifest 或不合法数据不能
+  静默回退到 MNIST/FSDD。
+- `scripts/train.py`、测试和 profile 默认入口切换为 v14pro；旧 `run_v13pro_suite.py`
+  从当前 v14pro 分支移除，保留在 `v13pro` 分支。
+
+**验证**：
+
+- `python -m compileall -q common.py data models scripts`：通过。
+- `python scripts/test_paper_protocol.py`：15/15 通过。
+- v14pro MNIST/FSDD 单 seed dry-run：10 个训练任务、8 个评估任务，匹配 ANN 命令正常生成。
+- `--dataset paired_manifest --manifest missing_manifest.csv`：按设计严格失败。
+- `validate_paired_manifest.py` 对不存在 manifest：按设计严格失败。
+- `git diff --check`：通过。
+
+**当前状态**：v14pro 代码和协议已完成，尚未运行真实 CUDA 训练；本地没有可用于轨道 B
+的第二数据集 manifest，也没有外部文献基线 checkpoint，因此不能把 v14pro 写成已经
+满足 CCF-B。待真实数据/基线补齐后，所有实验指标仍只追加到本文件。
+
+#### 运行说明
+
+```bash
+python scripts/run_v14pro_suite.py --dry_run
+nohup python -u scripts/run_v14pro_suite.py --run > v14pro_suite.log 2>&1 < /dev/null &
+tail -f v14pro_suite.log
+```
+
+CCF-B 轨道 A 扩展：
+
+```bash
+python scripts/run_v14pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v14pro_speaker
+python scripts/run_v14pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v14pro_ood
+```
+
+轨道 B 需先准备真实 manifest：
+
+```bash
+python scripts/validate_paired_manifest.py --manifest /path/to/paired_manifest.csv
+python scripts/run_v14pro_suite.py --run --dataset paired_manifest --manifest /path/to/paired_manifest.csv --output outputs/v14pro_paired
 ```

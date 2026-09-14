@@ -1,4 +1,4 @@
-"""v13pro: reproducible publication experiments, independent of old checkpoints."""
+"""v14pro: CCF-B dual-track experiments, independent of old checkpoints."""
 
 import bootstrap  # noqa: F401
 import argparse
@@ -50,7 +50,7 @@ def code_fingerprint():
 
 def build_plan(base, root, seeds=(1234, 2345, 3456), parent_epochs=100,
                epochs=30, baseline_epochs=30, matched_ann_epochs=130, mechanism=False,
-               speakers=None, holdout=None):
+               speakers=None, holdout=None, dataset="mnist_fsdd", manifest=""):
     root = Path(root).resolve()
     configs, training, testing = {}, [], []
     ann_width, snn_params, ann_params = matched_ann_width(base)
@@ -63,12 +63,18 @@ def build_plan(base, root, seeds=(1234, 2345, 3456), parent_epochs=100,
             cfg.pop("paper_template", None)
             directory = root / f"seed_{seed}" / name
             cfg["seed"] = seed
-            cfg["data"]["paper_split"] = dict(enabled=True, mode="official", seed=20260915, val_fraction=.1)
-            if speakers:
-                cfg["data"]["paper_split"].update(mode="speaker", test_speakers=speakers[0], val_speakers=speakers[1])
+            if dataset == "paired_manifest":
+                cfg["data"].update(dataset="paired_manifest",
+                                    manifest_path=str(Path(manifest).resolve()),
+                                    eval_split="test", paper_split=dict(enabled=False))
+            else:
+                cfg["data"]["dataset"] = "mnist_fsdd"
+                cfg["data"]["paper_split"] = dict(enabled=True, mode="official", seed=20260915, val_fraction=.1)
+                if speakers:
+                    cfg["data"]["paper_split"].update(mode="speaker", test_speakers=speakers[0], val_speakers=speakers[1])
             cfg["data"]["pairing"].update(enabled=False, return_pair_id=False, sample_targets_for_missing=False)
             cfg["audio"]["norm_stats_path"] = str(root / "train_audio_norm.pt")
-            cfg["paper"] = dict(experiment=name, seed=seed, root=str(root),
+            cfg["paper"] = dict(experiment=name, seed=seed, root=str(root), dataset=dataset,
                                 primary_endpoint="audio partial-cue masked MSE", init="fresh_lineage",
                                 ann_width=ann_width, matched_ann_snn_parameters=snn_params,
                                 matched_ann_parameters=ann_params)
@@ -153,8 +159,10 @@ def completed(marker, job, fingerprint):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/v13pro.yaml")
-    ap.add_argument("--output", default="outputs/v13pro")
+    ap.add_argument("--config", default="configs/v14pro.yaml")
+    ap.add_argument("--output", default="outputs/v14pro")
+    ap.add_argument("--dataset", choices=("mnist_fsdd", "paired_manifest"), default="mnist_fsdd")
+    ap.add_argument("--manifest", default="", help="CSV manifest required for --dataset paired_manifest")
     ap.add_argument("--seeds", type=int, nargs="+", default=[1234, 2345, 3456])
     ap.add_argument("--parent_epochs", type=int, default=100)
     ap.add_argument("--epochs", type=int, default=30)
@@ -175,6 +183,10 @@ def main():
         ap.error("Specify both --speaker_test and --speaker_val")
     if set(args.speaker_test or []) & set(args.speaker_val or []):
         ap.error("Validation and test speakers must be disjoint")
+    if args.dataset == "paired_manifest" and (not args.manifest or not Path(args.manifest).is_file()):
+        ap.error("--dataset paired_manifest requires an existing --manifest CSV")
+    if args.dataset == "paired_manifest" and (args.speaker_test or args.speaker_val):
+        ap.error("paired_manifest supplies its own speaker-disjoint split; do not pass speaker flags")
     if any(not 0 <= seed < 2**31 for seed in args.seeds):
         ap.error("Training seeds must be within [0,2**31)")
     if len(set(args.seeds)) != len(args.seeds) or min(args.parent_epochs, args.epochs,
@@ -182,12 +194,13 @@ def main():
         ap.error("Unique seeds and positive epoch budgets are required")
     root = Path(args.output).resolve()
     base = load_config(args.config)
-    if not base["audio"].get("use_real_audio") or not base["data"].get("use_mnist"):
-        ap.error("The formal suite requires real MNIST and FSDD")
+    if args.dataset == "mnist_fsdd" and (not base["audio"].get("use_real_audio") or not base["data"].get("use_mnist")):
+        ap.error("The MNIST/FSDD formal suite requires real MNIST and FSDD")
     configs, training, testing = build_plan(base, root, args.seeds,
         args.parent_epochs, args.epochs, args.baseline_epochs, args.matched_ann_epochs,
         args.mechanism_ablations,
-        (args.speaker_test, args.speaker_val) if args.speaker_test else None, args.holdout_audio_family)
+        (args.speaker_test, args.speaker_val) if args.speaker_test else None,
+        args.holdout_audio_family, args.dataset, args.manifest)
     for job in testing:
         job["command"] += ["--severities", *map(str, args.severities), "--mask_seeds", *map(str, args.mask_seeds)]
         if args.all_family_pairs:
@@ -202,7 +215,8 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
     sha = code_fingerprint()
     manifest = root / "plan.json"
-    description = dict(code_sha256=sha, configs=configs, training=training, testing=testing)
+    description = dict(code_sha256=sha, dataset=args.dataset, manifest=args.manifest,
+                       configs=configs, training=training, testing=testing)
     if manifest.is_file() and json.loads(manifest.read_text(encoding="utf-8")) != description:
         raise RuntimeError("Plan/code changed; use a different --output directory")
     manifest.write_text(json.dumps(description, indent=2), encoding="utf-8")

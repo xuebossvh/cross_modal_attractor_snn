@@ -2,7 +2,7 @@
 > 创建时间：2026-07-07 | 当前用途：F 阶段迭代补充记录
 > 说明：本文件先记录当前 D-F 迭代中已经确认的实验设计，不回填完整 A/B/C 阶段长报告。
 > **纪律**：每次 F 阶段版本迭代（新配置、结构改动、消融设计）须同步更新本文件，与 `docs/implementation.md`（先写）和 `docs/dev_log.md`（后写）配套。
-> **文档导航**：本文记录研究问题、方案和预期实验；实际实现以 `docs/implementation.md` 为准；训练、评估和最终结论只追加到 `docs/dev_log.md`。当前版本为 `v13pro`，带“已废止”标记的历史方案不属于当前运行入口。
+> **文档导航**：本文记录研究问题、方案和预期实验；实际实现以 `docs/implementation.md` 为准；训练、评估和最终结论只追加到 `docs/dev_log.md`。当前版本为 `v14pro`，带“已废止”标记的历史方案不属于当前运行入口。
 
 ---
 
@@ -12,46 +12,39 @@
 但不再作为当前运行入口。完整实现看 `docs/implementation.md`，完整训练和评估结果
 看 `docs/dev_log.md`。
 
-### v13pro（2026-09-15）
+### v14pro（2026-09-15）
 
-本次按用户要求创建并推送 `v13pro` 分支，沿用 v12b 模型结构，不覆盖历史评估。目标是先补齐
-CCF-C 所需的可复现、公平对照、完整测试和统计证据，再在同一入口继续扩展 CCF-B 所需的
-跨说话人/跨缺失分布泛化与正式外部基线。代码和实验计划本身不等于录用保证，结果尚待实际训练。
+v14pro 在 v13pro 的模型、训练约束和全量指标基础上，补齐面向 CCF-B 的实验闭环：
+同一套代码同时支持 MNIST/FSDD 复现实验和第二个真实视听数据集的严格 paired manifest。
+不因缺少第二数据集而静默回退到伪配对；没有真实 manifest 时，第二任务必须明确标记为待运行。
 
-1. **独立数据划分**：MNIST 官方训练集按类别固定抽取 10% 为验证集；FSDD 官方测试
-   index 0-4 保留，index 5-9 为验证、10-49 为训练。可切换为显式指定验证/测试
-   speaker 的完全说话人隔离划分。归一化和 medoid 只能使用新的训练子集。
-   旧父权重看过新验证子集，不能作为“无泄漏从头训练”的证据；正式套件重新训练父模型。
-2. **同预算比较**：每个 seed 先训练单尺度父结构，再从该 seed 的同一 best-validation
-   父权重开展 30 轮 equal-budget control、main、no-causal、no-cross-key；可选
-   no-recurrence/no-kWTA 必须连父模型一起重新训练，不只在测试时关开关。
-3. **公平基线**：独立 CNN 分类器、预测类别 medoid、类别概率加权 medoid、oracle
-   label medoid（仅诊断上界）、本模态 mask-aware CNN、类别条件 CNN，以及按 v13pro
-   SNN 参数量自动选择宽度的 `matched_cnn`。所有可训练基线使用同一 train/val/test
-   划分、同一 corruption 输入和验证集选模；oracle 只作诊断上界，不能作为方法结果。
-4. **统计与泛化**：默认 3 个训练 seed；固定 mask seed 独立于训练 seed。保存逐样本
-   image/audio 身份、speaker、目标类型及区域指标。配对差值按录音聚类 bootstrap，
-   与训练 seed 的均值/标准差分开；重用录音和重采 mask 不增加独立训练次数。
-5. **机制和鲁棒性**：支持 severity 曲线、25 种图像/音频 family 组合及训练留出 family；
-   循环层记录膜电位/脉冲轨迹，撤去全部外部电流（包括投影 bias），加入固定扰动，
-   与未扰动同输入轨迹比较。轨迹稳定和保类只是操作性证据，不等于证明吸引子定理。
-6. **效率与可复现性**：对每个最终 checkpoint 记录总参数、实际可训练参数、批量前向
-   延迟、模块 MAC 上界、激活加权操作估计、Encoder/Key/Index 脉冲率及显存峰值（若
-   在 CUDA 运行）。这些指标只用于成本和机制比较，不把估计量写成芯片能耗。
+1. **双轨数据协议**：轨道 A 保留 v13pro 的 MNIST/FSDD 类别级 many-to-many；轨道 B
+   使用 `paired_manifest`，每行是唯一真实 source event，要求 image/audio 的
+   `source_id` 相同、speaker 不跨 split、asset 路径存在、pair_id 唯一且 train/val/test
+   完整。第二数据集的 medoid、归一化和模型选择只看 train/val。
+2. **CCF-B 泛化**：轨道 A 必须额外运行 speaker-disjoint 和留出一种 audio corruption
+   family；轨道 B 必须按数据集原生 split 再执行同样的 fixed/random、severity 和 family
+   协议。测试集不能参与选 epoch、原型、归一化或超参数。
+3. **公平比较**：沿用 parent/control/main/no-causal/no-cross、matched ANN 和独立
+   recognizer；额外接受经 `scripts/audit_external_baseline.py` 审计的外部文献基线结果。
+   外部基线必须声明代码/版本、训练预算、输入预处理、参数量和 checkpoint 哈希，不能将
+   v13pro 自己的 CNN 改名为文献方法。
+4. **统一统计与资源**：两个轨道都报告逐实验全指标、三 seed 均值/标准差、按 source
+   或 speaker 的 paired bootstrap、参数/MAC/延迟/脉冲率/显存；跨数据集结论只使用同一
+   指标定义和明确有效 n，不把不同 target 类型的误差直接合并。
 
-主要终点预先指定为三个音频部分残缺 cue 的缺失区 MSE，单列 partial_temporal；
-辅助报告分类、全图误差、可见区、能量及独立 CNN 内容识别。Cross-Key 必须同时比较
-correct/zero/wrong 与重新训练的 no-cross-key，不能把 wrong-key 损害当作正向收益。
-独立识别器仅使用 clean 训练集和验证集选择，不参与恢复 loss。
-
-CCF-C 验收门槛：三 seed 完成父/分支训练；主表覆盖全测试集、fixed/random、五类
-family、所有实验和全部已计算指标；matched ANN、消融、bootstrap 和复杂度报告全部
-有真实产物。CCF-B 扩展门槛：在 C 级结果之上完成至少一个 speaker-disjoint 或
-corruption-OOD 结果、第二个真实数据集/任务、至少一个可复现的正式文献方法基线，
-并报告统计与资源代价。外部数据和文献基线若尚未具备，必须保留为待运行项，不能写成
-“已通过”；本补充套件是实验基础设施，不是录用保证。
+主要终点仍是三种音频部分残缺 cue 的 missing MSE，partial_temporal 单列；分类、
+外部内容识别、可见区复制、Cross-Key normal/zero/wrong/same-class、Index probe 和
+资源指标均为必报。CCF-B 的真实完成条件是：轨道 A 和轨道 B 都有真实多 seed 结果，至少
+一个正式外部基线有可审计结果，且所有异常/缺项直接追加到 `docs/dev_log.md`。代码入口
+本身不等于满足投稿或录用标准。
 
 ## 历史版本索引（按版本顺序）
+
+### v13pro
+
+CCF-C 实验工程补充：独立划分、matched ANN、完整指标、bootstrap 与复杂度 profile；
+真实 CUDA 结果和第二数据集不在 v13pro 分支中伪造。
 
 ### v11c
 
@@ -105,7 +98,7 @@ audio family 均衡采样、`batch_size=128` 和类别级 MNIST/FSDD 绑定保�
 验收优先级：`partial_temporal` 缺失区 MSE/SSIM、五类宏平均、Cross-Key 的正确 Key
 相对 zero/wrong 的选择性，以及 Index ACC 与可见区回填不退化。这是历史设计，实际评估已归档到 `docs/dev_log.md` 的 v12b 条目。
 
-当前活动版本为 `v13pro`；旧配置和旧命令只用于历史追溯。
+历史活动版本为 `v13pro`；旧配置和旧命令只用于历史追溯。
 
 ## 历史设计记录（内容保留）
 

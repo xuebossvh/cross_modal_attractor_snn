@@ -150,8 +150,14 @@ def main():
     device = torch.device("cuda" if cfg["device"] == "cuda" and torch.cuda.is_available() else "cpu")
     _, loader = build_loaders(cfg, eval_split="test")
     dataset = loader.dataset
-    if not args.smoke_batches and (not dataset.use_real_audio or dataset._mode != "mnist"):
-        raise ValueError("Formal v13pro evaluation requires real MNIST and FSDD")
+    if not args.smoke_batches:
+        dataset_kind = cfg.get("data", {}).get("dataset", "mnist_fsdd")
+        if dataset_kind == "mnist_fsdd" and (not dataset.use_real_audio or getattr(dataset, "_mode", None) != "mnist"):
+            raise ValueError("Formal MNIST/FSDD evaluation requires real MNIST and FSDD")
+        if dataset_kind == "paired_manifest" and not getattr(dataset, "rows", None):
+            raise ValueError("Formal paired evaluation requires a non-empty real manifest")
+        if dataset_kind not in ("mnist_fsdd", "paired_manifest"):
+            raise ValueError(f"Unsupported formal dataset: {dataset_kind}")
     protos = (dataset.prototype_img.to(device), dataset.prototype_aud.to(device))
     kind = cfg["paper"]["experiment"]
     is_snn = kind not in ("classifier", "cue_cnn", "conditioned_cnn", "matched_cnn")

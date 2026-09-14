@@ -20,7 +20,7 @@ from models.paper_baselines import CleanRecognizers, RecoveryCNN
 from models.frozen_base import file_sha256
 from scripts.paper_evaluate import global_ssim, reconstruction_metrics, sample_cues
 from scripts.paper_statistics import cluster_interval, paired_difference
-from scripts.run_v13pro_suite import build_plan, completed
+from scripts.run_v14pro_suite import build_plan, completed
 from scripts.paper_validation import validate_recovery
 from paths import PROJECT_ROOT
 
@@ -41,7 +41,7 @@ class PaperTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         torch.set_num_threads(2)
-        cls.base = load_config(PROJECT_ROOT / "configs/v13pro.yaml")
+        cls.base = load_config(PROJECT_ROOT / "configs/v14pro.yaml")
 
     def config(self):
         cfg = deepcopy(self.base)

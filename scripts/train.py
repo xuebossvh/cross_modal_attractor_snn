@@ -1,8 +1,8 @@
 """训练跨模态 SNN 联想记忆网络（binding + readout 两阶段）。
 
 用法（在项目根目录）：
-    python -u scripts/run_v13pro_suite.py --run
-    python -u scripts/train.py --config outputs/v13pro/seed_1234/main/config.yaml
+    python -u scripts/run_v14pro_suite.py --run
+    python -u scripts/train.py --config outputs/v14pro/seed_1234/main/config.yaml
 """
 
 import bootstrap  # noqa: F401
@@ -1434,7 +1434,7 @@ def main():
 
     cfg = load_config(args.config)
     if cfg.get("paper_template", False):
-        ap.error("v13pro is a suite template; use scripts/run_v13pro_suite.py --run")
+        ap.error("v14pro is a suite template; use scripts/run_v14pro_suite.py --run")
     frozen = bool(cfg["train"].get("freeze_base", False))
     if cfg["train"].get("evaluation_only", False):
         ap.error("This is a frozen reference; use evaluate.py, not train.py")

@@ -1,25 +1,26 @@
 # 实现指南：Cross-Modal Attractor SNN
 
-> 当前实现分支：`v13pro`。先看本文，再看 `docs/dev_log.md` 的真实结果。
+> 当前实现分支：`v14pro`。先看本文，再看 `docs/dev_log.md` 的真实结果。
 > 研究假设见 `docs/idea_report.md`；用户约束见 `docs/user_requirements.md`。
 
 ## 0. 当前边界
 
-v13pro 保留 v12b 模型主线，新增论文实验协议，而不是新的恢复结构。
+v14pro 保留 v13pro/v12b 模型主线，新增 CCF-B 双轨实验协议，而不是新的恢复结构。
 MNIST/FSDD 仍是类别级 many-to-many；保留 simultaneous、batch 128、
 Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cue 和 Cross-Key。
-正式套件从新划分重新训练父模型，不加载曾看过新验证子集的旧版本权重。
+正式套件从新划分重新训练父模型，不加载曾看过新验证子集的旧版本权重。第二轨道使用
+`paired_manifest`，没有真实 manifest 时严格失败，不回退到 MNIST/FSDD 伪配对。
 
 实现可运行不代表论文实验已完成，更不代表已经达到 CCF C 或 CCF B 录用要求。
-本轮补充 CCF-C 所需的参数匹配 ANN 与复杂度报告；CCF-B 的第二真实数据集和正式
-文献方法对照仍需真实数据/代码后运行，不能以占位脚本冒充完成。
+v14pro 补充第二真实数据集的 manifest 校验、speaker/OOD 泛化入口和外部文献基线审计
+接口；实际第二数据集与外部基线仍需真实数据/代码后运行，不能以占位脚本冒充完成。
 
 ## 1. 文件职责
 
 | 路径 | 职责 |
 |---|---|
-| `configs/v13pro.yaml` | 唯一活动模板，禁止直接用于 train.py |
-| `scripts/run_v13pro_suite.py` | 生成逐实验 YAML、锁定计划、顺序训练/评估/统计、重启 |
+| `configs/v14pro.yaml` | 唯一活动模板，禁止直接用于 train.py |
+| `scripts/run_v14pro_suite.py` | 生成逐实验 YAML、锁定计划、顺序训练/评估/统计、重启 |
 | `scripts/job_runner.py` | 记录子进程日志，失败停止，清理子进程 |
 | `data/splits.py` | train/val/test 划分、音频内容指纹、划分审计 |
 | `data/dataset.py` | 类别组合、训练集 medoid、稳定测试身份 |
@@ -32,9 +33,11 @@ Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cu
 | `scripts/paper_evaluate.py` | 全测试集、逐样本指标、Cross-Key、机制和耗时 |
 | `scripts/paper_statistics.py` | 跨 seed 均值/标准差、配对聚类 bootstrap |
 | `scripts/paper_profile.py` | 参数、MAC 上界、激活操作估计、脉冲率、延迟和 CUDA 显存 |
+| `scripts/validate_paired_manifest.py` | 严格检查第二真实视听数据集 manifest 与 asset split |
+| `scripts/audit_external_baseline.py` | 检查正式文献基线的来源、预算、数据和 checkpoint 哈希 |
 | `scripts/test_paper_protocol.py` / `smoke_test.py` | CPU 离线回归与完整链路测试 |
 
-逐实验配置和产物只在 `outputs/v13pro/`，不进代码仓库。旧版本 YAML/专用 suite/smoke
+逐实验配置和产物只在 `outputs/v14pro*/`，不进代码仓库。旧版本 YAML/专用 suite/smoke
 保留在旧分支；迁移时本地旧文件可保留但不跟踪，不能再作为当前命令入口。
 
 ## 2. 数据与目标
@@ -46,6 +49,13 @@ Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cu
 | MNIST | 官方训练集按类别留出后约 54000 | 约 6000，固定 split seed=20260915 | 官方 10000 |
 | FSDD official | index 10-49，完整数据 2400 条 | index 5-9，300 条 | index 0-4，300 条 |
 | FSDD speaker | 除留出 speaker 外全部录音 | 明确 val speaker | 明确 test speaker |
+
+第二数据集使用 `data.dataset=paired_manifest` 和 CSV manifest；必需字段为
+`pair_id, source_id, image_source_id, audio_source_id, speaker_id, split, label,
+image_path, audio_path`。每行必须是唯一真实 source event；图像与音频 source_id 必须相同，
+speaker/source 不得跨 split，路径必须存在，且每个 split 覆盖全部类别。音频必须提供
+`64x64` log-mel 的 `.pt/.npy`，或明确使用 WAV 和 train-only normalization。manifest
+模式的缺失模态 target 仍只从 train 构建 medoid。
 
 音频归一化的缓存指纹包含训练录音内容 SHA256、划分和特征参数；不匹配则重算。
 medoid 只由新 train 子集构建。MNIST 加载失败不允许静默切换为合成图像。
@@ -155,9 +165,9 @@ speaker 的区间也很不稳定。多指标探索不自动产生显著性结论
 在服务器当前项目根目录，先激活已有 CUDA Python 环境。默认无旧权重依赖：
 
 ```bash
-python scripts/run_v13pro_suite.py --dry_run
-nohup python -u scripts/run_v13pro_suite.py --run > v13pro_suite.log 2>&1 < /dev/null &
-tail -f v13pro_suite.log
+python scripts/run_v14pro_suite.py --dry_run
+nohup python -u scripts/run_v14pro_suite.py --run > v14pro_suite.log 2>&1 < /dev/null &
+tail -f v14pro_suite.log
 ```
 
 确实退出后重跑同一命令；先检查旧进程，禁止同时运行两份。已完成任务检查配置/代码/
@@ -165,21 +175,22 @@ tail -f v13pro_suite.log
 同样参数加 `--eval_only` 可只评估。任务异常中止，不把日志存在当完成。
 
 ```bash
-python scripts/run_v13pro_suite.py --run --mechanism_ablations --output outputs/v13pro_mechanism
-python scripts/run_v13pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker
-python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v13pro_ood
-python scripts/paper_statistics.py --root outputs/v13pro --cluster speaker
-python scripts/paper_profile.py --root outputs/v13pro
+python scripts/run_v14pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v14pro_speaker
+python scripts/run_v14pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v14pro_ood
+python scripts/validate_paired_manifest.py --manifest /path/to/paired_manifest.csv
+python scripts/run_v14pro_suite.py --run --dataset paired_manifest --manifest /path/to/paired_manifest.csv --output outputs/v14pro_paired
+python scripts/paper_statistics.py --root outputs/v14pro --cluster speaker
+python scripts/paper_profile.py --root outputs/v14pro
 python scripts/smoke_test.py
 ```
 
 预算、强度和 seeds 请在训练前确定。例如 `--severities 0.2 0.4 0.6 --mask_seeds 5678 6789 7890`
-会显著增加评估量。`--speaker_test/--speaker_val` 与 `--holdout_audio_family` 是
-CCF-B 泛化扩展；第二数据集和正式文献基线必须在真实数据/实现可用后单独运行，当前不
-冒充已经完成。
+会显著增加评估量。`--speaker_test/--speaker_val`、`--holdout_audio_family` 和
+`--dataset paired_manifest` 是 CCF-B 扩展。没有第二数据集 manifest 时，paired 命令
+必须失败；正式文献基线需要外部实现/结果和审计信息，不能用内部 CNN 代替。
 
 ## 7. 文档归档
 
 历史版本的完整结果按日期留在 `dev_log.md`，不要把旧运行说明作为当前入口。
-v13pro 的代码验证与状态追加在 2026-09-15 下；CUDA 正式实验、逐实验各指标、异常及
+v14pro 的代码验证与状态追加在 2026-09-15 下；CUDA 正式实验、逐实验各指标、异常及
 限制待实际运行后再归档。不要另建版本专用结果 Markdown，也不要伪造缺失指标。

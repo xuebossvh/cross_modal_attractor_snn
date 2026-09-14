@@ -145,7 +145,7 @@ def profile_one(config_path, repeats=8):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", default="outputs/v13pro")
+    ap.add_argument("--root", default="outputs/v14pro")
     ap.add_argument("--repeats", type=int, default=8)
     args = ap.parse_args()
     if args.repeats < 1:

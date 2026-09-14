@@ -1,6 +1,6 @@
-# v13pro suite template: use scripts/run_v13pro_suite.py, not train.py directly.
+# v14pro suite template: use scripts/run_v14pro_suite.py, not train.py directly.
 paper_template: true
-# v13pro: v12b architecture with independent paper splits and fresh lineages.
+# v14pro: v13pro architecture with CCF-B dual-track data/evaluation protocols.
 # Self-contained config; missing modalities use train-set class medoids.
 seed: 1234
 device: cuda
@@ -103,7 +103,7 @@ decoder_pretrain:
   lambda_aud: 4.0
   lambda_aud_active: 1.0
   save_ckpt: true
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v13pro_decoder_pretrain.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v14pro_decoder_pretrain.pt
 dims:
   img_in: 784
   img_hidden: 256
@@ -295,6 +295,11 @@ data:
   num_workers: 4
   train_subset: 0
   dataset: mnist_fsdd
+  manifest_path: ''
+  eval_split: test
+  validate_paths: true
+  require_unique_modalities: true
+  require_speaker_disjoint: true
   train_samples_per_epoch: 0
   pairing:
     enabled: false
@@ -304,7 +309,7 @@ data:
     manifest_dir: ''
     augment: null
 train:
-  output_version: v13pro
+  output_version: v14pro
   freeze_base: false
   require_cuda: true
   evaluation_only: false
@@ -334,8 +339,8 @@ train:
   - aud_cross_adapter.
   - aud_cross_adapter_mid.
   save_milestone_epochs: []
-  ckpt_path: outputs/checkpoints/cross_modal_snn_v13pro.pt
-  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v13pro.pt
+  ckpt_path: outputs/checkpoints/cross_modal_snn_v14pro.pt
+  eval_ckpt_path: outputs/checkpoints/cross_modal_snn_v14pro.pt
 eval:
   recovery_classification: true
   random_seed: 4321
