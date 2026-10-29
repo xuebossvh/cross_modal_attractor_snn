@@ -128,6 +128,18 @@ class EvaluationTests(unittest.TestCase):
         one, two = TinyModel(), TinyModel()
         a, examples = evaluate(one, DataLoader(TinyData(), batch_size=1), cfg, "cpu", examples=1)
         b, _ = evaluate(two, DataLoader(TinyData(), batch_size=2), cfg, "cpu")
+        # Float32 GEMV/GEMM kernels may round weighted templates differently
+        # across batch sizes/PyTorch builds. Inputs, masks, counts, and all
+        # other fields must remain exact; only these derived errors tolerate
+        # ordinary floating-point roundoff.
+        self.assertEqual(len(a["conditions"]), len(b["conditions"]))
+        for left, right in zip(a["conditions"], b["conditions"]):
+            for key, value in left.items():
+                if "_soft_template_" in key and key.endswith(("_mse", "_sse")) and value is not None:
+                    torch.testing.assert_close(torch.tensor(value, dtype=torch.float64),
+                                               torch.tensor(right[key], dtype=torch.float64),
+                                               rtol=1e-6, atol=1e-10)
+                    right[key] = value
         self.assertEqual(a, b)
         self.assertTrue(all(not kwargs for kwargs in one.calls))
         self.assertEqual(a["n_unique_samples"], 2)
