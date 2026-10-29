@@ -10,12 +10,30 @@ from .decoders import (ClassifierHead, ImageDecoder, ImageRefiner,
                        AudioDecoder, AudioRefiner, AudioLocalCueProjector,
                        MaskedLocalCueProjector, MaskedCrossKeyAdapter)
 from .lif import rate
+from .noise_detector import LocalNoiseDetector
 
 
 class CrossModalSNN(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        noise_cfg = cfg.get("noise_detector", {}) or {}
+        self.use_noise_detector = bool(noise_cfg.get("enabled", False))
+        self.noise_mask_source = noise_cfg.get("mask_source", "predicted")
+        self.noise_threshold = float(noise_cfg.get("threshold", 0.5))
+        if self.use_noise_detector:
+            if self.noise_mask_source not in ("predicted", "oracle", "all"):
+                raise ValueError("noise_detector.mask_source must be predicted, oracle, or all")
+            if not 0.0 < self.noise_threshold < 1.0:
+                raise ValueError("noise_detector.threshold must be between zero and one")
+            width = int(noise_cfg.get("hidden_channels", 32))
+            self.img_noise_detector = LocalNoiseDetector(width)
+            self.aud_noise_detector = LocalNoiseDetector(width)
+            if noise_cfg.get("freeze", False):
+                for detector in (self.img_noise_detector, self.aud_noise_detector):
+                    detector.requires_grad_(False)
+        else:
+            self.img_noise_detector = self.aud_noise_detector = None
         d = cfg["dims"]
         s = cfg["snn"]
         ab = cfg.get("ablation", {})
@@ -283,7 +301,37 @@ class CrossModalSNN(nn.Module):
                 if adapter is not None:
                     adapter.train(mode)
             return self
-        return super().train(mode)
+        result = super().train(mode)
+        if (self.use_noise_detector
+                and self.cfg.get("noise_detector", {}).get("freeze", False)):
+            self.img_noise_detector.eval()
+            self.aud_noise_detector.eval()
+        return result
+
+    def _noise_repair_masks(self, img_cue, aud_cue, img_mask, aud_mask):
+        """Infer support from observations; labels never enter predicted-mask mode."""
+        masks, outputs = {}, {}
+        for name, cue, supplied, detector in (
+                ("img", img_cue, img_mask, self.img_noise_detector),
+                ("aud", aud_cue, aud_mask, self.aud_noise_detector)):
+            logits = detector(cue) if cue is not None else None
+            predicted = ((logits.sigmoid() >= self.noise_threshold).to(logits.dtype)
+                         .detach() if logits is not None else None)
+            if cue is None:
+                selected = None
+            elif self.noise_mask_source == "predicted":
+                selected = predicted
+            elif self.noise_mask_source == "all":
+                selected = torch.ones_like(cue)
+            else:  # Explicit oracle diagnostic, selected only in configuration.
+                selected = torch.zeros_like(cue) if supplied is None else supplied.to(cue)
+                if selected.shape != cue.shape or not torch.all((selected == 0) | (selected == 1)):
+                    raise ValueError("Oracle support must be binary and match its cue")
+            masks[name] = selected
+            outputs[name + "_noise_logits"] = logits
+            outputs[name + "_predicted_mask"] = predicted
+            outputs[name + "_repair_mask"] = selected
+        return masks["img"], masks["aud"], outputs
 
     @torch.no_grad()
     def classify_recovered(self, image=None, audio=None):
@@ -664,6 +712,11 @@ class CrossModalSNN(nn.Module):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
+        detector_outputs = {}
+        if self.use_noise_detector:
+            img_cue_mask, aud_cue_mask, detector_outputs = self._noise_repair_masks(
+                x_img_cue, x_aud_cue, img_cue_mask, aud_cue_mask)
+
         if not training_mode:
             phase = "readout"
             x_img_target = None
@@ -705,6 +758,7 @@ class CrossModalSNN(nn.Module):
             "v_img_target": mem["v_img_target"], "v_aud_target": mem["v_aud_target"],
         }
 
+        out.update(detector_outputs)
         out["logits"] = self.classifier(mem["index_state"])
         out["aux_aud_logits"] = None
         if (self.aux_aud_classifier is not None
@@ -798,11 +852,12 @@ class CrossModalSNN(nn.Module):
             rec_img, coarse_img, img_stats = self._decode_masked_cross(
                 img_dec_state, "img", aud_key_rate if x_aud_cue is not None else None,
                 x_img_cue, img_cue_mask, aud_missing_ratio, disable_aud_to_img_cross)
-            rec_aud, _, aud_stats = self._decode_masked_cross(
+            rec_aud, coarse_aud, aud_stats = self._decode_masked_cross(
                 aud_dec_state, "aud", img_key_rate if x_img_cue is not None else None,
                 x_aud_cue, aud_cue_mask, img_missing_ratio, disable_img_to_aud_cross,
                 local_cue=aud_local_cue)
             out["recovered_img_coarse"] = coarse_img
+            out["recovered_aud_coarse"] = coarse_aud
             out["recovered_img"], out["recovered_aud"] = rec_img, rec_aud
             for direction, stats in (("aud_to_img", img_stats), ("img_to_aud", aud_stats)):
                 if stats is not None:
@@ -816,6 +871,7 @@ class CrossModalSNN(nn.Module):
             coarse_img, x_img_cue, img_cue_mask)
 
         decoder_aud = self.audio_decoder(aud_dec_state)
+        out["recovered_aud_coarse"] = decoder_aud
         out["recovered_aud"] = self._finalize_audio(
             decoder_aud, x_aud_cue, aud_cue_mask)
         return out

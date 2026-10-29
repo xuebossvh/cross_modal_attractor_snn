@@ -7,6 +7,12 @@ from common import build_cue, resolve_train_corrupt_modes, set_seed, unpack_pair
 
 @torch.no_grad()
 def validate_recovery(model, loader, cfg, device, cnn=False):
+    if cfg.get("noise_detector", {}).get("enabled", False):
+        if cnn:
+            raise ValueError("v15pro detector validation requires CrossModalSNN")
+        from scripts.noise_metrics import validate_local_noise
+        return validate_local_noise(model, loader, cfg, device)
+
     from scripts.paper_baseline import region_mse
 
     was_training = model.training

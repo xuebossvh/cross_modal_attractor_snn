@@ -246,7 +246,8 @@ def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
 
     返回的 cue 可能是残缺的、干净的，或某一模态为 None（单模态）。
     return_masks=True 时返回 (img_cue, aud_cue, masks)，其中
-    masks["img"] / masks["aud"] 为对应模态缺失 mask 或 None。
+    masks["img"] / masks["aud"] 为对应模态缺失/污染 support mask 或 None。
+    local_* 模式中该 mask 是检测监督与评估真值，不应作为检测模式的模型输入。
     target 永远是 clean_img / clean_aud（在训练循环里单独传）。
 
     img_mode / aud_mode：残缺 family 覆盖；为 None 时回退到 corruption.* 配置。
@@ -257,6 +258,8 @@ def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
     s = cc["train_severity"] if severity is None else severity
     im = cc["img_mode"] if img_mode is None else img_mode
     am = cc["aud_mode"] if aud_mode is None else aud_mode
+    img_noise_std = cc.get("img_noise_std", cc.get("noise_std", 0.2))
+    aud_noise_std = cc.get("aud_noise_std", cc.get("noise_std", 0.2))
     masks = {"img": None, "aud": None}
 
     def pack(img_cue, aud_cue):
@@ -266,17 +269,19 @@ def build_cue(clean_img, clean_aud, mode, cfg, severity=None,
 
     def ci(x):
         if return_masks:
-            y, mask = corrupt_image(x, im, s, return_mask=True)
+            y, mask = corrupt_image(x, im, s, return_mask=True,
+                                    noise_std=img_noise_std)
             masks["img"] = mask
             return y
-        return corrupt_image(x, im, s)
+        return corrupt_image(x, im, s, noise_std=img_noise_std)
 
     def ca(x):
         if return_masks:
-            y, mask = corrupt_audio(x, am, s, return_mask=True)
+            y, mask = corrupt_audio(x, am, s, return_mask=True,
+                                    noise_std=aud_noise_std)
             masks["aud"] = mask
             return y
-        return corrupt_audio(x, am, s)
+        return corrupt_audio(x, am, s, noise_std=aud_noise_std)
 
     if mode == "corrupt_img_only":
         return pack(ci(clean_img), None)

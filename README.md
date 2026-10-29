@@ -1,4 +1,25 @@
-# 跨模态循环吸引子 SNN：v13pro
+# 跨模态循环脉冲记忆：v15pro 局部污染检测与恢复
+
+v15pro 从 v13pro（`5983308`）派生，新增图像/音频局部污染检测器，使用预测掩码进行选择性恢复。检测器由 MIT 许可的 [CBDNet-pytorch FCN](https://github.com/IDKiro/CBDNet-pytorch) 适配，原噪声水平回归改为污染支持二元分类；没有附带预训练权重。来源与许可见 [third_party/cbdnet](third_party/cbdnet/)。
+
+支持随机局部高斯污染和局部脉冲污染。两阶段分别训练检测器与恢复网络；真实污染 mask 只用于监督、区域评分以及明确标记的 oracle 诊断。默认关闭 Cross-Key/Cross-Detail 条件，保留原共享 Index。当前交付是可运行代码，尚未完成新版本的三种子正式实验。
+
+```bash
+# 只显示计划；添加 --run 开始检测器预训练、恢复训练与评估。
+python scripts/run_v15pro_suite.py
+python scripts/run_v15pro_suite.py --run --device cuda
+```
+
+输出为 `outputs/v15pro/seed_*/`，分别包含检测器、恢复 checkpoint，以及 predicted/oracle/all 三种掩码条件的 JSON 和逐样本 CSV。已有数据可通过 `--data-root`、`--fsdd-root` 指定绝对路径；缺少 CUDA 时须显式选择 `--device cpu`。完整设置、初始化与断点续训说明见 [v15pro 文档](docs/v15pro.md)。
+
+功能验证：
+
+```bash
+python -m unittest discover -s tests -v
+python scripts/smoke_test.py
+```
+
+## 保留的 v13pro 基线
 
 v13pro 在 v12b 模型结构上补充面向论文的实验基础设施，不宣称已经达到 CCF C 录用标准。
 保留 MNIST/FSDD 类别级绑定、Value + gated own cue、simultaneous、batch 128，以及

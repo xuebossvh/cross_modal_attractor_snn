@@ -1,0 +1,110 @@
+# Local contamination detection + selective restoration, derived from v13pro.
+# Use run_v15pro_suite.py to generate isolated per-seed paths.
+extends: v13pro.yaml
+paper_template: false
+version: v15pro
+noise_detector:
+  enabled: true
+  mask_source: predicted
+  hidden_channels: 32
+  threshold: 0.5
+  positive_weight: 3.0
+  loss_weight: 1.0
+  coarse_loss_weight: 0.5
+  freeze: true
+  require_pretrained: true
+  allow_smoke_checkpoint: false
+  checkpoint: outputs/v15pro/seed_1234/detector/best.pt
+  last_checkpoint: outputs/v15pro/seed_1234/detector/last.pt
+  pretrain_epochs: 10
+  pretrain_lr: 0.001
+  pretrain_max_batches: 0
+cue_modes:
+  p_corrupt_img_only: 0.0
+  p_corrupt_aud_only: 0.0
+  p_corrupt_both: 0.4
+  p_clean_img_corrupt_aud: 0.25
+  p_corrupt_img_clean_aud: 0.25
+  p_clean_img_only: 0.0
+  p_clean_aud_only: 0.0
+  p_clean_both: 0.1
+corruption:
+  train_severity: 0.25
+  noise_std: 0.2
+  img_mode: local_gaussian
+  aud_mode: local_gaussian
+  img_family_sampling: balanced
+  aud_family_sampling: balanced
+  curriculum_mode: fixed
+  img_train_modes: [local_gaussian, local_impulse]
+  aud_train_modes: [local_gaussian, local_impulse]
+  aud_family_curriculum:
+    enabled: false
+  aud_time_mask_finetune:
+    enabled: false
+  eval_fixed:
+    img_mode: local_gaussian
+    aud_mode: local_gaussian
+    img_modes: [local_gaussian, local_impulse]
+    aud_modes: [local_gaussian, local_impulse]
+loss:
+  img_masked_families: [local_gaussian, local_impulse]
+  aud_masked_families: [local_gaussian, local_impulse]
+cross_key_conditioning:
+  enabled: false
+  causal_training:
+    enabled: false
+    loss_weight: 0.0
+cross_detail_conditioning:
+  enabled: false
+  build_modules: false
+  causal_training:
+    enabled: false
+    loss_weight: 0.0
+pair_alignment:
+  enabled: false
+  build_modules: false
+  loss_weight: 0.0
+decoder_pretrain:
+  enabled: false
+data:
+  paper_split:
+    enabled: true
+    mode: official
+    seed: 20260915
+    val_fraction: 0.1
+validation:
+  enabled: true
+  split: val
+  every_epochs: 1
+  max_batches: 0
+  severity: 0.25
+  score:
+    lambda_img: 1.0
+    lambda_aud: 4.0
+    lambda_pair: 0.0
+    region_weight: 1.0
+train:
+  output_version: v15pro
+  freeze_base: false
+  require_cuda: true
+  epochs: 100
+  lr: 0.0002
+  trainable_prefixes: []
+  init_ckpt_path: ''
+  init_required: false
+  init_strict: false
+  init_allowed_missing_prefixes: [img_noise_detector., aud_noise_detector.]
+  init_allowed_unexpected_prefixes: []
+  init_load_optimizer: false
+  parent_sha256: ''
+  start_epoch: 0
+  epoch_seeded: true
+  ckpt_path: outputs/v15pro/seed_1234/recovery/last.pt
+  best_ckpt_path: outputs/v15pro/seed_1234/recovery/best.pt
+  eval_ckpt_path: outputs/v15pro/seed_1234/recovery/best.pt
+noise_evaluation:
+  seed: 20261029
+  severity: 0.25
+  families: [local_gaussian, local_impulse]
+  cue_modes: [clean_both, corrupt_both, clean_img_corrupt_aud, corrupt_img_clean_aud]

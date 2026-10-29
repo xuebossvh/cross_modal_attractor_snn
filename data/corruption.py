@@ -6,6 +6,7 @@
 severity ∈ [0, 1]：0 = 不损坏，1 = 最大损坏。
 """
 
+import math
 import random
 
 import torch
@@ -14,15 +15,21 @@ IMG_TRAIN_MODES = [
     "occlusion", "pixel_delete", "mask_vertical",
     "mask_horizontal", "salt_mask",
 ]
-IMG_MODES = IMG_TRAIN_MODES + [
+LOCAL_NOISE_MODES = ("local_gaussian", "local_impulse")
+
+# Keep the legacy random distribution unchanged when introducing new families.
+_IMG_RANDOM_MODES = IMG_TRAIN_MODES + [
     "gaussian", "mask_left", "mask_right", "mask_top", "mask_bottom",
 ]
-AUD_MODES = ["gaussian", "time_mask", "freq_mask",
-             "feature_dropout", "partial_temporal", "time_freq_block"]
+IMG_MODES = _IMG_RANDOM_MODES + list(LOCAL_NOISE_MODES)
+_AUD_RANDOM_MODES = ["gaussian", "time_mask", "freq_mask",
+                     "feature_dropout", "partial_temporal", "time_freq_block"]
+AUD_MODES = _AUD_RANDOM_MODES + list(LOCAL_NOISE_MODES)
 AUD_FAMILY_GROUPS = {
     "paper_aligned_time_gap": ["time_mask", "partial_temporal"],
     "spectrogram_occlusion": ["time_freq_block", "freq_mask", "feature_dropout"],
     "noise": ["gaussian"],
+    "local_contamination": list(LOCAL_NOISE_MODES),
 }
 
 # 受控训练残缺池（避免 full-random 让模型放弃样本级恢复）。
@@ -37,21 +44,60 @@ def _resolve(mode, pool):
     return random.choice(pool) if mode == "random" else mode
 
 
-def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False):
+def _local_contamination(x, mode, severity, noise_std):
+    """Inject noise into one random rectangle per sample, returning its support.
+
+    ``severity`` is the approximate fraction of spatial positions selected, not
+    the noise amplitude. Integer rectangle dimensions quantize the coverage.
+    ``noise_std`` controls additive Gaussian noise; zero disables either local
+    family. Impulse corruption replaces every selected value with random 0/1.
+    Support labels mark injection, including pixels unchanged by clipping or
+    impulse replacement. They are supervision, not observations for inference.
+    """
+    strength = float(noise_std)
+    if not math.isfinite(strength) or strength < 0.0:
+        raise ValueError("noise_std must be finite and nonnegative")
+    coverage = float(severity)
+    if not math.isfinite(coverage):
+        raise ValueError("severity must be finite")
+    coverage = max(0.0, min(1.0, coverage))
+    mask = torch.zeros_like(x)
+    if coverage == 0.0 or strength == 0.0:
+        return x.clone(), mask
+    height, width = x.shape[-2:]
+    block_h = min(height, max(1, int(round(height * math.sqrt(coverage)))))
+    block_w = min(width, max(1, int(round(coverage * height * width / block_h))))
+    for index in range(x.size(0)):
+        top = random.randint(0, height - block_h)
+        left = random.randint(0, width - block_w)
+        mask[index, ..., top:top + block_h, left:left + block_w] = 1.0
+    if mode == "local_gaussian":
+        contaminated = (x + strength * torch.randn_like(x)).clamp(0.0, 1.0)
+    else:
+        contaminated = (torch.rand_like(x) < 0.5).to(x.dtype)
+    return torch.where(mask.bool(), contaminated, x), mask
+
+
+def corrupt_image(x_img, mode="random", severity=0.5, return_mask=False,
+                  noise_std=0.2):
     """损坏图像 cue。
 
     输入 : x_img [B, 1, H, W]，值域 [0, 1]
     模式 : occlusion / pixel_delete / mask_vertical / mask_horizontal /
            salt_mask / gaussian / mask_left / mask_right /
-           mask_top / mask_bottom / random
+           mask_top / mask_bottom / local_gaussian / local_impulse / random
+    local_*: severity controls region coverage; noise_std controls Gaussian
+    amplitude (zero disables local noise). Legacy modes ignore noise_std.
     """
     x = x_img.clone()
     B, C, H, W = x.shape
-    m = _resolve(mode, IMG_MODES)
+    m = _resolve(mode, _IMG_RANDOM_MODES)
     s = float(max(0.0, min(1.0, severity)))
     mask = None
 
-    if m == "occlusion":
+    if m in LOCAL_NOISE_MODES:
+        x, mask = _local_contamination(x, m, severity, noise_std)
+    elif m == "occlusion":
         # 在随机位置挖掉一个边长 ~ s*H 的方块
         bh = max(1, int(round(s * H)))
         bw = max(1, int(round(s * W)))
@@ -147,21 +193,29 @@ def _active_trailing_window(sample, width, threshold_ratio=0.1):
     return start, end
 
 
-def corrupt_audio(x_aud, mode="random", severity=0.5, return_mask=False):
+def corrupt_audio(x_aud, mode="random", severity=0.5, return_mask=False,
+                  noise_std=0.2):
     """损坏音频 cue（作用于 2D log-mel 特征 [B, n_mels, n_frames]）。
 
     模式 : gaussian / time_mask / freq_mask / feature_dropout /
-           partial_temporal / time_freq_block / random
+           partial_temporal / time_freq_block / local_gaussian /
+           local_impulse / random
+    local_*: severity controls region coverage; noise_std controls Gaussian
+    amplitude (zero disables local noise). Legacy modes ignore noise_std.
     """
     x = x_aud.clone()
     if x.dim() == 2:                       # [B, F] -> 不可做时间/频率 mask，仅噪声/dropout
+        if mode in LOCAL_NOISE_MODES:
+            raise ValueError("Local audio contamination requires [B, n_mels, n_frames]")
         return _corrupt_audio_flat(x, mode, severity, return_mask=return_mask)
     B, M, Tf = x.shape
-    m = _resolve(mode, AUD_MODES)
+    m = _resolve(mode, _AUD_RANDOM_MODES)
     s = float(max(0.0, min(1.0, severity)))
     mask = None
 
-    if m == "gaussian":
+    if m in LOCAL_NOISE_MODES:
+        x, mask = _local_contamination(x, m, severity, noise_std)
+    elif m == "gaussian":
         x = (x + s * torch.randn_like(x)).clamp(0.0, 1.0)
     elif m == "time_mask":
         # 随机遮挡一段连续帧

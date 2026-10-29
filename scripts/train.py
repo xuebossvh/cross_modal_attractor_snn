@@ -24,6 +24,7 @@ from paths import ensure_output_dirs, resolve_from_root
 from data.dataset import build_loaders
 from models.network import CrossModalSNN
 from models.lif import rate
+from models.noise_detector import supervised_mask_loss, load_pretrained_detectors
 from models.frozen_base import (ADAPTER_PREFIXES, file_sha256, load_frozen_parent,
                                 frozen_metadata, verify_frozen_resume,
                                 verify_audio_normalization)
@@ -740,7 +741,7 @@ def _apply_trainable_prefixes(model, cfg):
 
 
 def _checkpoint_payload(model, opt, scheduler, cfg, epoch):
-    return {
+    payload = {
         "frozen_base": frozen_metadata(model),
         "model": model.state_dict(),
         "opt": opt.state_dict(),
@@ -748,6 +749,12 @@ def _checkpoint_payload(model, opt, scheduler, cfg, epoch):
         "cfg": cfg,
         "epoch": epoch,
     }
+    if cfg.get("noise_detector", {}).get("enabled", False):
+        payload["noise_training"] = {
+            "version": "v15pro", "mask_source": model.noise_mask_source,
+            "smoke_only": bool(cfg["noise_detector"].get("allow_smoke_checkpoint", False)),
+        }
+    return payload
 
 
 def _milestone_checkpoint_path(ckpt_path, completed_epochs):
@@ -1147,6 +1154,41 @@ def _cross_detail_causal_loss(model, out_correct, img_cue, aud_cue,
     return loss, logs
 
 
+def _local_noise_losses(out, img_cue, aud_cue, img_mask, aud_mask,
+                        tgt_img, tgt_aud, cfg):
+    """Truth masks supervise losses only; reconstruction used inferred support."""
+    nc = cfg.get("noise_detector", {}) or {}
+    total = out["logits"].new_zeros(())
+    logs = {}
+    if not nc.get("enabled", False):
+        return total, logs
+    coarse_weight = float(nc.get("coarse_loss_weight", 0.5))
+    detection_weight = float(nc.get("loss_weight", 1.0))
+    if coarse_weight < 0 or detection_weight < 0:
+        raise ValueError("Local-noise loss weights cannot be negative")
+    for name, cue, truth, target in (
+            ("img", img_cue, img_mask, tgt_img),
+            ("aud", aud_cue, aud_mask, tgt_aud)):
+        if cue is None:
+            continue
+        logits = out[name + "_noise_logits"]
+        det_loss = supervised_mask_loss(
+            logits, truth, positive_weight=float(nc.get("positive_weight", 3.0)))
+        if not nc.get("freeze", False):
+            total = total + detection_weight * det_loss
+        logs[name + "_det_bce"] = float(det_loss.detach())
+        # A detector false negative copies a noisy observation and blocks the final
+        # pixel's reconstruction gradient. This auxiliary prediction remains trainable.
+        if coarse_weight:
+            coarse = out["recovered_" + name + "_coarse"]
+            if name == "img":
+                coarse = coarse.sigmoid()
+            auxiliary = F.mse_loss(coarse, target)
+            total = total + coarse_weight * float(cfg["loss"]["lambda_" + name]) * auxiliary
+            logs[name + "_noise_coarse_mse"] = float(auxiliary.detach())
+    return total, logs
+
+
 def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
                    proto_img, proto_aud, pair_ids=None, epoch=0, step=0):
     """返回 (总损失, 日志字典)。"""
@@ -1195,6 +1237,11 @@ def compute_losses(model, clean_img, clean_aud, labels, cue_mode, cfg,
     out_r = model(x_img_cue=img_cue, x_aud_cue=aud_cue,
                   training_mode=True, phase="readout",
                   img_cue_mask=img_mask, aud_cue_mask=aud_mask)
+
+    noise_loss, noise_logs = _local_noise_losses(
+        out_r, img_cue, aud_cue, img_mask, aud_mask, tgt_img, tgt_aud, cfg)
+    total = total + noise_loss
+    logs.update(noise_logs)
 
     if not model.freeze_base:
         loss_align, align_logs = _alignment_losses(
@@ -1425,7 +1472,7 @@ def main():
     fix_console_encoding()
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Generated v13pro experiment YAML")
+    ap.add_argument("--config", required=True, help="Training experiment YAML")
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--start_epoch", type=int, default=None)
@@ -1433,6 +1480,11 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if cfg.get("noise_detector", {}).get("enabled", False):
+        if cfg["noise_detector"].get("mask_source", "predicted") != "predicted":
+            ap.error("Local-noise training must use predicted masks; oracle/all are evaluation diagnostics")
+        if cfg.get("decoder_pretrain", {}).get("enabled", False):
+            ap.error("Use detector warmup followed by restoration; decoder_pretrain is unsupported for v15pro")
     if cfg.get("paper_template", False):
         ap.error("v13pro is a suite template; use scripts/run_v13pro_suite.py --run")
     frozen = bool(cfg["train"].get("freeze_base", False))
@@ -1544,6 +1596,12 @@ def main():
         pretrain_decoders(model, train_loader, cfg, device)
 
     trainable = _apply_trainable_prefixes(model, cfg)
+    if model.use_noise_detector:
+        if not args.resume:
+            load_pretrained_detectors(model, cfg)
+        if cfg["noise_detector"].get("freeze", False):
+            model.img_noise_detector.requires_grad_(False)
+            model.aud_noise_detector.requires_grad_(False)
     if trainable is not None:
         log(f"[启动] trainable_prefixes matched {len(trainable)} tensors")
     opt = _build_train_optimizer(model, cfg)
@@ -1604,8 +1662,11 @@ def main():
     best_validation_score = float("inf")
     if args.resume and os.path.isfile(ckpt):
         state = torch.load(ckpt, map_location=device)
-        if cfg.get("paper"):
-            for section in ("paper", "train", "data", "snn", "dims", "ablation", "audio_local_cue", "cross_key_conditioning"):
+        if model.use_noise_detector:
+            from scripts.evaluate_v15pro import verify_checkpoint_config
+            verify_checkpoint_config(cfg, state.get("cfg"))
+        if cfg.get("paper") or model.use_noise_detector:
+            for section in ("paper", "train", "data", "snn", "dims", "ablation", "audio_local_cue", "cross_key_conditioning", "noise_detector", "corruption", "loss"):
                 if state.get("cfg", {}).get(section) != cfg.get(section):
                     raise RuntimeError(f"Publication resume configuration mismatch: {section}")
         model.load_state_dict(state["model"])
@@ -1625,6 +1686,8 @@ def main():
             state.get("best_validation_score", float("inf")))
         log(f"[恢复] 从 {ckpt} 继续，起始 epoch={start_epoch}/{total_epochs - 1}")
     elif args.resume:
+        if model.use_noise_detector:
+            raise FileNotFoundError(f"Requested local-noise resume checkpoint does not exist: {ckpt}")
         log(f"[警告] --resume 指定但 checkpoint 不存在: {ckpt}，从头训练。")
 
     verify_audio_normalization(model, cfg)
