@@ -17,6 +17,18 @@ class CrossModalSNN(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
+        self.v16_enabled = bool(cfg.get("v16", {}).get("enabled", False))
+        self.no_value = self.v16_enabled and bool(cfg["v16"].get("no_value", False))
+        self.v16_local_scales = tuple(str(scale) for scale in cfg.get(
+            "v16", {}).get("local_scales", ("16", "32", "64")))
+        if self.v16_enabled:
+            if not self.v16_local_scales or not set(self.v16_local_scales) <= {"16", "32", "64"}:
+                raise ValueError("v16.local_scales must select 16, 32 and/or 64")
+            for section in ("cross_key_conditioning", "cross_detail_conditioning", "pair_alignment"):
+                if cfg.get(section, {}).get("enabled", False):
+                    raise ValueError(f"v16 excludes {section}")
+            if cfg.get("cross_key_conditioning", {}).get("mode") != "masked_feature":
+                raise ValueError("v16 requires the masked local feature decoder route")
         noise_cfg = cfg.get("noise_detector", {}) or {}
         self.use_noise_detector = bool(noise_cfg.get("enabled", False))
         self.noise_mask_source = noise_cfg.get("mask_source", "predicted")
@@ -215,7 +227,7 @@ class CrossModalSNN(nn.Module):
         else:
             self.audio_local_cue_projector = None
         self.use_audio_local_cue_multiscale = bool(
-            local_cfg.get("multiscale", False))
+            local_cfg.get("multiscale", False)) or self.v16_enabled
         if self.use_audio_local_cue and self.use_audio_local_cue_multiscale:
             stage_channels = self.audio_decoder.stage_channels
             if len(stage_channels) < 3:
@@ -308,17 +320,36 @@ class CrossModalSNN(nn.Module):
             self.aud_noise_detector.eval()
         return result
 
-    def _noise_repair_masks(self, img_cue, aud_cue, img_mask, aud_mask):
+    def _noise_repair_masks(self, img_cue, aud_cue, img_mask, aud_mask,
+                            img_noise_mask=None, aud_noise_mask=None):
         """Infer support from observations; labels never enter predicted-mask mode."""
         masks, outputs = {}, {}
-        for name, cue, supplied, detector in (
-                ("img", img_cue, img_mask, self.img_noise_detector),
-                ("aud", aud_cue, aud_mask, self.aud_noise_detector)):
+        for name, cue, supplied, oracle_noise, detector in (
+                ("img", img_cue, img_mask, img_noise_mask, self.img_noise_detector),
+                ("aud", aud_cue, aud_mask, aud_noise_mask, self.aud_noise_detector)):
             logits = detector(cue) if cue is not None else None
             predicted = ((logits.sigmoid() >= self.noise_threshold).to(logits.dtype)
                          .detach() if logits is not None else None)
             if cue is None:
                 selected = None
+            elif self.v16_enabled:
+                # Known absence and unknown contamination have distinct inputs.
+                # Do not use oracle_noise in the deployed predicted pathway.
+                missing = torch.zeros_like(cue) if supplied is None else supplied.to(cue)
+                if missing.shape != cue.shape or not torch.all((missing == 0) | (missing == 1)):
+                    raise ValueError("Known missing mask must be binary and match its cue")
+                if self.noise_mask_source == "all":
+                    selected = torch.ones_like(cue)
+                else:
+                    contamination = predicted
+                    if self.noise_mask_source == "oracle":
+                        if oracle_noise is None:
+                            raise ValueError("v16 oracle requires explicit true noise mask for every present cue")
+                        contamination = oracle_noise.to(cue)
+                        if contamination.shape != cue.shape or not torch.all((contamination == 0) | (contamination == 1)):
+                            raise ValueError("Oracle noise mask must be binary and match its cue")
+                    selected = torch.maximum(missing, contamination * (1.0 - missing)).detach()
+                outputs[name + "_missing_mask"] = missing.detach()
             elif self.noise_mask_source == "predicted":
                 selected = predicted
             elif self.noise_mask_source == "all":
@@ -360,11 +391,10 @@ class CrossModalSNN(nn.Module):
                     conv2, size=(self.audio_decoder.n_mels,
                                  self.audio_decoder.n_frames),
                     mode="bilinear", align_corners=False)
-                local_features = {
-                    "16": self.audio_local_cue_multiscale["16"](conv2, mask),
-                    "32": self.audio_local_cue_multiscale["32"](conv1, mask),
-                    "64": self.audio_local_cue_multiscale["64"](full_cue, mask),
-                }
+                sources = {"16": conv2, "32": conv1, "64": full_cue}
+                scales = self.v16_local_scales if self.v16_enabled else ("16", "32", "64")
+                local_features = {scale: self.audio_local_cue_multiscale[scale](
+                    sources[scale], mask) for scale in scales}
             elif self.audio_local_cue_projector is not None:
                 if isinstance(local_cue, dict):
                     local_cue = local_cue["conv2"]
@@ -612,6 +642,10 @@ class CrossModalSNN(nn.Module):
                             return_cross_stats=False):
         base_value = (value_state.detach() if self.detach_value_for_recon
                       else value_state)
+        if self.no_value:
+            # Remove the Value pathway BEFORE the gate as well as before concat.
+            # Otherwise the detail gate would still convey shared Index state.
+            base_value = torch.zeros_like(base_value)
         cross_residual, cross_stats = self._cross_key_residual(
             base_value, cross_key_rate, modality, disabled=disable_cross_key)
         fused_value = base_value + cross_residual
@@ -708,14 +742,16 @@ class CrossModalSNN(nn.Module):
                 disable_img_to_aud_cross=False,
                 disable_aud_to_img_cross=False,
                 disable_img_to_aud_detail=False,
-                disable_aud_to_img_detail=False):
+                disable_aud_to_img_detail=False,
+                img_noise_mask=None, aud_noise_mask=None):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
         detector_outputs = {}
         if self.use_noise_detector:
             img_cue_mask, aud_cue_mask, detector_outputs = self._noise_repair_masks(
-                x_img_cue, x_aud_cue, img_cue_mask, aud_cue_mask)
+                x_img_cue, x_aud_cue, img_cue_mask, aud_cue_mask,
+                img_noise_mask, aud_noise_mask)
 
         if not training_mode:
             phase = "readout"
@@ -886,12 +922,15 @@ class CrossModalSNN(nn.Module):
               disable_img_to_aud_cross=False,
               disable_aud_to_img_cross=False,
               disable_img_to_aud_detail=False,
-              disable_aud_to_img_detail=False):
+              disable_aud_to_img_detail=False,
+              img_noise_mask=None, aud_noise_mask=None):
         self.eval()
         return self.forward(x_img_cue=x_img_cue, x_aud_cue=x_aud_cue,
                             training_mode=False, phase="readout",
                             img_cue_mask=img_cue_mask,
                             aud_cue_mask=aud_cue_mask,
+                            img_noise_mask=img_noise_mask,
+                            aud_noise_mask=aud_noise_mask,
                             cross_key_img_rate_override=(
                                 cross_key_img_rate_override),
                             cross_key_aud_rate_override=(

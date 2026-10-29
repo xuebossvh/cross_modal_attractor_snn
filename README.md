@@ -1,4 +1,17 @@
-# 跨模态循环脉冲记忆：v15pro 局部污染检测与恢复
+# 跨模态循环脉冲记忆：v16pro
+
+13 种图像/音频 cue 的分类、缺失补全、局部污染检测与恢复实验。全流程关闭 Cross-Key，保留共享 Index。包含 `main`、`no_value`、`no_recurrence` 三种恢复配置，无单尺度消融和 CNN 恢复对比。
+
+```bash
+# 仅查看计划
+python scripts/run_v16pro_suite.py --device cuda
+# 训练完成后自动评估与导出 figures / logs / tables
+python -u scripts/run_v16pro_suite.py --run --device cuda --output outputs/v16pro
+```
+
+默认三个种子、21 个训练作业、累计 990 个作业轮。完整输入协议、预算、断点恢复与结果说明见 [v16pro 文档](docs/v16pro.md)。当前交付为代码和流程验证，正式三种子训练由用户启动。
+
+## v15pro 历史入口
 
 v15pro 从 v13pro（`5983308`）派生，新增图像/音频局部污染检测器，使用预测掩码进行选择性恢复。检测器由 MIT 许可的 [CBDNet-pytorch FCN](https://github.com/IDKiro/CBDNet-pytorch) 适配，原噪声水平回归改为污染支持二元分类；没有附带预训练权重。来源与许可见 [third_party/cbdnet](third_party/cbdnet/)。
 

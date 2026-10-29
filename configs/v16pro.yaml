@@ -1,0 +1,69 @@
+extends: v15pro.yaml
+version: v16pro
+paper_template: false
+v16:
+  enabled: true
+  no_value: false
+  local_scales: ['64']
+  missing_severity: 0.4
+  noise_coverage: 0.25
+  noise_std: 0.2
+  image_missing_families: [occlusion, pixel_delete, mask_vertical, mask_horizontal, salt_mask]
+  audio_missing_families: [time_mask, freq_mask, feature_dropout, partial_temporal, time_freq_block]
+  noise_families: [local_gaussian, local_impulse]
+  cue_probabilities:
+    corrupt_img_only: 0.0625
+    corrupt_aud_only: 0.0625
+    corrupt_both: 0.0625
+    clean_img_corrupt_aud: 0.0625
+    corrupt_img_clean_aud: 0.0625
+    clean_img_only: 0.0625
+    clean_aud_only: 0.0625
+    clean_both: 0.0625
+    noisy_img_only: 0.1
+    noisy_aud_only: 0.1
+    noisy_both: 0.1
+    clean_img_noisy_aud: 0.1
+    noisy_img_clean_aud: 0.1
+  evaluation_seed: 5678
+  missing_sweep: [0.2, 0.4, 0.6, 0.8]
+  coverage_sweep: [0.1, 0.25, 0.4]
+  noise_std_sweep: [0.1, 0.2, 0.3]
+cross_key_conditioning:
+  enabled: false
+  build_modules: false
+  build_feature_modules: false
+  intermediate: false
+  causal_training:
+    enabled: false
+    loss_weight: 0.0
+cross_detail_conditioning:
+  enabled: false
+  build_modules: false
+pair_alignment:
+  enabled: false
+  build_modules: false
+audio_local_cue:
+  enabled: true
+  multiscale: true
+noise_detector:
+  enabled: true
+  freeze: true
+  mask_source: predicted
+  pretrain_epochs: 10
+  pretrain_lr: 0.001
+  allow_smoke_checkpoint: false
+validation:
+  enabled: true
+  split: val
+  max_batches: 0
+  max_samples: 0
+train:
+  stage: parent
+  epochs: 100
+  lr: 0.0002
+  freeze_base: false
+  init_strict: true
+  init_allowed_missing_prefixes: []
+  init_allowed_unexpected_prefixes: []
+  trainable_prefixes: []
