@@ -69,6 +69,44 @@ train_noise_detector.py → train.py → evaluate_v15pro.py
 
 ## 输出与继续运行
 
+### 推理导出：figures / logs / tables
+
+原训练套件自动生成 JSON/CSV 评估和作业日志，不直接生成恢复样例图。
+训练完成后，用独立导出工具一次生成三个种子的图片、日志和数值表：
+
+```bash
+python -u tools/export_v15pro.py --root outputs/v15pro --seeds 1234 2345 3456 --examples 8
+```
+
+每个种子的输出目录为 `outputs/v15pro/seed_<seed>/inference/`：
+
+```text
+inference/
+  figures/  # 恢复六列样例图、区域 MSE 图、检测指标图
+  logs/     # evaluation.log，包含数据加载与推理过程
+  tables/   # summary.json、per_sample.csv、by_condition.csv、样例与产物清单
+```
+
+图片使用前 8 个测试样本，不按恢复效果筛选；真实污染 mask 明确标记为仅供评价，
+与检测器预测 mask、实际用于回填的 mask 分开展示。所有指标复用原评估定义，
+可见区/污染区以真实区域划分，未定义指标保留为 null 或空白。
+
+默认只导出 `predicted` 主结果；需要诊断图时加 `--mask-source oracle` 或 `all`，
+输出分别进入 `inference_oracle` / `inference_all`，不混入主结果。
+只导出一个种子可使用 `--seeds 1234`。单 checkpoint 自定义输出：
+
+```bash
+python tools/export_v15pro.py \
+  --config outputs/v15pro/seed_1234/config.yaml \
+  --checkpoint outputs/v15pro/seed_1234/recovery/best.pt \
+  --output-dir outputs/v15pro/seed_1234/inference
+```
+
+导出会重新执行推理，不训练、不更改权重。完整导出可通过文件哈希核验后跳过；
+设置改变或导出中断时，选用新的 `--output-name`（套件模式）或 `--output-dir`。
+`--max-samples` 只用于部分检查，报告会明确标记；`--examples 0` 可跳过样例面板。
+这些工具位于 `tools/`，不改变既有训练源代码指纹，原训练计划与断点继续方式保持兼容。
+
 ```text
 outputs/v15pro/
   plan.json

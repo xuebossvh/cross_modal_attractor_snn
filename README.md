@@ -12,6 +12,15 @@ python scripts/run_v15pro_suite.py --run --device cuda
 
 输出为 `outputs/v15pro/seed_*/`，分别包含检测器、恢复 checkpoint，以及 predicted/oracle/all 三种掩码条件的 JSON 和逐样本 CSV。已有数据可通过 `--data-root`、`--fsdd-root` 指定绝对路径；缺少 CUDA 时须显式选择 `--device cpu`。完整设置、初始化与断点续训说明见 [v15pro 文档](docs/v15pro.md)。
 
+训练完成后，导出每个种子的 `inference/figures`、`inference/logs`、`inference/tables`：
+
+```bash
+python -u tools/export_v15pro.py --root outputs/v15pro --seeds 1234 2345 3456 --examples 8
+```
+
+包含恢复样例、预测/真实污染掩码对照、MSE/检测指标图，以及原始逐样本表。
+这是独立的推理导出步骤；原训练命令保持不变，无需重新训练。
+
 功能验证：
 
 ```bash
