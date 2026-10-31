@@ -1,13 +1,13 @@
 {
   "snapshot_only": true,
   "authoritative_workspace_plan": "04_实验计划/v15_v16实验改进计划.json",
-  "source_sha256": "1acbf63152600cd73d5ad558bae4ee30e4de6c89cedc31b180888b9f8da11a2d",
-  "source_updated": "2026-11-01T01:21:44+08:00",
+  "source_sha256": "af1948ab6101d7630a3295c6df2ce70023f2f5a6d1d87b6bce12c377a8df682d",
+  "source_updated": "2026-11-01T01:23:51+08:00",
   "note": "Generated release snapshot. Do not edit task status here. Local evidence paths refer to the original workspace; weights and experiment outputs are not included in Git.",
   "plan": {
     "title": "v15 v16 实验改进计划",
     "created": "2026-10-31",
-    "updated": "2026-11-01T01:21:44+08:00",
+    "updated": "2026-11-01T01:23:51+08:00",
     "current_scope": "P1–P3已完成，用户已授权推送代码并开始P4。P5图像细节与P6音频细节独立且都需推进，P4用于分别确定改进点，不是二选一；P5–P8尚未启动正式实验，v16原协议保留为基线。",
     "status_rules": {
       "未开始": "尚未实施",
@@ -159,9 +159,13 @@
           {
             "text": "最终41项P4测试通过；3080Ti真实train60/val60短检查通过，完成1次参数更新及13条件起终点评估。原始训练数据与归一化指纹核验一致。该短检查不属于正式P4结果。",
             "path": "../cross_modal_snn_v15pro/outputs/p4_implementation_tests.log"
+          },
+          {
+            "text": "P4代码已push至v15pro分支6a5bdea。独立3080Ti工程已启动P4套件，含源检查点、数据、代码指纹和日志路径；真实实验仍在运行。",
+            "path": "../cross_modal_snn_v15pro/outputs/p4_seed1234/remote_job.json"
           }
         ],
-        "next": "部署并启动固定60对样本的1000次更新诊断；A/B各30轮在v16释放GPU后自动执行，随后结果复核。"
+        "next": "服务器P4作业PID468893运行固定train60/val60的1000次更新诊断；之后等待GPU空闲再顺序执行keep_lr30轮、restart_lr30轮及报告。完成后复核图像/音频阶段误差，分别推进P5与P6。"
       },
       {
         "id": "P5",
@@ -320,6 +324,10 @@
       {
         "date": "2026-11-01T01:21:44+08:00",
         "event": "P4：补充GPU兼容性、原数据校验与真实短检查；A/B等待原v16评估退出后自动运行，原批量128不变。"
+      },
+      {
+        "date": "2026-11-01T01:23:51+08:00",
+        "event": "P4：P4已部署并启动；续训等待现有v16评估释放GPU，未改动v16作业。P4保持进行中，P5/P6均独立保留。"
       }
     ]
   }
