@@ -16,3 +16,6 @@ configs/v12*.yaml
 scripts/run_v12*_suite.py
 scripts/smoke_test_v12*.py
 tmp/
+
+# Synthetic rendering QA artifacts are not experimental results or source code.
+tests/_joint_panels_review_*/

@@ -1,0 +1,309 @@
+{
+  "snapshot_only": true,
+  "authoritative_workspace_plan": "04_实验计划/v15_v16实验改进计划.json",
+  "source_sha256": "5d67bf92468c8386ba098c4fc46a7ab462c96fabf65634c04cb71d5f96c6f95e",
+  "source_updated": "2026-11-01T00:59:09+08:00",
+  "note": "Generated release snapshot. Do not edit task status here. Local evidence paths refer to the original workspace; weights and experiment outputs are not included in Git.",
+  "plan": {
+    "title": "v15 v16 实验改进计划",
+    "created": "2026-10-31",
+    "updated": "2026-11-01T00:59:09+08:00",
+    "current_scope": "P1–P3已完成，用户已授权推送代码并开始P4。P5图像细节与P6音频细节独立且都需推进，P4用于分别确定改进点，不是二选一；P5–P8尚未启动正式实验，v16原协议保留为基线。",
+    "status_rules": {
+      "未开始": "尚未实施",
+      "进行中": "已实施部分工作，尚未满足验收",
+      "已完成": "实现、适用测试、真实结果与复核均满足本项验收",
+      "待条件满足": "有明确前置条件，尚未开始依赖工作"
+    },
+    "completed_diagnostics": [
+      {
+        "title": "v15三个种子的输出核验与评估",
+        "status": "已完成",
+        "evidence": "9份评估共630000条条件记录与JSON一致；区分Index分类与内容恢复。",
+        "path": "../cross_modal_snn_v15pro/outputs/server_results/analysis_20261031/v15pro_assessment.html"
+      },
+      {
+        "title": "训练轮数与v16迁移诊断",
+        "status": "已完成",
+        "evidence": "已读取服务器真实日志与配置；末10轮相对前10轮验证分数仅改善0.25%、0.02%、0.37%。",
+        "path": "../cross_modal_snn_v15pro/outputs/server_results/analysis_20261031/training_diagnosis/v15pro_training_diagnosis.html"
+      },
+      {
+        "id": "foreground_assessment_20261101",
+        "title": "有效内容覆盖补测结果评判",
+        "status": "已完成",
+        "evidence": "已评判三seed完整补测，并统计有效内容变差与分布尾部。覆盖问题已修正，细节保真及跨模态恢复收益仍有限；没有执行P4–P8。",
+        "path": "../cross_modal_snn_v15pro/outputs/foreground_test_full/assessment_20261101.html"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "P1",
+        "title": "有效内容覆盖的污染测试",
+        "status": "已完成",
+        "problem": "随机矩形常落在空白背景，不能充分检验有效信号恢复。",
+        "solution": "保留原uniform随机测试，新增foreground有效内容覆盖条件；矩形面积和噪声强度不变，位置在满足有效内容覆盖要求的候选中随机抽取。真实目标仅用于损坏生成及评价，不传入预测模式前向。",
+        "acceptance": [
+          "采样确定、面积正确、不改变旧uniform语义",
+          "无前景和约束不可满足时明确记录，不伪造成功",
+          "现有v15三个种子的正式测试集完成新旧位置条件推理并分别汇总"
+        ],
+        "progress": {
+          "implementation": true,
+          "tests": true,
+          "real_inference": true,
+          "review": true
+        },
+        "evidence": [
+          {
+            "text": "固定前256个验证样本：原音频106个零覆盖，新协议全部达到至少35%有效内容覆盖。采样及原污染测试通过。",
+            "path": "../cross_modal_snn_v15pro/outputs/foreground_protocol_validation/validation.json"
+          },
+          {
+            "text": "精确输入包：三seed的test与val张量及身份指纹完全一致；每test含10000图像配对、300条独立音频。",
+            "path": "../cross_modal_snn_v15pro/outputs/v15pro_eval_assets/manifest.json"
+          },
+          {
+            "text": "完整推理清单：非partial，39个条件，每条件10000配对。",
+            "path": "../cross_modal_snn_v15pro/outputs/foreground_test_full/summary.json"
+          },
+          {
+            "text": "3个seed、39条件、390000条正式记录已独立审核，0错误；前景有效覆盖约束全部满足。",
+            "path": "../cross_modal_snn_v15pro/outputs/foreground_test_full/numeric_integrity.json"
+          }
+        ],
+        "next": "原uniform基线与foreground困难测试均保留；后续训练是否采用新采样交由P4之后决定。"
+      },
+      {
+        "id": "P2",
+        "title": "同一配对样本的图像音频联合展示",
+        "status": "已完成",
+        "problem": "原图库把两模态分开，难以查看同一样本的联合恢复。",
+        "solution": "一张图一配对样本，图像和音频上下两行，六列依次为目标、输入cue、真实污染mask、预测污染mask、实际修复mask、恢复结果。标注样本ID、类别、Index预测、污染类型、位置策略、各模态MSE及有效内容覆盖。保存原始数值方便重绘。",
+        "acceptance": [
+          "两模态sample_id一致，Input cue标题适用于干净模态",
+          "真实模型输出联合图与对应数值清单一致",
+          "PNG/PDF布局和文字检查通过，固定前N样本而非挑成功样本"
+        ],
+        "progress": {
+          "implementation": true,
+          "tests": true,
+          "real_inference": true,
+          "review": true
+        },
+        "evidence": [
+          "联合渲染6项功能测试通过；PDF文字、面板对齐、碰撞检查通过。",
+          {
+            "text": "真实验证样本联合图流程核查；这是val8检查，不是正式测试汇总。",
+            "path": "../cross_modal_snn_v15pro/outputs/foreground_smoke_val8/figures/seed_1234/foreground/local_gaussian__corrupt_both/sample_00000.png"
+          },
+          {
+            "text": "正式三种子312张联合图均由真实推理缓存生成；全部通过面板对齐、PDF文字及碰撞检查，并核对源数组一致性。人工抽查代表性真实图。",
+            "path": "../cross_modal_snn_v15pro/outputs/foreground_test_full/report_manifest.json"
+          }
+        ],
+        "next": "v15联合展示已完成；v16对应展示随P8迁移，当前不改运行中的v16。"
+      },
+      {
+        "id": "P3",
+        "title": "背景与有效内容分区评价",
+        "status": "已完成",
+        "problem": "整体污染区MSE可能被背景去噪收益主导。",
+        "solution": "分别报告全图、污染区、污染区内有效内容、污染区背景、未污染区误差，记录前景覆盖比例；按位置策略、噪声类型、cue模式与模态拆分，并计算三训练种子的均值及样本标准差。",
+        "acceptance": [
+          "区域按干净目标与真实污染mask定义，空区域记null",
+          "累加SSE与像素数后计算MSE，避免错误平均和伪独立样本",
+          "新旧位置协议的全测试集统计与联合图可追溯"
+        ],
+        "progress": {
+          "implementation": true,
+          "tests": true,
+          "real_inference": true,
+          "review": true
+        },
+        "evidence": [
+          "评价器7项测试通过：批量指标和逐样本参考一致，预测前向不接收真实mask。",
+          {
+            "text": "补测作业信息（服务器、输出目录、日志及PID；不含密码）",
+            "path": "../cross_modal_snn_v15pro/outputs/foreground_test_full/remote_job.json"
+          },
+          {
+            "text": "分条件汇总、前景减随机的配对差值、三seed均值及样本标准差已导出；390000行独立复核0错误。",
+            "path": "../cross_modal_snn_v15pro/outputs/foreground_test_full/review.html"
+          }
+        ],
+        "next": "P4–P8仍未完成；后续恢复改进使用当前分层指标继续评价。"
+      },
+      {
+        "id": "P4",
+        "title": "训练轮数和学习率限制诊断",
+        "status": "进行中",
+        "problem": "尚不能严格区分欠拟合、优化平台与泛化问题。",
+        "solution": "固定32–64个训练样本及污染做拟合诊断；再预选一个seed，从同一第100轮状态建立两个30轮分支，A保持末期学习率，B温和重启学习率。损失、数据序列和额外预算一致，使用验证集评价。",
+        "acceptance": [
+          "固定训练与验证样本使用同口径指标",
+          "两分支公平初始化与预算，并记录优化器/调度器来源",
+          "结论来自验证数据，不能针对已看过的测试图选模"
+        ],
+        "progress": {
+          "implementation": false,
+          "tests": false,
+          "real_inference": false,
+          "review": false
+        },
+        "evidence": [],
+        "next": "实现并测试固定小样本诊断和公平A/B续训，推送后部署独立P4作业。"
+      },
+      {
+        "id": "P5",
+        "title": "图像笔画结构恢复改进",
+        "status": "待条件满足",
+        "problem": "检测准确时仍可能出现笔画变宽、闭合、连接错误。",
+        "solution": "先比较coarse与final的结构误差，再单因素测试污染区及边界归一化约束。原有BCE/L1/全图edge已启用，避免重复添加后误称新方法。",
+        "acceptance": [
+          "与相同额外预算的原方法对照",
+          "在验证集同时改善结构与恢复误差，检查干净区损伤",
+          "有收益后按三个seed复核"
+        ],
+        "progress": {
+          "implementation": false,
+          "tests": false,
+          "real_inference": false,
+          "review": false
+        },
+        "evidence": [],
+        "next": "作为独立图像改进任务，依据P4图像诊断选择改项；与P6均需推进，不是二选一。"
+      },
+      {
+        "id": "P6",
+        "title": "音频频谱细纹理恢复改进",
+        "status": "待条件满足",
+        "problem": "有效频谱区域恢复后可能变平滑，细条纹丢失。",
+        "solution": "检查时频结构误差；分别测试启用已有音频refiner或真正高分辨率局部cue路径。当前64尺度为低分辨率特征放大，音频refiner旁路，候选原因需实验验证。",
+        "acceptance": [
+          "一次只改变一个因素并设置等预算对照",
+          "有效频谱区域指标与真实样例改善",
+          "与旧协议结果分开记录，不把背景恢复当有效信号恢复"
+        ],
+        "progress": {
+          "implementation": false,
+          "tests": false,
+          "real_inference": false,
+          "review": false
+        },
+        "evidence": [],
+        "next": "作为独立音频改进任务，依据P4音频诊断选择改项；与P5均需推进，不是二选一。"
+      },
+      {
+        "id": "P7",
+        "title": "恢复内容识别与验证选模完善",
+        "status": "未开始",
+        "problem": "Index分类正确不等于恢复内容正确，现选模主要看MSE。",
+        "solution": "分开报告Index ACC和独立恢复内容识别率，补充验证集边缘/时频结构指标及干净区损伤。v16已有独立clean-only识别器安排，待正式结果复核后利用。",
+        "acceptance": [
+          "独立识别器不使用恢复测试结果训练",
+          "模型选择规则在验证集确定",
+          "MSE、结构和内容识别指标定义明确且分别展示"
+        ],
+        "progress": {
+          "implementation": false,
+          "tests": false,
+          "real_inference": false,
+          "review": false
+        },
+        "evidence": [],
+        "next": "先完成当前前三项，不把v16已安排功能等同于新方案已验证。"
+      },
+      {
+        "id": "P8",
+        "title": "验证有效的v15改进迁移到v16",
+        "status": "待条件满足",
+        "problem": "两版本共享部分模块，但训练入口、mask语义和冻结规则不同。",
+        "solution": "迁移经验证有效的改项；若仅改恢复适配且核心/检测器不变，可设计复用旧父模型的新谱系，三个恢复分支等预算重新适配和评估。若改核心则重训受影响父模型。保留v16原实验基线。",
+        "acceptance": [
+          "受控初始化记录旧权重指纹及新实验配置，不绕过校验冒充resume",
+          "main/no_value/no_recurrence使用公平设置",
+          "完整13cue与既定扫描重新评估"
+        ],
+        "progress": {
+          "implementation": false,
+          "tests": false,
+          "real_inference": false,
+          "review": false
+        },
+        "evidence": [],
+        "next": "依赖P5/P6等产生可复核改进；当前不修改运行中的v16。"
+      }
+    ],
+    "history": [
+      {
+        "date": "2026-10-31",
+        "event": "建立长期计划清单，用户授权开始P1–P3；前三项标为进行中，其余未实施。"
+      },
+      {
+        "date": "2026-10-31T21:38:26+08:00",
+        "event": "P1：独立采样器和验证集协议检查完成，正式推理尚未完成。"
+      },
+      {
+        "date": "2026-10-31T21:38:26+08:00",
+        "event": "P2：绘图工具已完成，正式图库待真实推理数据。"
+      },
+      {
+        "date": "2026-10-31T21:38:27+08:00",
+        "event": "P3：分区域评价实现与测试完成，正式结果尚未完成。"
+      },
+      {
+        "date": "2026-10-31T21:38:47+08:00",
+        "event": "P1：原v15服务器精确导出三模型权重与测试输入，文件校验通过；8样本真实验证推理通过；现有3080Ti独立目录已启动三种子完整补测。"
+      },
+      {
+        "date": "2026-10-31T21:47:07+08:00",
+        "event": "P1：正式测试已完成seed1234全部13条件，每条件10000配对；seed2345正在运行。仍未标记三个种子全部完成。"
+      },
+      {
+        "date": "2026-10-31T21:47:07+08:00",
+        "event": "P2：真实val8联合图已目视检查，污染命中有效内容；图头补充val/test标识，防止不同split相同sample_id混淆。"
+      },
+      {
+        "date": "2026-10-31T21:54:17+08:00",
+        "event": "P3：正式补测作业位置已记录，便于后续会话续查；正在保留原模型进行完整39条件评价。"
+      },
+      {
+        "date": "2026-10-31T22:06:14+08:00",
+        "event": "P1：三个种子、39条件、390000条正式推理全部完成；GPU补测进程正常退出。数值审核和最终图库仍进行中。"
+      },
+      {
+        "date": "2026-10-31T22:06:14+08:00",
+        "event": "P3：所有正式分区指标已生成，独立逐行审核仍在运行；不提前标记最终完成。"
+      },
+      {
+        "date": "2026-10-31T22:07:55+08:00",
+        "event": "P1：P1验收通过：旧随机位置复现、新前景位置测试、真实权重和完整测试集结果均已核验。"
+      },
+      {
+        "date": "2026-10-31T22:10:40+08:00",
+        "event": "P2：P2验收完成：一张图含同一配对样本的图像和音频，固定前8样本，split和身份明确，312张PNG/PDF/SVG及数值包已保存。"
+      },
+      {
+        "date": "2026-10-31T22:10:40+08:00",
+        "event": "P3：P3验收完成：全量数值与CSV汇总一致，原uniform准确率完全复现，恢复MSE最大绝对差约7.13e-7。"
+      },
+      {
+        "date": "2026-11-01T00:23:06+08:00",
+        "event": "完成有效内容覆盖补测的结果评判，新增诊断报告；P1–P3保持已完成，P4–P8状态不变，未启动新增训练。"
+      },
+      {
+        "date": "2026-11-01T00:59:09+08:00",
+        "event": "P4：用户授权push并开始P4；P5与P6是独立且都要推进的后续任务，不能二选一。"
+      },
+      {
+        "date": "2026-11-01T00:59:09+08:00",
+        "event": "P5：纠正后续安排：P5和P6均保留，分别验证图像与音频改进。"
+      },
+      {
+        "date": "2026-11-01T00:59:09+08:00",
+        "event": "P6：音频细节改进独立于P5，两条路径均需推进。"
+      }
+    ]
+  }
+}
