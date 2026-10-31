@@ -1,13 +1,13 @@
 {
   "snapshot_only": true,
   "authoritative_workspace_plan": "04_实验计划/v15_v16实验改进计划.json",
-  "source_sha256": "5d67bf92468c8386ba098c4fc46a7ab462c96fabf65634c04cb71d5f96c6f95e",
-  "source_updated": "2026-11-01T00:59:09+08:00",
+  "source_sha256": "1acbf63152600cd73d5ad558bae4ee30e4de6c89cedc31b180888b9f8da11a2d",
+  "source_updated": "2026-11-01T01:21:44+08:00",
   "note": "Generated release snapshot. Do not edit task status here. Local evidence paths refer to the original workspace; weights and experiment outputs are not included in Git.",
   "plan": {
     "title": "v15 v16 实验改进计划",
     "created": "2026-10-31",
-    "updated": "2026-11-01T00:59:09+08:00",
+    "updated": "2026-11-01T01:21:44+08:00",
     "current_scope": "P1–P3已完成，用户已授权推送代码并开始P4。P5图像细节与P6音频细节独立且都需推进，P4用于分别确定改进点，不是二选一；P5–P8尚未启动正式实验，v16原协议保留为基线。",
     "status_rules": {
       "未开始": "尚未实施",
@@ -139,20 +139,29 @@
         "title": "训练轮数和学习率限制诊断",
         "status": "进行中",
         "problem": "尚不能严格区分欠拟合、优化平台与泛化问题。",
-        "solution": "固定32–64个训练样本及污染做拟合诊断；再预选一个seed，从同一第100轮状态建立两个30轮分支，A保持末期学习率，B温和重启学习率。损失、数据序列和额外预算一致，使用验证集评价。",
+        "solution": "预选seed1234，固定训练与验证各60对（每类6对）及污染，做1000次参数更新的小样本拟合诊断；A/B均从同一原第100轮完整权重与Adam状态独立续训30轮，A保持1e-5，B基础学习率5e-5、图像refiner初始2.5e-5，余弦降至共同下限1e-5。原损失、完整训练数据序列和额外预算一致，使用验证集评价；小样本权重不作为A/B初始化。P5图像与P6音频改进均独立保留。",
         "acceptance": [
           "固定训练与验证样本使用同口径指标",
           "两分支公平初始化与预算，并记录优化器/调度器来源",
           "结论来自验证数据，不能针对已看过的测试图选模"
         ],
         "progress": {
-          "implementation": false,
-          "tests": false,
+          "implementation": true,
+          "tests": true,
           "real_inference": false,
           "review": false
         },
-        "evidence": [],
-        "next": "实现并测试固定小样本诊断和公平A/B续训，推送后部署独立P4作业。"
+        "evidence": [
+          {
+            "text": "P4资产导出、固定样本诊断、等预算续训、自动编排及报告已实现；38项测试通过。原第100轮完整权重、Adam和数据指纹已保留，正式实验尚未完成。",
+            "path": "../cross_modal_snn_v15pro/outputs/p4_implementation_tests.log"
+          },
+          {
+            "text": "最终41项P4测试通过；3080Ti真实train60/val60短检查通过，完成1次参数更新及13条件起终点评估。原始训练数据与归一化指纹核验一致。该短检查不属于正式P4结果。",
+            "path": "../cross_modal_snn_v15pro/outputs/p4_implementation_tests.log"
+          }
+        ],
+        "next": "部署并启动固定60对样本的1000次更新诊断；A/B各30轮在v16释放GPU后自动执行，随后结果复核。"
       },
       {
         "id": "P5",
@@ -303,6 +312,14 @@
       {
         "date": "2026-11-01T00:59:09+08:00",
         "event": "P6：音频细节改进独立于P5，两条路径均需推进。"
+      },
+      {
+        "date": "2026-11-01T01:19:46+08:00",
+        "event": "P4：P4实现与功能测试通过；正在部署真实实验，真实推理和结果复核仍未完成。"
+      },
+      {
+        "date": "2026-11-01T01:21:44+08:00",
+        "event": "P4：补充GPU兼容性、原数据校验与真实短检查；A/B等待原v16评估退出后自动运行，原批量128不变。"
       }
     ]
   }
