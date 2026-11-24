@@ -2,6 +2,7 @@
 
 import glob
 import os
+from functools import lru_cache
 
 import torch
 
@@ -49,13 +50,24 @@ def _load_wav_mono(path):
     return wav, int(sr)
 
 
+@lru_cache(maxsize=8)
+def _mel_transform(sample_rate, n_fft, hop, n_mels):
+    import torchaudio
+    return torchaudio.transforms.MelSpectrogram(
+        sample_rate=sample_rate, n_fft=n_fft, hop_length=hop, n_mels=n_mels)
+
+
+@lru_cache(maxsize=8)
+def _resampler(original_rate, sample_rate):
+    import torchaudio
+    return torchaudio.transforms.Resample(original_rate, sample_rate)
+
+
 def log_mel_raw(path, sample_rate, n_mels, n_frames, duration_sec, n_fft=512):
     """读取 wav -> log-mel（未做归一化）。"""
-    import torchaudio
-
     wav, sr = _load_wav_mono(path)
     if sr != sample_rate:
-        wav = torchaudio.functional.resample(wav, sr, sample_rate)
+        wav = _resampler(sr, sample_rate)(wav)
 
     target_len = int(sample_rate * duration_sec)
     if wav.size(1) < target_len:
@@ -64,9 +76,7 @@ def log_mel_raw(path, sample_rate, n_mels, n_frames, duration_sec, n_fft=512):
         wav = wav[:, :target_len]
 
     hop = max(1, target_len // n_frames)
-    mel_t = torchaudio.transforms.MelSpectrogram(
-        sample_rate=sample_rate, n_fft=n_fft, hop_length=hop, n_mels=n_mels,
-    )
+    mel_t = _mel_transform(sample_rate, n_fft, hop, n_mels)
     mel = mel_t(wav).squeeze(0)
     logmel = torch.log1p(mel)
     if logmel.size(1) < n_frames:
@@ -120,15 +130,26 @@ def _fsdd_train_wav_paths(cfg):
     return paths
 
 
-def compute_audio_norm_stats(cfg):
+def audio_norm_paths(cfg):
+    if cfg["data"].get("dataset") == "mnist_audiomnist":
+        from data.audiomnist import recordings
+        paths = recordings(cfg)["train"]
+        # Speaker/digit groups contain 50 repeats. Spread the quantile sample
+        # across all groups and vary the chosen repeat between them.
+        return [path for i, path in enumerate(paths) if (i % 50 + i // 50) % 10 == 0]
+    return _fsdd_train_wav_paths(cfg)
+
+
+def compute_audio_norm_stats(cfg, paths=None, fingerprint=None):
     """在训练集 wav 上统计 log-mel 全局分位数（默认 p1–p99）。"""
     ac = cfg["audio"]
     n_mels, n_frames = audio_feature_shape(cfg)
     p_lo = float(ac.get("norm_percentile_lo", 1.0))
     p_hi = float(ac.get("norm_percentile_hi", 99.0))
-    paths = _fsdd_train_wav_paths(cfg)
+    if paths is None:
+        paths = audio_norm_paths(cfg)
     if not paths:
-        raise FileNotFoundError("无法统计 audio norm：未找到 FSDD 训练 wav。")
+        raise FileNotFoundError("无法统计 audio norm：未找到训练 wav。")
 
     chunks = []
     for f in paths:
@@ -147,7 +168,7 @@ def compute_audio_norm_stats(cfg):
         "n_wavs": len(paths),
     }
     if paper_split(cfg).get("enabled", False):
-        stats["train_fingerprint"] = norm_fingerprint(paths, cfg)
+        stats["train_fingerprint"] = fingerprint or norm_fingerprint(paths, cfg)
     return stats
 
 
@@ -171,8 +192,10 @@ def ensure_audio_norm_stats(cfg):
     n_mels, n_frames = audio_feature_shape(cfg)
 
     fingerprint = None
+    paths = None
     if paper_split(cfg).get("enabled", False):
-        fingerprint = norm_fingerprint(_fsdd_train_wav_paths(cfg), cfg)
+        paths = audio_norm_paths(cfg)
+        fingerprint = norm_fingerprint(paths, cfg)
 
     if os.path.isfile(stats_path):
         stats = load_audio_norm_stats(stats_path)
@@ -183,7 +206,7 @@ def ensure_audio_norm_stats(cfg):
         print(f"[audio] norm stats 尺寸不匹配，重新统计 -> {stats_path}", flush=True)
 
     print(f"[audio] 统计全局 log-mel norm（train wav）...", flush=True)
-    stats = compute_audio_norm_stats(cfg)
+    stats = compute_audio_norm_stats(cfg, paths, fingerprint)
     save_audio_norm_stats(stats, stats_path)
     print(f"[audio] norm stats: lo={stats['lo']:.4f} hi={stats['hi']:.4f} "
           f"({stats['n_wavs']} wavs) -> {stats_path}", flush=True)

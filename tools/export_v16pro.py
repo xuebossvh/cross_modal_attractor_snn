@@ -32,6 +32,8 @@ from models.network import CrossModalSNN
 from models.paper_baselines import CleanRecognizers
 from scripts.evaluate_v15pro import verify_checkpoint_config
 from scripts.v16_evaluation import evaluate
+from scripts.train_v16pro import checkpoint_schema
+from scripts.v17_protocol import ARMS, verify_arm
 from scripts.noise_metrics import preserve_random_state
 from tools.export_v15pro import Tee, verified_export, runtime_source_fingerprint
 from tools.v16_report import (aggregate_reports, numeric_tables, plot_conditions,
@@ -40,6 +42,7 @@ from paths import resolve_from_root
 
 
 MODELS = ("main", "no_value", "no_recurrence")
+EXPORT_MODELS = tuple(dict.fromkeys((*MODELS, *ARMS)))
 
 
 def _json_sha(value):
@@ -57,14 +60,16 @@ def source_fingerprint():
 
 def strict_checkpoint(model, path, cfg, device, stage, allow_smoke=False):
     state = torch.load(path, map_location=device, weights_only=True)
-    if state.get("schema") != "v16pro.training.v1" or "model" not in state:
-        raise ValueError("Expected a v16pro training checkpoint")
+    if state.get("schema") != checkpoint_schema(cfg) or "model" not in state:
+        raise ValueError("Expected a training checkpoint for the configured experiment")
     saved = state.get("cfg", {})
     if saved.get("train", {}).get("stage") != stage or cfg.get("train", {}).get("stage") != stage:
         raise ValueError("Model stage/checkpoint/path mismatch")
     verify_checkpoint_config(cfg, saved)
     if cfg.get("seed") != saved.get("seed") or cfg.get("v16") != saved.get("v16"):
         raise ValueError("Checkpoint seed or v16 semantic configuration mismatch")
+    if cfg.get("v17") != saved.get("v17") or ("v17" in cfg and verify_arm(cfg) != stage):
+        raise ValueError("Checkpoint v17 arm or architecture mismatch")
     if saved.get("_audio_norm_stats") != cfg.get("_audio_norm_stats"):
         raise ValueError("Checkpoint normalization statistics mismatch")
     from scripts.train_v16pro import _runtime_sha256
@@ -139,7 +144,7 @@ def run_export(config_path, checkpoint_path, recognizer_path, output_dir, *, sta
                scans=None):
     config_path, checkpoint_path, recognizer_path, output = map(lambda p: Path(p).resolve(),
                                                                (config_path, checkpoint_path, recognizer_path, output_dir))
-    if stage not in MODELS or min(examples, max_samples) < 0:
+    if stage not in EXPORT_MODELS or min(examples, max_samples) < 0:
         raise ValueError("Invalid stage or negative export limit")
     include_scans = (stage == "main") if scans is None else bool(scans)
     if not all(path.is_file() for path in (config_path, checkpoint_path, recognizer_path)):
@@ -184,6 +189,8 @@ def run_export(config_path, checkpoint_path, recognizer_path, output_dir, *, sta
                 model = CrossModalSNN(cfg).to(selected)
                 state = strict_checkpoint(model, checkpoint_path, cfg, selected, stage, allow_smoke)
                 recognizer, recognizer_state = load_recognizer(recognizer_path, cfg, selected)
+                if recognizer_state.get("max_batches", 0) and not allow_smoke:
+                    raise ValueError("A smoke-only recognizer cannot score a formal export")
                 if file_sha256(checkpoint_path) != identity["checkpoint_sha256"] or file_sha256(recognizer_path) != identity["recognizer_sha256"]:
                     raise RuntimeError("A checkpoint changed during loading")
                 row_path = output / "tables/per_sample.csv.gz"
@@ -200,6 +207,7 @@ def run_export(config_path, checkpoint_path, recognizer_path, output_dir, *, sta
                                                 scans=include_scans, examples=examples, row_sink=sink)
                 artifacts.append(row_path)
                 report.update(seed=cfg["seed"], stage=stage, checkpoint_epoch=state.get("epoch"),
+                              experiment=cfg.get("version", "v16pro"), architecture=cfg.get("v17"),
                               checkpoint_sha256=identity["checkpoint_sha256"],
                               recognizer_sha256=identity["recognizer_sha256"],
                               recognizer_epoch=recognizer_state.get("epoch"),
@@ -230,8 +238,8 @@ def export_suite(root, seeds=(1234, 2345, 3456), *, device="cuda", examples=8, m
     root = Path(root).resolve()
     if len(set(seeds)) != len(seeds) or not seeds or any(seed < 0 for seed in seeds):
         raise ValueError("Seeds must be unique non-negative integers")
-    if not models or len(set(models)) != len(models) or any(model not in MODELS for model in models):
-        raise ValueError("Models must be a nonempty unique subset of main/no_value/no_recurrence")
+    if not models or len(set(models)) != len(models) or any(model not in EXPORT_MODELS for model in models):
+        raise ValueError("Models must be a nonempty unique subset of the available experiment arms")
     if output_name is not None and (Path(output_name).name != output_name or output_name in (".", "..") or "/" in output_name or "\\" in output_name):
         raise ValueError("output-name must be one safe directory name")
     suffix = "" if mask_source == "predicted" else "_" + mask_source
@@ -255,7 +263,8 @@ def export_suite(root, seeds=(1234, 2345, 3456), *, device="cuda", examples=8, m
         reports.append((seed, stage, json.loads((base / child_name / "tables/summary.json").read_text(encoding="utf-8"))))
     contracts = {_json_sha(report["cue_contract"]) for _, _, report in reports}
     counts = {report["n_unique_samples"] for _, _, report in reports}
-    if len(contracts) != 1 or len(counts) != 1:
+    versions = {report.get("experiment", "v16pro") for _, _, report in reports}
+    if len(contracts) != 1 or len(counts) != 1 or len(versions) != 1:
         raise ValueError("Cannot compare models with different cue contracts or evaluation sample counts")
     output = root / report_name
     identity = dict(schema="v16pro-aggregate.v1", child_manifests=manifests, exporter_sha256=source_fingerprint())
@@ -280,7 +289,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default="outputs/v16pro")
     parser.add_argument("--seeds", type=int, nargs="+", default=[1234, 2345, 3456])
-    parser.add_argument("--models", nargs="+", choices=MODELS, default=list(MODELS))
+    parser.add_argument("--models", nargs="+", choices=EXPORT_MODELS, default=list(MODELS))
     parser.add_argument("--device", default="cuda", help="cpu, cuda, or cuda:N")
     parser.add_argument("--examples", type=int, default=8)
     parser.add_argument("--max-samples", type=int, default=0, help="0 is the full test set; positive limits are marked partial")

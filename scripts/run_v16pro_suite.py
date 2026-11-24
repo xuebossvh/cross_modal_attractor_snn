@@ -19,6 +19,7 @@ from common import load_config
 from models.frozen_base import file_sha256
 from paths import PROJECT_ROOT
 from scripts.job_runner import run_job
+from scripts.v17_protocol import configure_arm
 from scripts.run_v15pro_suite import (payload_fingerprint, job_fingerprint,
                                      verified_complete, write_json_atomic)
 
@@ -37,25 +38,47 @@ def source_fingerprint():
 
 def build_plan(base, root, seeds=(1234, 2345, 3456), device=None,
                detector_epochs=10, parent_epochs=100, epochs=30,
-               recognizer_epochs=30, data_root=None, fsdd_root=None):
+               recognizer_epochs=30, data_root=None, fsdd_root=None, *,
+               arms=None, audiomnist_root=None, max_batches=0, batch_size=None,
+               num_workers=None):
     root = Path(root).resolve()
     configs, jobs = {}, []
+    version = "v16pro" if arms is None else "v17pro"
+    if arms is None:
+        stages = [(stage, stage, None) for stage in STAGES]
+    else:
+        stages = [("detector", "detector", None), ("recognizer", "recognizer", None)]
+        stages += [item for arm in arms
+                   for item in (("parent", f"parent_{arm}", arm), (arm, arm, arm))]
     for seed in seeds:
-        for stage in STAGES:
+        for stage, folder, arm in stages:
             cfg = deepcopy(base)
-            cfg.update(seed=seed, version='v16pro', paper_template=False)
+            cfg.update(seed=seed, version=version, paper_template=False)
+            if arm is not None:
+                configure_arm(cfg, arm)
             cfg['device'] = device or cfg.get('device', 'cuda')
             cfg['train']['require_cuda'] = cfg['device'].startswith('cuda')
             if data_root:
                 cfg['data']['root'] = str(Path(data_root).resolve())
             if fsdd_root:
                 cfg['audio']['fsdd_root'] = str(Path(fsdd_root).resolve())
-            directory = root / f'seed_{seed}' / stage
+            if audiomnist_root:
+                cfg['audio']['audiomnist_root'] = str(Path(audiomnist_root).resolve())
+            if batch_size is not None:
+                cfg['data']['batch_size'] = batch_size
+            if num_workers is not None:
+                cfg['data']['num_workers'] = num_workers
+            if arms is not None:
+                cfg.setdefault('paper', {})['root'] = str(root / 'split_audit')
+            directory = root / f'seed_{seed}' / folder
             detector = root / f'seed_{seed}' / 'detector'
             cfg['audio']['norm_stats_path'] = str(root / 'train_audio_norm.pt')
             cfg['noise_detector'].update(checkpoint=str(detector / 'best.pt'),
                 last_checkpoint=str(detector / 'last.pt'), pretrain_epochs=detector_epochs)
+            if max_batches:
+                cfg['noise_detector']['allow_smoke_checkpoint'] = True
             parent = stage.startswith('parent')
+            recovery = stage in (RECOVERY if arms is None else arms)
             cfg['v16'].update(no_value=stage == 'no_value',
                 local_scales=['64'] if parent else ['16', '32', '64'])
             cfg['ablation']['use_recurrent'] = 'no_recurrence' not in stage
@@ -66,14 +89,15 @@ def build_plan(base, root, seeds=(1234, 2345, 3456), device=None,
                 lr=0.001 if stage == 'recognizer' else 0.0002 if parent else 0.0001,
                 ckpt_path=str(directory / 'last.pt'), best_ckpt_path=str(directory / 'best.pt'),
                 eval_ckpt_path=str(directory / 'best.pt'), start_epoch=0,
-                output_version=f'v16pro_{seed}_{stage}', init_ckpt_path='',
+                output_version=f'{version}_{seed}_{folder}', init_ckpt_path='',
                 init_required=False, init_load_optimizer=False, init_strict=True,
                 trainable_prefixes=[], parent_sha256='')
             dependencies = []
-            if parent or stage in RECOVERY:
+            if parent or recovery:
                 dependencies.append(str(detector / 'best.pt'))
-            if stage in RECOVERY:
-                parent_name = 'parent_no_recurrence' if stage == 'no_recurrence' else 'parent'
+            if recovery:
+                parent_name = f'parent_{arm}' if arm is not None else (
+                    'parent_no_recurrence' if stage == 'no_recurrence' else 'parent')
                 parent_path = root / f'seed_{seed}' / parent_name / 'best.pt'
                 cfg['train'].update(init_ckpt_path=str(parent_path), init_required=True,
                     trainable_prefixes=['image_decoder.', 'image_refiner.', 'audio_decoder.',
@@ -87,15 +111,17 @@ def build_plan(base, root, seeds=(1234, 2345, 3456), device=None,
             command = [script, '--config', config_path]
             if stage == 'recognizer':
                 command += ['--kind', 'recognizer']
-            jobs.append(dict(id=f'{seed}_{stage}', kind=stage, epochs=budget, command=command,
+            if max_batches:
+                command += ['--max-batches', str(max_batches)]
+            jobs.append(dict(id=f'{seed}_{folder}', kind=stage, epochs=budget, command=command,
                 outputs=[str(directory / 'best.pt'), str(directory / 'last.pt')],
                 last=str(directory / 'last.pt'), dependencies=dependencies))
     return configs, jobs
 
 
-def execute_plan(root, configs, jobs):
+def execute_plan(root, configs, jobs, version='v16pro'):
     root = Path(root).resolve()
-    description = dict(version='v16pro', source_sha256=source_fingerprint(),
+    description = dict(version=version, source_sha256=source_fingerprint(),
                        configs=configs, jobs=jobs)
     fingerprint = payload_fingerprint(description)
     record = dict(fingerprint=fingerprint, plan=description)
@@ -117,7 +143,7 @@ def execute_plan(root, configs, jobs):
         marker = root / f"{job['id']}.done.json"
         task_hash = job_fingerprint(job, fingerprint)
         if verified_complete(marker, job, task_hash):
-            print(f"[v16pro] verified complete: {job['id']}", flush=True)
+            print(f"[{version}] verified complete: {job['id']}", flush=True)
             continue
         command = list(job['command'])
         if Path(job['last']).is_file():

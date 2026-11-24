@@ -55,7 +55,10 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--kind", choices=("recognizer", "classifier", "cue_cnn", "conditioned_cnn", "matched_cnn"), required=True)
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--max-batches", type=int, default=0)
     args = ap.parse_args()
+    if args.max_batches < 0:
+        ap.error("--max-batches must be nonnegative")
     cfg = load_config(args.config)
     if cfg["train"].get("require_cuda", True) and not torch.cuda.is_available():
         raise RuntimeError("Publication training requires CUDA; use unit tests on CPU")
@@ -72,6 +75,8 @@ def main():
         state = torch.load(last, map_location=device)
         if state.get("kind") != args.kind:
             raise ValueError("Baseline resume kind mismatch")
+        if state.get("max_batches", 0) != args.max_batches:
+            raise ValueError("Baseline resume batch limit mismatch")
         for section in ("paper", "train", "data", "audio"):
             if state.get("cfg", {}).get(section) != cfg.get(section):
                 raise ValueError(f"Baseline resume configuration mismatch: {section}")
@@ -90,6 +95,8 @@ def main():
         model.train()
         loss_sum, n, started = 0., 0, time.perf_counter()
         for step, batch in enumerate(train):
+            if args.max_batches and step >= args.max_batches:
+                break
             family = resolve_train_corrupt_modes(cfg, epoch, step)
             loss, _ = batch_loss(model, batch, cfg, args.kind, sample_cue_mode(cfg), family, device, protos)
             if not torch.isfinite(loss):
@@ -105,6 +112,8 @@ def main():
         score, count = 0., 0
         with torch.no_grad():
             for step, batch in enumerate(val):
+                if args.max_batches and step >= args.max_batches:
+                    break
                 set_seed(20260915 + step)
                 family = resolve_train_corrupt_modes(cfg, 0, step)
                 _, value = batch_loss(model, batch, cfg, args.kind, "corrupt_both", family, device, protos)
@@ -117,7 +126,8 @@ def main():
         improved = score < best_score
         best_score = min(best_score, score)
         state = dict(model=model.state_dict(), opt=opt.state_dict(), epoch=epoch,
-                     best_score=best_score, cfg=cfg, kind=args.kind)
+                     best_score=best_score, cfg=cfg, kind=args.kind,
+                     max_batches=args.max_batches)
         if improved:
             save_checkpoint_atomic(state, best)
         save_checkpoint_atomic(state, last)

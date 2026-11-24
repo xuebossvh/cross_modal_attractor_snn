@@ -20047,3 +20047,12 @@ tail -f v13pro_suite.log
 python scripts/run_v13pro_suite.py --run --speaker_test jackson --speaker_val nicolas --output outputs/v13pro_speaker
 python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal --output outputs/v13pro_ood
 ```
+
+## 2026-11-24 v17pro：三路脉冲状态与 MulT 式交叉注意力
+
+- 基础提交为 v16pro 的 65a80a2，沿用 13 种观测布局和缺失、污染区评价。
+- 新增两个独立私有 LIF，Value 接收本模态私有脉冲和共享循环 Index 脉冲。定向注意力以音频时间片查询图像空间块，投影为共享 Index 的附加电流。
+- 数据改为 MNIST 与 AudioMNIST 按数字类别配对，按说话人划分 42/9/9。归一化使用覆盖全部训练说话人和数字的 2,100 条训练录音，类别代表从训练集选取。
+- shared_sum、three_state、mult、main 的总参数量分别为 22,783,002、22,963,482、22,870,234、23,050,714。四组各自训练父模型和适配端，每个 seed 共用检测器与独立识别器。
+- 单元与协议测试共 91 项通过。新增测试覆盖四组父模型配置、私有突触读出、单模态旁路、注意力掩码及反向梯度。
+- 本地使用真实 MNIST/AudioMNIST、seed 1234、batch 4 和每阶段一个批次进行 CPU 流程核验。共享检测器、内容识别器及 shared_sum、three_state、mult 的父模型与恢复适配完成，验证集阶段可运行。按用户要求停止本地流程，main 短跑和统一测试导出未完成。正式 GPU 训练留待服务器启动。源码交付不附带本地诊断权重和数据。

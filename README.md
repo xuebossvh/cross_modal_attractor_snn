@@ -1,4 +1,18 @@
-# 跨模态循环脉冲记忆：v16pro
+# 跨模态循环脉冲记忆 v17pro
+
+v17pro 在 MNIST 和 AudioMNIST 上比较共享加和、三路脉冲状态、MulT 式交叉注意力和完整模型。四组沿用 13 种输入布局，并共用 42/9/9 的说话人划分。音频时间片查询图像块，图像与音频按数字类别配对。
+
+```bash
+pip install -r requirements.txt
+python scripts/run_v17pro_suite.py
+python -u scripts/run_v17pro_suite.py --run --device cuda --audiomnist-root /path/to/AudioMNIST
+```
+
+默认从 `_data/AudioMNIST` 读取录音，支持数据集根目录及其 `data/` 目录。首次运行计算训练集归一化并缓存 log-mel 特征。MNIST 默认位置为 `_data`，可用 `--data-root` 指定。AudioMNIST 原始数据可从 [数据集仓库](https://github.com/soerenab/AudioMNIST) 获取。
+
+正式套件默认三个种子、四个结构条件，共 30 个训练作业、1,680 个作业轮。各组训练完成后统一导出区域指标、恢复识别率和同种子差值，输出位于 `outputs/v17pro`。实现与运行选项见 [实现指南](docs/implementation.md)。
+
+## v16pro 历史入口
 
 13 种图像/音频 cue 的分类、缺失补全、局部污染检测与恢复实验。全流程关闭 Cross-Key，保留共享 Index。包含 `main`、`no_value`、`no_recurrence` 三种恢复配置，无单尺度消融和 CNN 恢复对比。
 

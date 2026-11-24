@@ -209,23 +209,26 @@ def aggregate_reports(reports, output):
             for (model, condition_id, metric), values in sorted(buckets.items())]
     tasks = [dict(model=model, modality=modality, task=task, metric=metric, **stats(values))
              for (model, modality, task, metric), values in sorted(task_buckets.items())]
+    names = tuple(dict.fromkeys(model for _, model, _ in reports))
+    comparisons = [("main", name) for name in names if name != "main"]
+    if "shared_sum" in names:
+        comparisons.extend((name, "shared_sum") for name in ("mult", "three_state") if name in names)
     paired = []
-    for baseline in ("no_value", "no_recurrence"):
+    for treatment, baseline in comparisons:
         for key, main in task_buckets.items():
             model, modality, task, metric = key
-            if model != "main":
+            if model != treatment:
                 continue
             control = dict(task_buckets.get((baseline, modality, task, metric), []))
             differences = [(seed, value - control[seed]) for seed, value in main if seed in control]
             if differences:
-                paired.append(dict(comparison="main minus " + baseline, modality=modality,
+                paired.append(dict(comparison=treatment + " minus " + baseline, modality=modality,
                                    task=task, metric=metric, **stats(differences)))
     artifacts = [write_csv(output / "tables/across_seeds.csv", rows),
                  write_csv(output / "tables/task_summary_by_seed.csv", per_seed),
                  write_csv(output / "tables/task_summary_mean_sd.csv", tasks),
                  write_csv(output / "tables/paired_ablation_differences.csv", paired)]
     fig, axes = plt.subplots(2, 3, figsize=(14, 8), squeeze=False)
-    names = ("main", "no_value", "no_recurrence")
     for r, modality in enumerate(("img", "aud")):
         for c, task in enumerate(("instance_completion", "instance_denoising", "category_readout")):
             axis = axes[r, c]
@@ -233,7 +236,7 @@ def aggregate_reports(reports, output):
             available = [name for name in names if name in selected]
             axis.bar(available, [selected[name]["mean"] for name in available],
                      yerr=[selected[name]["sample_sd"] or 0 for name in available],
-                     capsize=4, color=["#426f9b", "#d58d38", "#3c927d"][:len(available)])
+                     capsize=4, color=["#426f9b", "#d58d38", "#3c927d", "#79699d"][:len(available)])
             axis.set_title(modality + " | " + task)
             axis.set_ylabel("MSE; seed mean and sample SD")
             axis.tick_params(axis="x", rotation=20)

@@ -5,6 +5,19 @@
 
 ## 0. 当前边界
 
+### v17pro（2026-11-24）
+
+入口 `python scripts/run_v17pro_suite.py` 默认只打印计划。加入 `--run` 执行训练及导出，`--arms` 和 `--seeds` 选择条件和种子。默认正式预算为检测 10 轮、每组父模型 100 轮、每组适配 30 轮和独立识别器 30 轮。配置为 `configs/v17pro.yaml`，输出写入 `outputs/v17pro`。`--data-root` 和 `--audiomnist-root` 指向已有数据。
+
+两路 128 维 Key 各驱动一组 128 维私有 LIF，分别积分、以每步最多 24 个脉冲竞争并复位。共享 Index 512 维，接收当前步的两路私有脉冲并维持循环反馈。Value 神经元分别用突触矩阵接收本模态私有脉冲与共享脉冲。缺席模态一路静默，其 Value 仍从共享 Index 读出。输出额外暴露两个私有状态的脉冲和发放率。
+
+MulT 式模块以 8 个 log-mel 时间片为查询，读取 16 个图像空间块。模块包含位置表示与上下文投影。只使用观测以及合法已知缺失掩码。全遮挡视觉块被屏蔽，任一模态缺席则注意力旁路静默。时间片上下文沿查询轴聚合后投影为共享 Index 的附加电流，在 SNN 仿真步复用。AudioMNIST 时间片与 MNIST 空间块仅按类别关联。
+
+AudioMNIST 使用配置固化的 42/9/9 说话人划分，训练、验证和测试分别有 21,000/4,500/4,500 条录音。沿用 8 kHz 和 64×64 log-mel，归一化与类别代表只读训练录音，缺席模态目标使用训练类别代表。四个结构条件使用同一划分，旧 v16/FSDD 数值仅供历史参考。
+
+沿用 v16 的训练目标、恢复端白名单、验证选模与区域评估。独立结构使用 v17 checkpoint schema，数据、seed、结构及训练谱系继续接受父模型和导出校验。`--max-batches` 和 `--max-samples` 用于小规模核验。
+
+
 v13pro 保留 v12b 模型主线，新增论文实验协议，而不是新的恢复结构。
 MNIST/FSDD 仍是类别级 many-to-many；保留 simultaneous、batch 128、
 Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cue 和 Cross-Key。

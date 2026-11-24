@@ -127,7 +127,7 @@ class RecurrentIndexLayer(nn.Module):
 
     def forward(self, key_img_spikes=None, key_aud_spikes=None, *,
                 external_steps=None, extra_steps=0, perturb_step=None,
-                perturbation=None, return_trace=False):
+                perturbation=None, return_trace=False, cross_modal_current=None):
         assert (key_img_spikes is not None) or (key_aud_spikes is not None), \
             "Index 层至少需要一种模态输入。"
         ref = key_img_spikes if key_img_spikes is not None else key_aud_spikes
@@ -161,6 +161,8 @@ class RecurrentIndexLayer(nn.Module):
                 current = current + img_gate * self.alpha_img * self.W_img_to_A(key_img_spikes[t])
             if has_aud and aud_gate != 0.0:
                 current = current + aud_gate * self.alpha_aud * self.W_aud_to_A(key_aud_spikes[t])
+            if cross_modal_current is not None and t < external_steps:
+                current = current + cross_modal_current
 
             v = self.neuron.beta * v + current
             if return_trace:
@@ -182,6 +184,34 @@ class RecurrentIndexLayer(nn.Module):
 # ----------------------------------------------------------------------------
 # Value 层（每个模态独立实例）
 # ----------------------------------------------------------------------------
+class PrivateIndexLayer(nn.Module):
+    """One modality's independent LIF state and within-group competition."""
+
+    def __init__(self, key_size, size, winners, beta, threshold, alpha):
+        super().__init__()
+        if not 1 <= winners <= size:
+            raise ValueError("Private Index requires 1 <= k_wta <= size")
+        self.projection = nn.Linear(key_size, size)
+        self.size = size
+        self.winners = winners
+        self.neuron = LIFNeuron(beta, threshold, alpha)
+
+    def forward(self, keys):
+        if keys is None:
+            return None
+        current = self.projection(keys)
+        voltage = torch.zeros_like(current[0])
+        spikes = []
+        for step in current:
+            voltage = self.neuron.beta * voltage + step
+            active = spike_fn(voltage - self.neuron.v_threshold, self.neuron.surrogate_alpha)
+            winners = voltage.topk(self.winners, dim=-1).indices
+            active = active * torch.zeros_like(active).scatter_(-1, winners, 1)
+            voltage = voltage * (1 - active.detach())
+            spikes.append(active)
+        return torch.stack(spikes)
+
+
 class ValueLayer(nn.Module):
     """单模态 spiking Value 层，分离两路：
 
@@ -196,20 +226,24 @@ class ValueLayer(nn.Module):
     """
 
     def __init__(self, n_index, d_enc, n_value,
-                 beta=0.9, v_threshold=1.0, surrogate_alpha=2.0):
+                 beta=0.9, v_threshold=1.0, surrogate_alpha=2.0, private_size=0):
         super().__init__()
         self.n_value = n_value
         self.W_A_to_V = nn.Linear(n_index, n_value, bias=True)
+        self.W_private_to_V = nn.Linear(private_size, n_value, bias=False) if private_size else None
         self.W_enc_to_V = nn.Linear(d_enc, n_value, bias=True)   # 仅 target 路
         self.neuron = LIFNeuron(beta, v_threshold, surrogate_alpha)
 
-    def _run_from_A(self, index_spikes):
+    def _run_from_A(self, index_spikes, private_spikes=None):
         T, B, _ = index_spikes.shape
         v = self.neuron.init_state((B, self.n_value),
                                    index_spikes.device, index_spikes.dtype)
         out = []
         for t in range(T):
-            v, s = self.neuron.step(v, self.W_A_to_V(index_spikes[t]))
+            current = self.W_A_to_V(index_spikes[t])
+            if private_spikes is not None:
+                current = current + self.W_private_to_V(private_spikes[t])
+            v, s = self.neuron.step(v, current)
             out.append(s)
         sp = torch.stack(out, dim=0)
         return sp, rate(sp)
@@ -232,8 +266,8 @@ class ValueLayer(nn.Module):
         return sp, rate(sp)
 
     def forward(self, index_spikes, target_enc_spikes=None, phase="readout",
-                use_delayed_target=True, delay=2):
-        a_spikes, a_state = self._run_from_A(index_spikes)
+                use_delayed_target=True, delay=2, private_spikes=None):
+        a_spikes, a_state = self._run_from_A(index_spikes, private_spikes)
         target_state = None
         if phase == "binding" and target_enc_spikes is not None:
             d = delay if use_delayed_target else 0
@@ -259,8 +293,21 @@ class CrossModalAttractorMemory(nn.Module):
         self.K_img = KeyLayer(d["D_img"], d["N_key_img"], beta, vth, alpha)
         self.K_aud = KeyLayer(d["D_aud"], d["N_key_aud"], beta, vth, alpha)
 
+        private = cfg.get("v17", {}).get("private_index", {})
+        private_size = int(private["size"]) if private.get("enabled", False) else 0
+        if private.get("enabled", False) and private_size < 1:
+            raise ValueError("Private Index size must be positive")
+        if private_size:
+            if ix.get("input_schedule", "simultaneous") != "simultaneous":
+                raise ValueError("Private Index uses simultaneous input")
+            self.private_img = PrivateIndexLayer(d["N_key_img"], private_size,
+                                                int(private["k_wta"]), beta, vth, alpha)
+            self.private_aud = PrivateIndexLayer(d["N_key_aud"], private_size,
+                                                int(private["k_wta"]), beta, vth, alpha)
+        else:
+            self.private_img = self.private_aud = None
         self.index = RecurrentIndexLayer(
-            d["N_key_img"], d["N_key_aud"], d["N_index"],
+            private_size or d["N_key_img"], private_size or d["N_key_aud"], d["N_index"],
             beta, vth, alpha,
             alpha_img=ix["alpha_img"], alpha_aud=ix["alpha_aud"],
             recurrent_scale=ix["recurrent_scale"], wta_mode=ix["wta_mode"],
@@ -274,25 +321,33 @@ class CrossModalAttractorMemory(nn.Module):
         )
 
         self.V_img = ValueLayer(d["N_index"], d["D_img"], d["N_value_img"],
-                                beta, vth, alpha)
+                                beta, vth, alpha, private_size)
         self.V_aud = ValueLayer(d["N_index"], d["D_aud"], d["N_value_aud"],
-                                beta, vth, alpha)
+                                beta, vth, alpha, private_size)
 
     def forward(self, spike_img_cue=None, spike_aud_cue=None,
-                spike_img_target=None, spike_aud_target=None, phase="readout"):
+                spike_img_target=None, spike_aud_target=None, phase="readout",
+                cross_modal_current=None):
         key_img = self.K_img(spike_img_cue) if spike_img_cue is not None else None
         key_aud = self.K_aud(spike_aud_cue) if spike_aud_cue is not None else None
 
-        index_spikes, index_state = self.index(key_img, key_aud)
+        private_img = self.private_img(key_img) if self.private_img is not None else None
+        private_aud = self.private_aud(key_aud) if self.private_aud is not None else None
+        index_spikes, index_state = self.index(
+            private_img if self.private_img is not None else key_img,
+            private_aud if self.private_aud is not None else key_aud,
+            cross_modal_current=cross_modal_current)
 
         v_img_sp, v_img_from_A, v_img_target = self.V_img(
             index_spikes, target_enc_spikes=spike_img_target, phase=phase,
-            use_delayed_target=self.use_delayed_target, delay=self.binding_delay)
+            use_delayed_target=self.use_delayed_target, delay=self.binding_delay,
+            private_spikes=private_img)
         v_aud_sp, v_aud_from_A, v_aud_target = self.V_aud(
             index_spikes, target_enc_spikes=spike_aud_target, phase=phase,
-            use_delayed_target=self.use_delayed_target, delay=self.binding_delay)
+            use_delayed_target=self.use_delayed_target, delay=self.binding_delay,
+            private_spikes=private_aud)
 
-        return {
+        result = {
             "key_img": key_img, "key_aud": key_aud,
             "index_spikes": index_spikes, "index_state": index_state,
             "v_img_spikes": v_img_sp, "v_img_from_A": v_img_from_A,
@@ -300,3 +355,8 @@ class CrossModalAttractorMemory(nn.Module):
             "v_aud_spikes": v_aud_sp, "v_aud_from_A": v_aud_from_A,
             "v_aud_target": v_aud_target,
         }
+        if self.private_img is not None:
+            result.update(private_img_spikes=private_img, private_aud_spikes=private_aud,
+                          private_img_state=rate(private_img) if private_img is not None else None,
+                          private_aud_state=rate(private_aud) if private_aud is not None else None)
+        return result

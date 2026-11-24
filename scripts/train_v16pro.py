@@ -34,6 +34,7 @@ from scripts.train import (_img_recon_loss, _aud_recon_loss, _aud_active_loss,
 from scripts.train_noise_detector import choose_device, seed_loader
 from scripts.train_detector_v16pro import validate_v16_detector_checkpoint
 from scripts.v16_evaluation import validate_model
+from scripts.v17_protocol import ARMS, verify_arm
 
 
 SCHEMA = "v16pro.training.v1"
@@ -47,9 +48,22 @@ FORWARD_SECTIONS = ("dims", "snn", "index", "value", "audio", "ablation",
                     "image_refiner", "audio_refiner", "audio_local_cue")
 
 
+def checkpoint_schema(cfg):
+    return "v17pro.training.v1" if "v17" in cfg else SCHEMA
+
+
+def is_adaptation(cfg, stage):
+    return stage in (ARMS if "v17" in cfg else ADAPTATIONS)
+
+
 def validate_training_config(cfg):
     stage = cfg.get("train", {}).get("stage")
-    if not cfg.get("v16", {}).get("enabled", False) or stage not in (*PARENTS, *ADAPTATIONS):
+    if "v17" in cfg:
+        arm = verify_arm(cfg)
+        valid_stage = stage in ("parent", arm)
+    else:
+        valid_stage = stage in (*PARENTS, *ADAPTATIONS)
+    if not cfg.get("v16", {}).get("enabled", False) or not valid_stage:
         raise ValueError("v16 training requires an enabled protocol and a valid train.stage")
     if not cfg.get("noise_detector", {}).get("enabled", False):
         raise ValueError("v16 training requires noise detectors")
@@ -75,7 +89,7 @@ def validate_training_config(cfg):
     if cfg.get("data", {}).get("dataset", "mnist_fsdd") == "mnist_fsdd":
         if not cfg.get("data", {}).get("paper_split", {}).get("enabled", False):
             raise ValueError("v16 selection requires separate train/val/test splits")
-    if stage in ADAPTATIONS and not cfg["train"].get("init_ckpt_path"):
+    if is_adaptation(cfg, stage) and not cfg["train"].get("init_ckpt_path"):
         raise ValueError("Recovery adaptations require a parent checkpoint")
     return stage
 
@@ -84,7 +98,7 @@ def configure_trainable(model, cfg):
     """Freeze the shared core in all matched 30-epoch recovery adaptations."""
     stage = validate_training_config(cfg)
     prefixes = tuple(cfg["train"].get("trainable_prefixes", RECOVERY_PREFIXES))
-    if stage in ADAPTATIONS:
+    if is_adaptation(cfg, stage):
         if set(prefixes) != set(RECOVERY_PREFIXES):
             raise ValueError("v16 recovery must use the shared decoder/local-projector whitelist")
         for name, param in model.named_parameters():
@@ -208,7 +222,7 @@ def load_parent(model, cfg, detector_sha256, smoke_only):
         raise ValueError("Parent checkpoint SHA256 mismatch")
     state = torch.load(parent_path, map_location="cpu", weights_only=True)
     expected_stage = "parent_no_recurrence" if cfg["train"]["stage"] == "no_recurrence" else "parent"
-    if state.get("schema") != SCHEMA or state.get("cfg", {}).get("train", {}).get("stage") != expected_stage:
+    if state.get("schema") != checkpoint_schema(cfg) or state.get("cfg", {}).get("train", {}).get("stage") != expected_stage:
         raise ValueError("Incorrect parent training lineage")
     if config_contract(cfg, parent=True) != config_contract(state["cfg"], parent=True):
         raise ValueError("Parent configuration/protocol mismatch")
@@ -268,7 +282,7 @@ def train_model(cfg, resume=False, max_batches=0, stop_after_epoch=None):
     detector_hash = file_sha256(resolve_from_root(cfg["noise_detector"]["checkpoint"]))
     smoke = bool(max_batches or detector_state.get("metadata", {}).get("smoke_only", False))
     parent_hash = None
-    if stage in ADAPTATIONS:
+    if is_adaptation(cfg, stage):
         parent_hash = load_parent(model, cfg, detector_hash, smoke)
     elif tc.get("init_ckpt_path"):
         raise ValueError("v16 parents must start from scratch")
@@ -291,7 +305,7 @@ def train_model(cfg, resume=False, max_batches=0, stop_after_epoch=None):
         state = torch.load(last_path, map_location=device, weights_only=True)
         best = torch.load(best_path, map_location="cpu", weights_only=True)
         for item in (state, best):
-            if item.get("schema") != SCHEMA or config_contract(item.get("cfg", {})) != config_contract(cfg):
+            if item.get("schema") != checkpoint_schema(cfg) or config_contract(item.get("cfg", {})) != config_contract(cfg):
                 raise ValueError("Resume configuration mismatch")
             if item.get("metadata") != metadata:
                 raise ValueError("Resume source/lineage/smoke metadata mismatch")
@@ -344,7 +358,7 @@ def train_model(cfg, resume=False, max_batches=0, stop_after_epoch=None):
             raise FloatingPointError("Non-finite validation score")
         improved = score < best_score
         best_score = min(score, best_score)
-        state = {"schema": SCHEMA, "stage": stage, "cfg": cfg, "model": model.state_dict(),
+        state = {"schema": checkpoint_schema(cfg), "stage": stage, "cfg": cfg, "model": model.state_dict(),
                  "opt": optimizer.state_dict(), "scheduler": scheduler.state_dict() if scheduler else None,
                  "epoch": epoch, "metadata": metadata, "best_validation_score": best_score,
                  "validation": validation, "training": {key: value / samples for key, value in sums.items()},

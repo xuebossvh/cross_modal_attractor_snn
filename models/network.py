@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
+from .mult import AudioToImageAttention
 from .decoders import (ClassifierHead, ImageDecoder, ImageRefiner,
                        AudioDecoder, AudioRefiner, AudioLocalCueProjector,
                        MaskedLocalCueProjector, MaskedCrossKeyAdapter)
@@ -70,6 +71,10 @@ class CrossModalSNN(nn.Module):
             conv_ch2=s.get("aud_conv_ch2", 32))
 
         self.memory = CrossModalAttractorMemory(cfg)
+        mult = cfg.get("v17", {}).get("mult", {})
+        self.mult = (AudioToImageAttention(ac["n_mels"], ac["n_frames"], d["N_index"],
+                                           int(mult["width"]), int(mult["heads"]))
+                     if mult.get("enabled", False) else None)
 
         self.classifier = ClassifierHead(d["N_index"], d["num_classes"])
         detail_cfg = cfg.get("detail_conditioning", {})
@@ -371,7 +376,8 @@ class CrossModalSNN(nn.Module):
         aud_spikes = (self.aud_encoder(self._normalize_audio_for_encoder(audio))
                       if audio is not None else None)
         mem = self.memory(spike_img_cue=img_spikes, spike_aud_cue=aud_spikes,
-                          phase="readout")
+                          phase="readout",
+                          cross_modal_current=self.mult(image, audio) if self.mult is not None else None)
         return self.classifier(mem["index_state"])
 
     def _decode_masked_cross(self, state, modality, key, cue, mask,
@@ -747,6 +753,8 @@ class CrossModalSNN(nn.Module):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
+        cross_modal_current = (self.mult(x_img_cue, x_aud_cue, img_cue_mask, aud_cue_mask)
+                               if self.mult is not None else None)
         detector_outputs = {}
         if self.use_noise_detector:
             img_cue_mask, aud_cue_mask, detector_outputs = self._noise_repair_masks(
@@ -783,7 +791,7 @@ class CrossModalSNN(nn.Module):
         mem = self.memory(
             spike_img_cue=spike_img_cue, spike_aud_cue=spike_aud_cue,
             spike_img_target=spike_img_tgt, spike_aud_target=spike_aud_tgt,
-            phase=phase)
+            phase=phase, cross_modal_current=cross_modal_current)
 
         out = {
             "index_spikes": mem["index_spikes"],
@@ -795,6 +803,11 @@ class CrossModalSNN(nn.Module):
         }
 
         out.update(detector_outputs)
+        if self.memory.private_img is not None:
+            out.update(private_img_spikes=mem["private_img_spikes"],
+                       private_aud_spikes=mem["private_aud_spikes"],
+                       private_img_state=mem["private_img_state"],
+                       private_aud_state=mem["private_aud_state"])
         out["logits"] = self.classifier(mem["index_state"])
         out["aux_aud_logits"] = None
         if (self.aux_aud_classifier is not None

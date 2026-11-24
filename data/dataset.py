@@ -6,6 +6,8 @@ Audio Encoder 输入、Audio Decoder 输出、audio recovery loss 均使用此�
 
 import csv
 import glob
+import hashlib
+import json
 import os
 import random
 
@@ -140,6 +142,40 @@ def _load_fsdd_by_digit(cfg, train, split=None):
     return by_digit, paths_by_digit
 
 
+def _load_audiomnist_by_digit(cfg, split):
+    from common import save_checkpoint_atomic
+    from data.audiomnist import recordings
+
+    paths = recordings(cfg)[split]
+    ac = cfg["audio"]
+    norm = cfg.get("_audio_norm_stats")
+    features = {key: ac[key] for key in ("sample_rate", "n_mels", "n_frames", "duration_sec", "norm_mode")}
+    stamps = []
+    for path in paths:
+        info = os.stat(path)
+        stamps.append((os.path.basename(path), info.st_size, info.st_mtime_ns))
+    identity = hashlib.sha256(json.dumps([stamps, features, norm], sort_keys=True).encode()).hexdigest()
+    cache_root = resolve_from_root(ac.get("feature_cache_dir", "_data/audiomnist_mel"))
+    cache = cache_root / f"{split}-{identity}.pt"
+    if cache.is_file():
+        values = torch.load(cache, map_location="cpu", weights_only=True)
+    else:
+        values = torch.empty(len(paths), ac["n_mels"], ac["n_frames"])
+        for index, path in enumerate(paths):
+            values[index] = log_mel_from_wav(path, **features, norm_stats=norm)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        save_checkpoint_atomic(values, cache)
+    if values.shape != (len(paths), ac["n_mels"], ac["n_frames"]):
+        raise ValueError(f"Invalid AudioMNIST feature cache: {cache}")
+    by_digit = {digit: [] for digit in range(10)}
+    by_path = {digit: [] for digit in range(10)}
+    for path, feature in zip(paths, values):
+        digit = int(os.path.basename(path).split("_", 1)[0])
+        by_digit[digit].append(feature)
+        by_path[digit].append(path)
+    return by_digit, by_path
+
+
 def _shift_feature(x, amount, dim):
     """无环绕地平移 2D 特征；空出的时频区域填 0。"""
     amount = int(amount)
@@ -213,7 +249,10 @@ class PairedAudioVisualDataset(Dataset):
         self._fsdd = None
         self._fsdd_paths = None
         if self.use_real_audio:
-            self._fsdd, self._fsdd_paths = _load_fsdd_by_digit(cfg, train, self.split)
+            if data_cfg.get("dataset") == "mnist_audiomnist":
+                self._fsdd, self._fsdd_paths = _load_audiomnist_by_digit(cfg, self.split)
+            else:
+                self._fsdd, self._fsdd_paths = _load_fsdd_by_digit(cfg, train, self.split)
         self.toy_audio_prototype = not self.use_real_audio
 
         self.audio_protos = _make_audio_prototypes(
@@ -254,7 +293,8 @@ class PairedAudioVisualDataset(Dataset):
         # test 集通常复用 train 集原型（见 build_loaders）。
         self.prototype_img = None     # [C, 1, 28, 28]，真实 MNIST 样本
         self.prototype_aud = None     # [C, n_mels, n_frames]，真实 log-mel
-        src = "FSDD+log-mel" if self.use_real_audio else "toy"
+        src = ("AudioMNIST+log-mel" if data_cfg.get("dataset") == "mnist_audiomnist"
+               else "FSDD+log-mel" if self.use_real_audio else "toy")
         print(f"[dataset] {self.split} | 图像={self._mode} "
               f"n={len(self)} | 音频={src} shape=[{self.n_mels},{self.n_frames}]",
               flush=True)
@@ -752,7 +792,7 @@ def build_loaders(cfg, eval_split=None, train_required=True):
         train_set = (TruePairedManifestDataset(cfg, split="train")
                      if train_required else None)
         test_set = TruePairedManifestDataset(cfg, split=eval_split)
-    elif dataset_kind == "mnist_fsdd":
+    elif dataset_kind in ("mnist_fsdd", "mnist_audiomnist"):
         if cfg["audio"].get("use_real_audio", True):
             cfg["_audio_norm_stats"] = ensure_audio_norm_stats(cfg)
         else:
