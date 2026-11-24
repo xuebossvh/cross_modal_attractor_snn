@@ -1,6 +1,6 @@
 # 跨模态循环脉冲记忆 v17pro
 
-v17pro 在 MNIST 和 AudioMNIST 上比较共享加和、三路脉冲状态、MulT 式交叉注意力和完整模型。四组共用 13 种输入布局、同一数据划分、污染检测器和内容识别器。
+v17pro 默认在 MNIST 和 AudioMNIST 上训练双树突 Index。两路树突各自积分，512 个循环胞体整合两路输入、逐元素重合和交叉注意力电流。实验沿用 13 种输入布局。
 
 ## 数据与统计
 
@@ -26,7 +26,7 @@ python -u scripts/run_v17pro_suite.py --run --device cuda --audiomnist-root /pat
 
 AudioMNIST 默认位置为 `_data/AudioMNIST`，支持数据集根目录及其 `data/` 目录。首次运行计算训练集归一化并缓存 log-mel 特征。MNIST 默认位置为 `_data`，可用 `--data-root` 指定。
 
-正式套件默认三个种子、四个结构条件，共 30 个训练作业、1,680 个作业轮。各组训练完成后统一导出受损区和干净区误差、恢复内容识别率及同种子差值，输出位于 `outputs/v17pro`。 [实现指南](docs/implementation.md) · [开发日志](docs/dev_log.md)
+正式套件默认三个种子及 `dendritic` 条件，共 12 个训练作业、510 个作业轮。使用 `--arms dendritic dendritic_additive` 可以比较重合系数 0.1 和 0 两组。原加和相关条件可通过 `--arms shared_sum three_state mult main` 选择。默认输出位于 `outputs/v17pro_dendritic`，比较不同实验计划时可用 `--output` 指定目录。 [实现指南](docs/implementation.md) · [开发日志](docs/dev_log.md)
 
 ## 历史版本
 

@@ -213,6 +213,8 @@ def aggregate_reports(reports, output):
     comparisons = [("main", name) for name in names if name != "main"]
     if "shared_sum" in names:
         comparisons.extend((name, "shared_sum") for name in ("mult", "three_state") if name in names)
+    if "dendritic" in names and "dendritic_additive" in names:
+        comparisons.append(("dendritic", "dendritic_additive"))
     paired = []
     for treatment, baseline in comparisons:
         for key, main in task_buckets.items():
@@ -236,7 +238,8 @@ def aggregate_reports(reports, output):
             available = [name for name in names if name in selected]
             axis.bar(available, [selected[name]["mean"] for name in available],
                      yerr=[selected[name]["sample_sd"] or 0 for name in available],
-                     capsize=4, color=["#426f9b", "#d58d38", "#3c927d", "#79699d"][:len(available)])
+                     capsize=4, color=["#426f9b", "#d58d38", "#3c927d", "#79699d",
+                                      "#a15a60", "#567b83"][:len(available)])
             axis.set_title(modality + " | " + task)
             axis.set_ylabel("MSE; seed mean and sample SD")
             axis.tick_params(axis="x", rotation=20)

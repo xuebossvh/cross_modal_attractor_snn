@@ -25,6 +25,7 @@
 import torch
 import torch.nn as nn
 
+from .dendritic_index import DendriticIndexLayer
 from .lif import LIFNeuron, LIFLayer, spike_fn, rate
 
 
@@ -293,10 +294,15 @@ class CrossModalAttractorMemory(nn.Module):
         self.K_img = KeyLayer(d["D_img"], d["N_key_img"], beta, vth, alpha)
         self.K_aud = KeyLayer(d["D_aud"], d["N_key_aud"], beta, vth, alpha)
 
-        private = cfg.get("v17", {}).get("private_index", {})
+        v17 = cfg.get("v17", {})
+        private = v17.get("private_index", {})
+        dendrites = v17.get("dendritic_index", {})
+        self.use_dendrites = dendrites.get("enabled", False)
         private_size = int(private["size"]) if private.get("enabled", False) else 0
         if private.get("enabled", False) and private_size < 1:
             raise ValueError("Private Index size must be positive")
+        if self.use_dendrites and private_size:
+            raise ValueError("Dendritic Index and private LIF groups are mutually exclusive")
         if private_size:
             if ix.get("input_schedule", "simultaneous") != "simultaneous":
                 raise ValueError("Private Index uses simultaneous input")
@@ -306,24 +312,38 @@ class CrossModalAttractorMemory(nn.Module):
                                                 int(private["k_wta"]), beta, vth, alpha)
         else:
             self.private_img = self.private_aud = None
-        self.index = RecurrentIndexLayer(
-            private_size or d["N_key_img"], private_size or d["N_key_aud"], d["N_index"],
-            beta, vth, alpha,
-            alpha_img=ix["alpha_img"], alpha_aud=ix["alpha_aud"],
-            recurrent_scale=ix["recurrent_scale"], wta_mode=ix["wta_mode"],
-            k_wta=ix["k_wta"], inhibition_strength=ix["inhibition_strength"],
-            use_recurrent=ab.get("use_recurrent", True),
-            use_kwta=ab.get("use_kwta", True),
-            input_schedule=ix.get("input_schedule", "simultaneous"),
-            phase_split=ix.get("phase_split", 0.5),
-            phase_current_scale=ix.get("phase_current_scale", 1.0),
-            phase_on_bimodal_only=ix.get("phase_on_bimodal_only", True),
-        )
+        if self.use_dendrites:
+            if (ix.get("input_schedule", "simultaneous") != "simultaneous" or ix["wta_mode"] != "kwta"
+                    or not ab.get("use_recurrent", True) or not ab.get("use_kwta", True)):
+                raise ValueError("Dendritic Index requires simultaneous input, recurrence and k-WTA")
+            self.index = DendriticIndexLayer(
+                d["N_key_img"], d["N_key_aud"], d["N_index"],
+                dendritic_k=int(dendrites.get("dendritic_k", 48)), soma_k=ix["k_wta"],
+                dendritic_beta=float(dendrites.get("dendritic_beta", 0.8)), soma_beta=beta,
+                dendritic_reset=float(dendrites.get("dendritic_reset", 0.3)),
+                coincidence_scale=float(dendrites.get("coincidence_scale", 0.1)),
+                threshold=vth, surrogate_alpha=alpha, recurrent_scale=ix["recurrent_scale"])
+        else:
+            self.index = RecurrentIndexLayer(
+                private_size or d["N_key_img"], private_size or d["N_key_aud"], d["N_index"],
+                beta, vth, alpha,
+                alpha_img=ix["alpha_img"], alpha_aud=ix["alpha_aud"],
+                recurrent_scale=ix["recurrent_scale"], wta_mode=ix["wta_mode"],
+                k_wta=ix["k_wta"], inhibition_strength=ix["inhibition_strength"],
+                use_recurrent=ab.get("use_recurrent", True),
+                use_kwta=ab.get("use_kwta", True),
+                input_schedule=ix.get("input_schedule", "simultaneous"),
+                phase_split=ix.get("phase_split", 0.5),
+                phase_current_scale=ix.get("phase_current_scale", 1.0),
+                phase_on_bimodal_only=ix.get("phase_on_bimodal_only", True),
+            )
 
+        private_readout_size = d["N_index"] if self.use_dendrites else private_size
+        self.classifier_size = d["N_index"] * (3 if self.use_dendrites else 1)
         self.V_img = ValueLayer(d["N_index"], d["D_img"], d["N_value_img"],
-                                beta, vth, alpha, private_size)
+                                beta, vth, alpha, private_readout_size)
         self.V_aud = ValueLayer(d["N_index"], d["D_aud"], d["N_value_aud"],
-                                beta, vth, alpha, private_size)
+                                beta, vth, alpha, private_readout_size)
 
     def forward(self, spike_img_cue=None, spike_aud_cue=None,
                 spike_img_target=None, spike_aud_target=None, phase="readout",
@@ -331,12 +351,21 @@ class CrossModalAttractorMemory(nn.Module):
         key_img = self.K_img(spike_img_cue) if spike_img_cue is not None else None
         key_aud = self.K_aud(spike_aud_cue) if spike_aud_cue is not None else None
 
-        private_img = self.private_img(key_img) if self.private_img is not None else None
-        private_aud = self.private_aud(key_aud) if self.private_aud is not None else None
-        index_spikes, index_state = self.index(
-            private_img if self.private_img is not None else key_img,
-            private_aud if self.private_aud is not None else key_aud,
-            cross_modal_current=cross_modal_current)
+        if self.use_dendrites:
+            states = self.index(key_img, key_aud, cross_modal_current=cross_modal_current,
+                                return_details=False)
+            index_spikes, index_state = states["soma_spikes"], states["soma_rate"]
+            private_img = states["image_drive"] if key_img is not None else None
+            private_aud = states["audio_drive"] if key_aud is not None else None
+            classifier_state = states["classifier_state"]
+        else:
+            private_img = self.private_img(key_img) if self.private_img is not None else None
+            private_aud = self.private_aud(key_aud) if self.private_aud is not None else None
+            index_spikes, index_state = self.index(
+                private_img if self.private_img is not None else key_img,
+                private_aud if self.private_aud is not None else key_aud,
+                cross_modal_current=cross_modal_current)
+            classifier_state = index_state
 
         v_img_sp, v_img_from_A, v_img_target = self.V_img(
             index_spikes, target_enc_spikes=spike_img_target, phase=phase,
@@ -350,6 +379,7 @@ class CrossModalAttractorMemory(nn.Module):
         result = {
             "key_img": key_img, "key_aud": key_aud,
             "index_spikes": index_spikes, "index_state": index_state,
+            "classifier_state": classifier_state,
             "v_img_spikes": v_img_sp, "v_img_from_A": v_img_from_A,
             "v_img_target": v_img_target,
             "v_aud_spikes": v_aud_sp, "v_aud_from_A": v_aud_from_A,

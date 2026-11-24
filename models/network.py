@@ -76,7 +76,7 @@ class CrossModalSNN(nn.Module):
                                            int(mult["width"]), int(mult["heads"]))
                      if mult.get("enabled", False) else None)
 
-        self.classifier = ClassifierHead(d["N_index"], d["num_classes"])
+        self.classifier = ClassifierHead(self.memory.classifier_size, d["num_classes"])
         detail_cfg = cfg.get("detail_conditioning", {})
         self.use_detail_conditioning = detail_cfg.get("enabled", False)
         self.detail_conditioning_detach = detail_cfg.get("detach", True)
@@ -378,7 +378,7 @@ class CrossModalSNN(nn.Module):
         mem = self.memory(spike_img_cue=img_spikes, spike_aud_cue=aud_spikes,
                           phase="readout",
                           cross_modal_current=self.mult(image, audio) if self.mult is not None else None)
-        return self.classifier(mem["index_state"])
+        return self.classifier(mem["classifier_state"])
 
     def _decode_masked_cross(self, state, modality, key, cue, mask,
                              source_missing_ratio, disabled, local_cue=None):
@@ -808,7 +808,7 @@ class CrossModalSNN(nn.Module):
                        private_aud_spikes=mem["private_aud_spikes"],
                        private_img_state=mem["private_img_state"],
                        private_aud_state=mem["private_aud_state"])
-        out["logits"] = self.classifier(mem["index_state"])
+        out["logits"] = self.classifier(mem["classifier_state"])
         out["aux_aud_logits"] = None
         if (self.aux_aud_classifier is not None
                 and mem.get("key_aud") is not None):

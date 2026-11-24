@@ -12,9 +12,15 @@ audio:
   feature_cache_dir: _data/audiomnist_mel
   auto_download: false
 v17:
-  arm: main
-  private_index:
+  arm: dendritic
+  dendritic_index:
     enabled: true
+    dendritic_k: 48
+    dendritic_beta: 0.8
+    dendritic_reset: 0.3
+    coincidence_scale: 0.1
+  private_index:
+    enabled: false
     size: 128
     k_wta: 24
   mult:

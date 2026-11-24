@@ -10,14 +10,15 @@ import sys
 from common import load_config
 from scripts.job_runner import run_job
 from scripts.run_v16pro_suite import build_plan, execute_plan
-from scripts.v17_protocol import ARMS
+from scripts.v17_protocol import ARMS, verify_arm
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/v17pro.yaml")
-    parser.add_argument("--output", default="outputs/v17pro")
-    parser.add_argument("--arms", choices=ARMS, nargs="+", default=list(ARMS))
+    parser.add_argument("--output", default="outputs/v17pro_dendritic")
+    parser.add_argument("--arms", choices=ARMS, nargs="+",
+                        help="Train the selected arms (default: the configured arm)")
     parser.add_argument("--seeds", nargs="+", type=int, default=[1234, 2345, 3456])
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--data-root")
@@ -34,8 +35,8 @@ def main(argv=None):
     parser.add_argument("--skip-eval", action="store_true")
     parser.add_argument("--run", action="store_true")
     args = parser.parse_args(argv)
-    if len(set(args.arms)) != len(args.arms) or len(set(args.seeds)) != len(args.seeds):
-        parser.error("Arms and seeds must be unique")
+    if len(set(args.seeds)) != len(args.seeds):
+        parser.error("Seeds must be unique")
     if any(not 0 <= seed < 2**31 for seed in args.seeds) or not re.fullmatch(r"cpu|cuda(?::\d+)?", args.device):
         parser.error("Invalid seed or device")
     if min(args.detector_epochs, args.parent_epochs, args.epochs, args.recognizer_epochs) < 1:
@@ -49,13 +50,16 @@ def main(argv=None):
     base = load_config(args.config)
     if not base.get("v17") or base.get("data", {}).get("dataset") != "mnist_audiomnist":
         parser.error("v17pro requires the AudioMNIST protocol")
+    arms = args.arms or [verify_arm(base)]
+    if len(set(arms)) != len(arms):
+        parser.error("Arms must be unique")
     root = Path(args.output).resolve()
     configs, jobs = build_plan(base, root, args.seeds, args.device, args.detector_epochs,
                                args.parent_epochs, args.epochs, args.recognizer_epochs,
-                               args.data_root, arms=args.arms, audiomnist_root=args.audiomnist_root,
+                               args.data_root, arms=arms, audiomnist_root=args.audiomnist_root,
                                max_batches=args.max_batches, batch_size=args.batch_size,
                                num_workers=args.num_workers)
-    export = ["tools/export_v16pro.py", "--root", str(root), "--models", *args.arms,
+    export = ["tools/export_v16pro.py", "--root", str(root), "--models", *arms,
               "--seeds", *map(str, args.seeds), "--device", args.device,
               "--max-samples", str(args.max_samples), "--examples", str(args.examples)]
     if args.max_batches:
