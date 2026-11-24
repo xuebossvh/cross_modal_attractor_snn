@@ -1,6 +1,6 @@
 # 实现指南：Cross-Modal Attractor SNN
 
-> 当前实现分支：`v13pro`。先看本文，再看 `docs/dev_log.md` 的真实结果。
+> 当前实验为 `v17pro`。完成的实验与指标见 `docs/dev_log.md`。
 > 研究假设见 `docs/idea_report.md`；用户约束见 `docs/user_requirements.md`。
 
 ## 0. 当前边界
@@ -18,7 +18,9 @@ AudioMNIST 使用配置固化的 42/9/9 说话人划分，训练、验证和测�
 沿用 v16 的训练目标、恢复端白名单、验证选模与区域评估。独立结构使用 v17 checkpoint schema，数据、seed、结构及训练谱系继续接受父模型和导出校验。`--max-batches` 和 `--max-samples` 用于小规模核验。
 
 
-v13pro 保留 v12b 模型主线，新增论文实验协议，而不是新的恢复结构。
+## v13pro 历史实现
+
+v13pro 保留 v12b 模型主线，新增论文实验协议。
 MNIST/FSDD 仍是类别级 many-to-many；保留 simultaneous、batch 128、
 Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cue 和 Cross-Key。
 正式套件从新划分重新训练父模型，不加载曾看过新验证子集的旧版本权重。
@@ -31,7 +33,7 @@ Value + gated own cue、`detach_value_for_recon=true`、多尺度局部音频 cu
 
 | 路径 | 职责 |
 |---|---|
-| `configs/v13pro.yaml` | 唯一活动模板，禁止直接用于 train.py |
+| `configs/v13pro.yaml` | v13pro 历史实验模板 |
 | `scripts/run_v13pro_suite.py` | 生成逐实验 YAML、锁定计划、顺序训练/评估/统计、重启 |
 | `scripts/job_runner.py` | 记录子进程日志，失败停止，清理子进程 |
 | `data/splits.py` | train/val/test 划分、音频内容指纹、划分审计 |
