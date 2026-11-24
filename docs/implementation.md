@@ -13,11 +13,11 @@
 
 树突投影采用无偏置线性层。树突膜电位以 0.8 衰减，驱动使用 `tanh(ReLU(v))`，各自取 top-48。胞体以 0.9 衰减，阈值后最多保留 96 个脉冲。重合电流为两路稀疏驱动的逐元素乘积乘固定系数 `coincidence_scale`，默认为 0.1。胞体发放后清零，同一单元的两路树突膜电位乘 0.7。树突 top-k 限制各自候选数，胞体仍按总电位竞争。用 `coincidence_scale=0` 可保留同构的加性双树突对照。
 
-入口 `python scripts/run_v17pro_suite.py` 默认打印图 A 的 `main` 计划。加入 `--run` 执行训练及导出，`--arms dendritic dendritic_additive` 同时运行重合与纯加和双树突，`--seeds` 选择种子。默认正式预算为检测 10 轮、每组父模型 100 轮、每组适配 30 轮和独立识别器 30 轮。配置为 `configs/v17pro.yaml`。默认组写入 `outputs/v17pro_main`，显式选择其他组时输出目录按组名生成。`--data-root` 和 `--audiomnist-root` 指向已有数据。
+入口 `python scripts/run_v17pro_suite.py` 默认打印双向 `main` 计划。加入 `--run` 执行训练及导出，`--arms main main_unidirectional three_state` 选择双向、旧单向、无注意力三组。默认正式预算为检测 10 轮、每组父模型 100 轮、每组适配 30 轮和独立识别器 30 轮。配置为 `configs/v17pro.yaml`。默认组写入 `outputs/v17pro_main_bidirectional`。`--data-root` 和 `--audiomnist-root` 指向已有数据。
 
 默认 `main` 的两路 128 维 Key 各驱动一组 128 维私有 LIF，分别积分、以每步最多 24 个脉冲竞争并复位。共享 Index 512 维，接收当前步的两路私有脉冲并维持循环反馈。Value 神经元分别用突触矩阵接收本模态私有脉冲与共享脉冲。
 
-MulT 式模块以 8 个 log-mel 时间片为查询，读取 16 个图像空间块。模块包含位置表示与上下文投影。只使用观测以及合法已知缺失掩码。全遮挡视觉块被屏蔽，任一模态缺席则注意力旁路静默。时间片上下文沿查询轴聚合后投影为共享 Index 的附加电流，在 SNN 仿真步复用。AudioMNIST 时间片与 MNIST 空间块仅按类别关联。
+双向模块让 8 个 log-mel 时间片查询 16 个图像块，同时让图像块查询时间片。两方向各自聚合有效查询，并将结果投影为目标 Value 的附加电流。每个仿真步复用该电流。完全遮挡的块或片段从查询平均和键值读取中排除，整侧无有效观测时两方向输出为零。整个模态缺席时走共享 Index 读出。`infer` 的 `disable_attention_to_image`、`disable_attention_to_audio` 可在同一权重上独立关闭两方向。旧单向组保留音频查询图像和共享 Index 注入。AudioMNIST 时间片与 MNIST 空间块仅按类别关联。
 
 AudioMNIST 使用配置固化的 42/9/9 说话人划分，训练、验证和测试分别有 21,000/4,500/4,500 条录音。沿用 8 kHz 和 64×64 log-mel，归一化与类别代表只读训练录音，缺席模态目标使用训练类别代表。v17pro 各结构条件共用同一划分，旧 v16/FSDD 数值仅供历史参考。
 

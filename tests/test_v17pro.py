@@ -4,13 +4,14 @@ from copy import deepcopy
 from io import StringIO
 import sys
 import unittest
+from unittest.mock import patch
 
 import torch
 
 from common import load_config
 from models.dendritic_index import DendriticIndexLayer
 from models.memory import CrossModalAttractorMemory, RecurrentIndexLayer, ValueLayer
-from models.mult import AudioToImageAttention
+from models.mult import AudioToImageAttention, BidirectionalCrossAttention
 from models.network import CrossModalSNN
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from scripts.run_v16pro_suite import build_plan
@@ -69,12 +70,15 @@ class V17Tests(unittest.TestCase):
             run_v17_suite(["--seeds", "1234", "--device", "cpu"])
         self.assertIn("4 training jobs, 170 job-epochs", printed.getvalue())
         self.assertIn("--models main", printed.getvalue())
-        self.assertIn(str(Path("outputs/v17pro_main").resolve()), printed.getvalue())
+        self.assertIn(str(Path("outputs/v17pro_main_bidirectional").resolve()), printed.getvalue())
         default_model = CrossModalSNN(self.cfg)
         self.assertIsInstance(default_model.memory.index, RecurrentIndexLayer)
         self.assertIsNotNone(default_model.memory.private_img)
-        self.assertIsNotNone(default_model.mult)
+        self.assertIsInstance(default_model.mult, BidirectionalCrossAttention)
         self.assertEqual(default_model.classifier.net[0].in_features, 512)
+        legacy_cfg = deepcopy(self.cfg)
+        configure_arm(legacy_cfg, "main_unidirectional")
+        self.assertIsInstance(CrossModalSNN(legacy_cfg).mult, AudioToImageAttention)
         dendritic_cfg = deepcopy(self.cfg)
         configure_arm(dendritic_cfg, "dendritic")
         treatment = CrossModalSNN(dendritic_cfg)
@@ -116,6 +120,50 @@ class V17Tests(unittest.TestCase):
         result.square().sum().backward()
         self.assertGreater(attention.attention.in_proj_weight.grad.abs().sum().item(), 0)
         self.assertIsNone(attention(image, None))
+
+    def test_bidirectional_attention_masks_queries_and_keys(self):
+        torch.manual_seed(32)
+        attention = BidirectionalCrossAttention(64, 64, 12, 16, 16, 4)
+        image, audio = torch.rand(3, 1, 28, 28), torch.rand(3, 64, 64)
+        image_mask, audio_mask = torch.zeros_like(image), torch.zeros_like(audio)
+        image_mask[0].fill_(1)
+        audio_mask[1].fill_(1)
+        image_mask[2, :, :7, :7] = 1
+        audio_mask[2, :, :8] = 1
+        currents = attention(image, audio, image_mask, audio_mask)
+        changed = attention(image.masked_fill(image_mask.bool(), 9),
+                            audio.masked_fill(audio_mask.bool(), 9), image_mask, audio_mask)
+        for current, modified in zip(currents, changed):
+            torch.testing.assert_close(current, modified)
+            self.assertTrue(torch.isfinite(current).all())
+            self.assertEqual(current[:2].count_nonzero().item(), 0)
+            self.assertGreater(current[2].abs().sum().item(), 0)
+        self.assertEqual(tuple(current.shape[-1] for current in currents), (12, 16))
+        sum(current.square().mean() for current in currents).backward()
+        for direction in (attention.image_attention, attention.audio_attention):
+            self.assertGreater(direction.in_proj_weight.grad.abs().sum().item(), 0)
+        self.assertEqual(attention(image, None), (None, None))
+        self.assertEqual(attention(None, audio), (None, None))
+
+    def test_each_attention_direction_only_changes_its_value(self):
+        model = CrossModalSNN(self.cfg).eval()
+        image, audio = torch.rand(1, 1, 28, 28), torch.rand(1, 64, 64)
+        currents = (torch.full((1, 384), 3.0), torch.full((1, 768), 3.0))
+        with patch.object(model.mult, "forward", return_value=currents):
+            both = model.infer(image, audio)
+            no_image = model.infer(image, audio, disable_attention_to_image=True)
+            no_audio = model.infer(image, audio, disable_attention_to_audio=True)
+        torch.testing.assert_close(both["index_state"], no_image["index_state"])
+        torch.testing.assert_close(both["index_state"], no_audio["index_state"])
+        torch.testing.assert_close(both["v_aud_from_A"], no_image["v_aud_from_A"])
+        torch.testing.assert_close(both["v_img_from_A"], no_audio["v_img_from_A"])
+        self.assertFalse(torch.equal(both["v_img_from_A"], no_image["v_img_from_A"]))
+        self.assertFalse(torch.equal(both["v_aud_from_A"], no_audio["v_aud_from_A"]))
+        image_only = model.infer(x_img_cue=image)
+        disabled = model.infer(x_img_cue=image, disable_attention_to_image=True,
+                               disable_attention_to_audio=True)
+        for output in ("v_img_from_A", "v_aud_from_A", "recovered_img", "recovered_aud"):
+            torch.testing.assert_close(image_only[output], disabled[output])
 
 
 if __name__ == "__main__":

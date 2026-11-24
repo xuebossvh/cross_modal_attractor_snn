@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from .encoders import ImageSNNEncoder, AudioSNNEncoder
 from .memory import CrossModalAttractorMemory
-from .mult import AudioToImageAttention
+from .mult import AudioToImageAttention, BidirectionalCrossAttention
 from .decoders import (ClassifierHead, ImageDecoder, ImageRefiner,
                        AudioDecoder, AudioRefiner, AudioLocalCueProjector,
                        MaskedLocalCueProjector, MaskedCrossKeyAdapter)
@@ -72,9 +72,15 @@ class CrossModalSNN(nn.Module):
 
         self.memory = CrossModalAttractorMemory(cfg)
         mult = cfg.get("v17", {}).get("mult", {})
-        self.mult = (AudioToImageAttention(ac["n_mels"], ac["n_frames"], d["N_index"],
-                                           int(mult["width"]), int(mult["heads"]))
-                     if mult.get("enabled", False) else None)
+        self.bidirectional_attention = mult.get("enabled", False) and mult.get("mode") == "bidirectional"
+        self.mult = None
+        if self.bidirectional_attention:
+            self.mult = BidirectionalCrossAttention(
+                ac["n_mels"], ac["n_frames"], d["N_value_img"], d["N_value_aud"],
+                int(mult["width"]), int(mult["heads"]))
+        elif mult.get("enabled", False):
+            self.mult = AudioToImageAttention(ac["n_mels"], ac["n_frames"], d["N_index"],
+                                              int(mult["width"]), int(mult["heads"]))
 
         self.classifier = ClassifierHead(self.memory.classifier_size, d["num_classes"])
         detail_cfg = cfg.get("detail_conditioning", {})
@@ -375,9 +381,10 @@ class CrossModalSNN(nn.Module):
         img_spikes = self.img_encoder(image) if image is not None else None
         aud_spikes = (self.aud_encoder(self._normalize_audio_for_encoder(audio))
                       if audio is not None else None)
+        shared_current = (self.mult(image, audio)
+                          if self.mult is not None and not self.bidirectional_attention else None)
         mem = self.memory(spike_img_cue=img_spikes, spike_aud_cue=aud_spikes,
-                          phase="readout",
-                          cross_modal_current=self.mult(image, audio) if self.mult is not None else None)
+                          phase="readout", cross_modal_current=shared_current)
         return self.classifier(mem["classifier_state"])
 
     def _decode_masked_cross(self, state, modality, key, cue, mask,
@@ -749,12 +756,23 @@ class CrossModalSNN(nn.Module):
                 disable_aud_to_img_cross=False,
                 disable_img_to_aud_detail=False,
                 disable_aud_to_img_detail=False,
-                img_noise_mask=None, aud_noise_mask=None):
+                img_noise_mask=None, aud_noise_mask=None, *,
+                disable_attention_to_image=False, disable_attention_to_audio=False):
         assert (x_img_cue is not None) or (x_aud_cue is not None), \
             "至少需要一种 cue 模态作为输入"
 
-        cross_modal_current = (self.mult(x_img_cue, x_aud_cue, img_cue_mask, aud_cue_mask)
-                               if self.mult is not None else None)
+        cross_modal_current = image_attention_current = audio_attention_current = None
+        if self.bidirectional_attention:
+            image_attention_current, audio_attention_current = self.mult(
+                x_img_cue, x_aud_cue, img_cue_mask, aud_cue_mask)
+            if disable_attention_to_image:
+                image_attention_current = None
+            if disable_attention_to_audio:
+                audio_attention_current = None
+        elif disable_attention_to_image or disable_attention_to_audio:
+            raise ValueError("Directional attention interventions require bidirectional attention")
+        elif self.mult is not None:
+            cross_modal_current = self.mult(x_img_cue, x_aud_cue, img_cue_mask, aud_cue_mask)
         detector_outputs = {}
         if self.use_noise_detector:
             img_cue_mask, aud_cue_mask, detector_outputs = self._noise_repair_masks(
@@ -791,7 +809,9 @@ class CrossModalSNN(nn.Module):
         mem = self.memory(
             spike_img_cue=spike_img_cue, spike_aud_cue=spike_aud_cue,
             spike_img_target=spike_img_tgt, spike_aud_target=spike_aud_tgt,
-            phase=phase, cross_modal_current=cross_modal_current)
+            phase=phase, cross_modal_current=cross_modal_current,
+            image_attention_current=image_attention_current,
+            audio_attention_current=audio_attention_current)
 
         out = {
             "index_spikes": mem["index_spikes"],
@@ -936,7 +956,8 @@ class CrossModalSNN(nn.Module):
               disable_aud_to_img_cross=False,
               disable_img_to_aud_detail=False,
               disable_aud_to_img_detail=False,
-              img_noise_mask=None, aud_noise_mask=None):
+              img_noise_mask=None, aud_noise_mask=None, *,
+              disable_attention_to_image=False, disable_attention_to_audio=False):
         self.eval()
         return self.forward(x_img_cue=x_img_cue, x_aud_cue=x_aud_cue,
                             training_mode=False, phase="readout",
@@ -955,4 +976,6 @@ class CrossModalSNN(nn.Module):
                             disable_img_to_aud_cross=disable_img_to_aud_cross,
                             disable_aud_to_img_cross=disable_aud_to_img_cross,
                             disable_img_to_aud_detail=disable_img_to_aud_detail,
-                            disable_aud_to_img_detail=disable_aud_to_img_detail)
+                            disable_aud_to_img_detail=disable_aud_to_img_detail,
+                            disable_attention_to_image=disable_attention_to_image,
+                            disable_attention_to_audio=disable_attention_to_audio)

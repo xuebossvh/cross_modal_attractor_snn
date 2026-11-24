@@ -235,7 +235,7 @@ class ValueLayer(nn.Module):
         self.W_enc_to_V = nn.Linear(d_enc, n_value, bias=True)   # 仅 target 路
         self.neuron = LIFNeuron(beta, v_threshold, surrogate_alpha)
 
-    def _run_from_A(self, index_spikes, private_spikes=None):
+    def _run_from_A(self, index_spikes, private_spikes=None, attention_current=None):
         T, B, _ = index_spikes.shape
         v = self.neuron.init_state((B, self.n_value),
                                    index_spikes.device, index_spikes.dtype)
@@ -244,6 +244,8 @@ class ValueLayer(nn.Module):
             current = self.W_A_to_V(index_spikes[t])
             if private_spikes is not None:
                 current = current + self.W_private_to_V(private_spikes[t])
+            if attention_current is not None:
+                current = current + attention_current
             v, s = self.neuron.step(v, current)
             out.append(s)
         sp = torch.stack(out, dim=0)
@@ -267,8 +269,8 @@ class ValueLayer(nn.Module):
         return sp, rate(sp)
 
     def forward(self, index_spikes, target_enc_spikes=None, phase="readout",
-                use_delayed_target=True, delay=2, private_spikes=None):
-        a_spikes, a_state = self._run_from_A(index_spikes, private_spikes)
+                use_delayed_target=True, delay=2, private_spikes=None, attention_current=None):
+        a_spikes, a_state = self._run_from_A(index_spikes, private_spikes, attention_current)
         target_state = None
         if phase == "binding" and target_enc_spikes is not None:
             d = delay if use_delayed_target else 0
@@ -347,7 +349,7 @@ class CrossModalAttractorMemory(nn.Module):
 
     def forward(self, spike_img_cue=None, spike_aud_cue=None,
                 spike_img_target=None, spike_aud_target=None, phase="readout",
-                cross_modal_current=None):
+                cross_modal_current=None, image_attention_current=None, audio_attention_current=None):
         key_img = self.K_img(spike_img_cue) if spike_img_cue is not None else None
         key_aud = self.K_aud(spike_aud_cue) if spike_aud_cue is not None else None
 
@@ -370,11 +372,11 @@ class CrossModalAttractorMemory(nn.Module):
         v_img_sp, v_img_from_A, v_img_target = self.V_img(
             index_spikes, target_enc_spikes=spike_img_target, phase=phase,
             use_delayed_target=self.use_delayed_target, delay=self.binding_delay,
-            private_spikes=private_img)
+            private_spikes=private_img, attention_current=image_attention_current)
         v_aud_sp, v_aud_from_A, v_aud_target = self.V_aud(
             index_spikes, target_enc_spikes=spike_aud_target, phase=phase,
             use_delayed_target=self.use_delayed_target, delay=self.binding_delay,
-            private_spikes=private_aud)
+            private_spikes=private_aud, attention_current=audio_attention_current)
 
         result = {
             "key_img": key_img, "key_aud": key_aud,

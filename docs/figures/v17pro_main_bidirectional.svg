@@ -1,0 +1,275 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="183mm" height="82.631mm" viewBox="0 0 824 372" role="img">
+<title>v17pro main with bidirectional cross-attention</title><desc>Two directional attention currents enter the respective Image and Audio Value layers. The recurrent Index still integrates the private spiking pathways.</desc>
+<rect width="824" height="372" fill="#fff"/>
+<g id="connections">
+<polyline points="19,77 805,77" fill="none" stroke="#c8d0dc" stroke-width="0.65" stroke-linejoin="round"/>
+<polyline points="62,136 93,136" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="93,136 88.4,138.25 88.4,133.75" fill="#0087b4"/>
+<polyline points="147,136 178,136" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="178,136 173.4,138.25 173.4,133.75" fill="#0087b4"/>
+<polyline points="216,136 250,136" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="250,136 245.4,138.25 245.4,133.75" fill="#0087b4"/>
+<polyline points="551,136 564,136" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="564,136 559.4,138.25 559.4,133.75" fill="#0087b4"/>
+<polyline points="629,136 636,136" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="636,136 631.4,138.25 631.4,133.75" fill="#0087b4"/>
+<polyline points="712,136 719,136" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="719,136 714.4,138.25 714.4,133.75" fill="#0087b4"/>
+<polyline points="758,136 762,136" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="762,136 757.4,138.25 757.4,133.75" fill="#0087b4"/>
+<polyline points="338,136 510,136" fill="none" stroke="#6d5895" stroke-width="1.2" stroke-linejoin="round"/>
+<polygon points="510,136 505.4,138.25 505.4,133.75" fill="#6d5895"/>
+<polyline points="121,119 121,91 597,91 597,113" fill="none" stroke="#5c7e53" stroke-width="0.78" stroke-linejoin="round"/>
+<polygon points="597,113 594.75,108.4 599.25,108.4" fill="#5c7e53"/>
+<polyline points="709,87 739,87 739,123" fill="none" stroke="#a37025" stroke-width="0.75" stroke-linejoin="round"/>
+<polygon points="739,123 736.75,118.4 741.25,118.4" fill="#a37025"/>
+<polyline points="685,95 685,112" fill="none" stroke="#a37025" stroke-width="0.75" stroke-linejoin="round"/>
+<polygon points="685,112 682.75,107.4 687.25,107.4" fill="#a37025"/>
+<polyline points="62,266 93,266" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="93,266 88.4,268.25 88.4,263.75" fill="#0087b4"/>
+<polyline points="147,266 178,266" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="178,266 173.4,268.25 173.4,263.75" fill="#0087b4"/>
+<polyline points="216,266 250,266" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="250,266 245.4,268.25 245.4,263.75" fill="#0087b4"/>
+<polyline points="551,266 564,266" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="564,266 559.4,268.25 559.4,263.75" fill="#0087b4"/>
+<polyline points="629,266 636,266" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="636,266 631.4,268.25 631.4,263.75" fill="#0087b4"/>
+<polyline points="712,266 719,266" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="719,266 714.4,268.25 714.4,263.75" fill="#0087b4"/>
+<polyline points="758,266 762,266" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="762,266 757.4,268.25 757.4,263.75" fill="#0087b4"/>
+<polyline points="338,266 510,266" fill="none" stroke="#6d5895" stroke-width="1.2" stroke-linejoin="round"/>
+<polygon points="510,266 505.4,268.25 505.4,263.75" fill="#6d5895"/>
+<polyline points="140,274 153,274 153,315 597,315 597,289" fill="none" stroke="#5c7e53" stroke-width="0.78" stroke-linejoin="round"/>
+<polygon points="597,289 599.25,293.6 594.75,293.6" fill="#5c7e53"/>
+<polyline points="709,315 739,315 739,279" fill="none" stroke="#a37025" stroke-width="0.75" stroke-linejoin="round"/>
+<polygon points="739,279 741.25,283.6 736.75,283.6" fill="#a37025"/>
+<polyline points="685,307 685,290" fill="none" stroke="#a37025" stroke-width="0.75" stroke-linejoin="round"/>
+<polygon points="685,290 687.25,294.6 682.75,294.6" fill="#a37025"/>
+<polyline points="75,136 75,191 147,191" fill="none" stroke="#6d5895" stroke-width="0.95" stroke-linejoin="round"/>
+<polygon points="147,191 142.4,193.25 142.4,188.75" fill="#6d5895"/>
+<polyline points="85,266 85,213 147,213" fill="none" stroke="#6d5895" stroke-width="0.95" stroke-linejoin="round"/>
+<polygon points="147,213 142.4,215.25 142.4,210.75" fill="#6d5895"/>
+<polyline points="350,136 350,190 367,190" fill="none" stroke="#0087b4" stroke-width="1.02" stroke-linejoin="round"/>
+<polygon points="367,190 362.4,192.25 362.4,187.75" fill="#0087b4"/>
+<polyline points="359,266 359,225 367,225" fill="none" stroke="#0087b4" stroke-width="1.02" stroke-linejoin="round"/>
+<polygon points="367,225 362.4,227.25 362.4,222.75" fill="#0087b4"/>
+<polyline points="474,191 486,191 486,147 513,147" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="513,147 508.4,149.25 508.4,144.75" fill="#0087b4"/>
+<polyline points="474,225 486,225 486,255 513,255" fill="none" stroke="#0087b4" stroke-width="1.14" stroke-linejoin="round"/>
+<polygon points="513,255 508.4,257.25 508.4,252.75" fill="#0087b4"/>
+<polyline points="473,199 493,199 493,216 474,216" fill="none" stroke="#0087b4" stroke-width="0.83" stroke-linejoin="round"/>
+<polygon points="474,216 478.6,213.75 478.6,218.25" fill="#0087b4"/>
+<polyline points="416,239 416,285" fill="none" stroke="#0087b4" stroke-width="0.91" stroke-linejoin="round"/>
+<polygon points="416,285 413.75,280.4 418.25,280.4" fill="#0087b4"/>
+<polyline points="19,337 805,337" fill="none" stroke="#c8d0dc" stroke-width="0.65" stroke-linejoin="round"/>
+<g id="directional-attention-currents">
+<polyline points="309,191 343,191 343,111 527,111 527,120" fill="none" stroke="#885778" stroke-width="1.05" stroke-linejoin="round"/>
+<polygon points="527,120 529,115.5 525,115.5" fill="#885778"/>
+<polyline points="309,212 329,212 329,244 529,244 529,250" fill="none" stroke="#885778" stroke-width="1.05" stroke-linejoin="round"/>
+<polygon points="529,250 531,245.5 527,245.5" fill="#885778"/>
+</g>
+</g>
+<text x="412" y="24" text-anchor="middle" font-family="Times New Roman, serif" font-size="16" font-weight="700" fill="#223044">v17pro architecture · bidirectional main</text>
+<text x="412" y="44" text-anchor="middle" font-family="Times New Roman, serif" font-size="10.5" font-weight="400" fill="#223044">13 cue layouts   ·   C  clean   |   P  known gaps   |   N  local noise   |   A  absent</text>
+<text x="42" y="69" text-anchor="middle" font-family="Times New Roman, serif" font-size="11.1" font-weight="700" fill="#223044">Observed cues</text>
+<text x="121" y="69" text-anchor="middle" font-family="Times New Roman, serif" font-size="11.1" font-weight="700" fill="#223044">Encoders</text>
+<text x="198" y="69" text-anchor="middle" font-family="Times New Roman, serif" font-size="11.1" font-weight="700" fill="#223044">Key layers</text>
+<text x="342" y="69" text-anchor="middle" font-family="Times New Roman, serif" font-size="11.1" font-weight="700" fill="#223044">Private and shared memory</text>
+<text x="531" y="69" text-anchor="middle" font-family="Times New Roman, serif" font-size="11.1" font-weight="700" fill="#223044">Value layers</text>
+<text x="698" y="69" text-anchor="middle" font-family="Times New Roman, serif" font-size="11.1" font-weight="700" fill="#223044">Reconstruction</text>
+<g id="image-observed">
+<rect x="23" y="117" width="38" height="38" fill="#101622" stroke="#101622" stroke-width="0"/>
+<path d="M 30 125 H 53 L 45 134 M 41 139 L 33 149" fill="none" stroke="#fff" stroke-width="1.45" stroke-linecap="round"/>
+</g>
+<g id="image-recovered">
+<rect x="764" y="117" width="38" height="38" fill="#101622" stroke="#101622" stroke-width="0"/>
+<path d="M 771 125 H 794 L 774 149" fill="none" stroke="#fff" stroke-width="1.45" stroke-linecap="round"/>
+</g>
+<text x="42" y="163.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">MNIST</text>
+<text x="42" y="174.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">1 × 28 × 28</text>
+<g id="image-encoder">
+<polygon points="107.27,129.40 101.55,132.70 95.84,129.40 95.84,122.80 101.55,119.50 107.27,122.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="118.62,129.40 112.91,132.70 107.19,129.40 107.19,122.80 112.91,119.50 118.62,122.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="129.97,129.40 124.26,132.70 118.54,129.40 118.54,122.80 124.26,119.50 129.97,122.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="141.32,129.40 135.61,132.70 129.89,129.40 129.89,122.80 135.61,119.50 141.32,122.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="112.94,139.30 107.23,142.60 101.51,139.30 101.51,132.70 107.23,129.40 112.94,132.70" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="124.30,139.30 118.58,142.60 112.87,139.30 112.87,132.70 118.58,129.40 124.30,132.70" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="135.65,139.30 129.93,142.60 124.22,139.30 124.22,132.70 129.93,129.40 135.65,132.70" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="147.00,139.30 141.28,142.60 135.57,139.30 135.57,132.70 141.28,129.40 147.00,132.70" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="107.27,149.20 101.55,152.50 95.84,149.20 95.84,142.60 101.55,139.30 107.27,142.60" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="118.62,149.20 112.91,152.50 107.19,149.20 107.19,142.60 112.91,139.30 118.62,142.60" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="129.97,149.20 124.26,152.50 118.54,149.20 118.54,142.60 124.26,139.30 129.97,142.60" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="141.32,149.20 135.61,152.50 129.89,149.20 129.89,142.60 135.61,139.30 141.32,142.60" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+</g>
+<text x="121" y="163.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">FC-LIF</text>
+<text x="121" y="174.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">784–256–128</text>
+<g id="image-key">
+<polygon points="191.21,129.65 185.71,132.82 180.21,129.65 180.21,123.30 185.71,120.13 191.21,123.30" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="202.13,129.65 196.63,132.82 191.14,129.65 191.14,123.30 196.63,120.13 202.13,123.30" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="213.06,129.65 207.56,132.82 202.06,129.65 202.06,123.30 207.56,120.13 213.06,123.30" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="196.67,139.18 191.17,142.35 185.67,139.18 185.67,132.82 191.17,129.65 196.67,132.82" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="207.60,139.18 202.10,142.35 196.60,139.18 196.60,132.82 202.10,129.65 207.60,132.82" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="218.52,139.18 213.02,142.35 207.52,139.18 207.52,132.82 213.02,129.65 218.52,132.82" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="191.21,148.70 185.71,151.88 180.21,148.70 180.21,142.35 185.71,139.18 191.21,142.35" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="202.13,148.70 196.63,151.88 191.14,148.70 191.14,142.35 196.63,139.18 202.13,142.35" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="213.06,148.70 207.56,151.88 202.06,148.70 202.06,142.35 207.56,139.18 213.06,142.35" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+</g>
+<text x="198" y="163.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">Image Key</text>
+<text x="198" y="174.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">128 neurons</text>
+<g id="image-private">
+<rect x="252" y="117" width="85" height="38" fill="#eee7f5" stroke="#6d5895" stroke-width="0.85"/>
+<text x="294.5" y="133.1" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.6" font-weight="400" fill="#223044">Image private LIF</text>
+<text x="294.5" y="144.9" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.6" font-weight="400" fill="#223044">128 · kWTA 24</text>
+</g>
+<g id="image-value">
+<polygon points="524.11,129.55 518.52,132.78 512.93,129.55 512.93,123.10 518.52,119.88 524.11,123.10" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="535.20,129.55 529.61,132.78 524.03,129.55 524.03,123.10 529.61,119.88 535.20,123.10" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="546.29,129.55 540.71,132.78 535.12,129.55 535.12,123.10 540.71,119.88 546.29,123.10" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="529.65,139.22 524.07,142.45 518.48,139.22 518.48,132.78 524.07,129.55 529.65,132.78" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="540.75,139.22 535.16,142.45 529.57,139.22 529.57,132.78 535.16,129.55 540.75,132.78" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="551.84,139.22 546.25,142.45 540.67,139.22 540.67,132.78 546.25,129.55 551.84,132.78" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="524.11,148.90 518.52,152.13 512.93,148.90 512.93,142.45 518.52,139.23 524.11,142.45" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="535.20,148.90 529.61,152.13 524.03,148.90 524.03,142.45 529.61,139.23 535.20,142.45" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="546.29,148.90 540.71,152.13 535.12,148.90 535.12,142.45 540.71,139.23 546.29,142.45" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+</g>
+<text x="531" y="163.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">Image Value</text>
+<text x="531" y="174.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">384 neurons</text>
+<g id="image-concat">
+<rect x="566" y="114" width="62" height="44" fill="#ffffff" stroke="#223044" stroke-width="0.85"/>
+<text x="597" y="133.05" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">Gated concat</text>
+<text x="597" y="144.95" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">512</text>
+</g>
+<g id="image-decoder">
+<rect x="638" y="113" width="73" height="46" fill="#dbe5f3" stroke="#223044" stroke-width="0.85"/>
+<text x="674.5" y="133.05" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">Image decoder</text>
+<text x="674.5" y="144.95" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">+ refiner</text>
+</g>
+<g id="image-merge">
+<rect x="721" y="124" width="36" height="24" fill="#ffffff" stroke="#223044" stroke-width="0.85"/>
+<text x="739" y="139" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" font-weight="400" fill="#223044">Merge</text>
+</g>
+<text x="783" y="163.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="700" fill="#223044">Recovered</text>
+<text x="783" y="174.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="700" fill="#223044">image</text>
+<text x="411" y="130" text-anchor="middle" font-family="Times New Roman, serif" font-size="9" font-weight="400" fill="#6d5895">Own image spikes</text>
+<text x="352" y="86" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" font-weight="400" fill="#5c7e53">Own image cue: 128</text>
+<g id="image-repair-mask">
+<rect x="676" y="79" width="32" height="16" fill="#f7e7b2" stroke="#a37025" stroke-width="0.85"/>
+<text x="692" y="90" text-anchor="middle" font-family="Times New Roman, serif" font-size="9" font-weight="400" fill="#223044">Rᵢ</text>
+</g>
+<g id="audio-observed">
+<rect x="23" y="247" width="38" height="38" fill="#101622" stroke="#101622" stroke-width="0"/>
+<path d="M 27 277 Q 33 278 38.5 276 M 46 276 Q 51 275 57 277" stroke="#f5ae6a" stroke-width=".82" fill="none"/>
+<path d="M 27 273.3 Q 33 274.3 38.5 272.3 M 46 272.3 Q 51 271.3 57 273.3" stroke="#e58a73" stroke-width=".82" fill="none"/>
+<path d="M 27 269.6 Q 33 270.6 38.5 268.6 M 46 268.6 Q 51 267.6 57 269.6" stroke="#d86b84" stroke-width=".82" fill="none"/>
+<path d="M 27 265.9 Q 33 266.9 38.5 264.9 M 46 264.9 Q 51 263.9 57 265.9" stroke="#bf587c" stroke-width=".82" fill="none"/>
+<path d="M 27 262.2 Q 33 263.2 38.5 261.2 M 46 261.2 Q 51 260.2 57 262.2" stroke="#a04787" stroke-width=".82" fill="none"/>
+<path d="M 27 258.5 Q 33 259.5 38.5 257.5 M 46 257.5 Q 51 256.5 57 258.5" stroke="#84388e" stroke-width=".82" fill="none"/>
+<path d="M 27 254.8 Q 33 255.8 38.5 253.8 M 46 253.8 Q 51 252.8 57 254.8" stroke="#642d7a" stroke-width=".82" fill="none"/>
+</g>
+<g id="audio-recovered">
+<rect x="764" y="247" width="38" height="38" fill="#101622" stroke="#101622" stroke-width="0"/>
+<path d="M 768 277 Q 774 278 779.5 276  Q 792 275 798 277" stroke="#f5ae6a" stroke-width=".82" fill="none"/>
+<path d="M 768 273.3 Q 774 274.3 779.5 272.3  Q 792 271.3 798 273.3" stroke="#e58a73" stroke-width=".82" fill="none"/>
+<path d="M 768 269.6 Q 774 270.6 779.5 268.6  Q 792 267.6 798 269.6" stroke="#d86b84" stroke-width=".82" fill="none"/>
+<path d="M 768 265.9 Q 774 266.9 779.5 264.9  Q 792 263.9 798 265.9" stroke="#bf587c" stroke-width=".82" fill="none"/>
+<path d="M 768 262.2 Q 774 263.2 779.5 261.2  Q 792 260.2 798 262.2" stroke="#a04787" stroke-width=".82" fill="none"/>
+<path d="M 768 258.5 Q 774 259.5 779.5 257.5  Q 792 256.5 798 258.5" stroke="#84388e" stroke-width=".82" fill="none"/>
+<path d="M 768 254.8 Q 774 255.8 779.5 253.8  Q 792 252.8 798 254.8" stroke="#642d7a" stroke-width=".82" fill="none"/>
+</g>
+<text x="42" y="293.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">AudioMNIST</text>
+<text x="42" y="304.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">64 × 64 log-mel</text>
+<g id="audio-encoder">
+<polygon points="107.27,259.40 101.55,262.70 95.84,259.40 95.84,252.80 101.55,249.50 107.27,252.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="118.62,259.40 112.91,262.70 107.19,259.40 107.19,252.80 112.91,249.50 118.62,252.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="129.97,259.40 124.26,262.70 118.54,259.40 118.54,252.80 124.26,249.50 129.97,252.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="141.32,259.40 135.61,262.70 129.89,259.40 129.89,252.80 135.61,249.50 141.32,252.80" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="112.94,269.30 107.23,272.60 101.51,269.30 101.51,262.70 107.23,259.40 112.94,262.70" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="124.30,269.30 118.58,272.60 112.87,269.30 112.87,262.70 118.58,259.40 124.30,262.70" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="135.65,269.30 129.93,272.60 124.22,269.30 124.22,262.70 129.93,259.40 135.65,262.70" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="147.00,269.30 141.28,272.60 135.57,269.30 135.57,262.70 141.28,259.40 147.00,262.70" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="107.27,279.20 101.55,282.50 95.84,279.20 95.84,272.60 101.55,269.30 107.27,272.60" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="118.62,279.20 112.91,282.50 107.19,279.20 107.19,272.60 112.91,269.30 118.62,272.60" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="129.97,279.20 124.26,282.50 118.54,279.20 118.54,272.60 124.26,269.30 129.97,272.60" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="141.32,279.20 135.61,282.50 129.89,279.20 129.89,272.60 135.61,269.30 141.32,272.60" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+</g>
+<text x="121" y="293.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">Conv-LIF</text>
+<text x="121" y="304.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">128-d spikes</text>
+<g id="audio-key">
+<polygon points="191.21,259.65 185.71,262.83 180.21,259.65 180.21,253.30 185.71,250.13 191.21,253.30" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="202.13,259.65 196.63,262.83 191.14,259.65 191.14,253.30 196.63,250.13 202.13,253.30" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="213.06,259.65 207.56,262.83 202.06,259.65 202.06,253.30 207.56,250.13 213.06,253.30" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="196.67,269.18 191.17,272.35 185.67,269.18 185.67,262.82 191.17,259.65 196.67,262.82" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="207.60,269.18 202.10,272.35 196.60,269.18 196.60,262.82 202.10,259.65 207.60,262.82" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="218.52,269.18 213.02,272.35 207.52,269.18 207.52,262.82 213.02,259.65 218.52,262.82" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="191.21,278.70 185.71,281.88 180.21,278.70 180.21,272.35 185.71,269.17 191.21,272.35" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="202.13,278.70 196.63,281.88 191.14,278.70 191.14,272.35 196.63,269.17 202.13,272.35" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+<polygon points="213.06,278.70 207.56,281.88 202.06,278.70 202.06,272.35 207.56,269.17 213.06,272.35" fill="#dbe5f3" stroke="#223044" stroke-width=".67"/>
+</g>
+<text x="198" y="293.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">Audio Key</text>
+<text x="198" y="304.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">128 neurons</text>
+<g id="audio-private">
+<rect x="252" y="247" width="85" height="38" fill="#eee7f5" stroke="#6d5895" stroke-width="0.85"/>
+<text x="294.5" y="263.1" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.6" font-weight="400" fill="#223044">Audio private LIF</text>
+<text x="294.5" y="274.9" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.6" font-weight="400" fill="#223044">128 · kWTA 24</text>
+</g>
+<g id="audio-value">
+<polygon points="524.11,259.55 518.52,262.77 512.93,259.55 512.93,253.10 518.52,249.88 524.11,253.10" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="535.20,259.55 529.61,262.77 524.03,259.55 524.03,253.10 529.61,249.88 535.20,253.10" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="546.29,259.55 540.71,262.77 535.12,259.55 535.12,253.10 540.71,249.88 546.29,253.10" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="529.65,269.23 524.07,272.45 518.48,269.23 518.48,262.77 524.07,259.55 529.65,262.77" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="540.75,269.23 535.16,272.45 529.57,269.23 529.57,262.77 535.16,259.55 540.75,262.77" fill="#eec5ce" stroke="#223044" stroke-width=".67"/>
+<polygon points="551.84,269.23 546.25,272.45 540.67,269.23 540.67,262.77 546.25,259.55 551.84,262.77" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="524.11,278.90 518.52,282.13 512.93,278.90 512.93,272.45 518.52,269.23 524.11,272.45" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="535.20,278.90 529.61,282.13 524.03,278.90 524.03,272.45 529.61,269.23 535.20,272.45" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+<polygon points="546.29,278.90 540.71,282.13 535.12,278.90 535.12,272.45 540.71,269.23 546.29,272.45" fill="#dce8cf" stroke="#223044" stroke-width=".67"/>
+</g>
+<text x="531" y="293.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">Audio Value</text>
+<text x="531" y="304.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">768 neurons</text>
+<g id="audio-concat">
+<rect x="566" y="244" width="62" height="44" fill="#ffffff" stroke="#223044" stroke-width="0.85"/>
+<text x="597" y="263.05" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">Gated concat</text>
+<text x="597" y="274.95" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">1024</text>
+</g>
+<g id="audio-decoder">
+<rect x="638" y="243" width="73" height="46" fill="#dbe5f3" stroke="#223044" stroke-width="0.85"/>
+<text x="674.5" y="263.05" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">Audio decoder</text>
+<text x="674.5" y="274.95" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.7" font-weight="400" fill="#223044">multi-scale cues</text>
+</g>
+<g id="audio-merge">
+<rect x="721" y="254" width="36" height="24" fill="#ffffff" stroke="#223044" stroke-width="0.85"/>
+<text x="739" y="269" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" font-weight="400" fill="#223044">Merge</text>
+</g>
+<text x="783" y="293.15" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="700" fill="#223044">Recovered</text>
+<text x="783" y="304.85" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="700" fill="#223044">log-mel</text>
+<text x="466" y="280" text-anchor="middle" font-family="Times New Roman, serif" font-size="9" font-weight="400" fill="#6d5895">Own audio spikes</text>
+<text x="366" y="328" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" font-weight="400" fill="#5c7e53">Own audio cue: 256 (projected)</text>
+<g id="audio-repair-mask">
+<rect x="676" y="307" width="32" height="16" fill="#f7e7b2" stroke="#a37025" stroke-width="0.85"/>
+<text x="692" y="318" text-anchor="middle" font-family="Times New Roman, serif" font-size="9" font-weight="400" fill="#223044">Rₐ</text>
+</g>
+<g id="cross-attention">
+<rect x="149" y="181" width="160" height="41" fill="#eee7f5" stroke="#6d5895" stroke-width="0.85"/>
+<text x="229" y="192.5" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" font-weight="700" fill="#223044">Bidirectional cross-attention</text>
+<text x="229" y="204" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.0" font-weight="400" fill="#223044">Image queries audio</text>
+<text x="229" y="215" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.0" font-weight="400" fill="#223044">Audio queries image</text>
+</g>
+<circle cx="75" cy="136" r="1.65" fill="#6d5895"/>
+<circle cx="85" cy="266" r="1.65" fill="#6d5895"/>
+<g id="recurrent-index">
+<rect x="369" y="180" width="104" height="58" fill="#dbe5f3" stroke="#223044" stroke-width="0.85"/>
+<text x="421" y="199.5" text-anchor="middle" font-family="Times New Roman, serif" font-size="10.3" font-weight="400" fill="#223044">Recurrent Index</text>
+<text x="421" y="212" text-anchor="middle" font-family="Times New Roman, serif" font-size="10.3" font-weight="400" fill="#223044">512 neurons</text>
+<text x="421" y="224.5" text-anchor="middle" font-family="Times New Roman, serif" font-size="10.3" font-weight="400" fill="#223044">kWTA 96 · T = 20</text>
+</g>
+<circle cx="350" cy="136" r="1.65" fill="#0087b4"/>
+<circle cx="359" cy="266" r="1.65" fill="#0087b4"/>
+<g id="classifier">
+<rect x="389" y="286" width="63" height="21" fill="#f7e7b2" stroke="#223044" stroke-width="0.85"/>
+<text x="420.5" y="299.5" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" font-weight="400" fill="#223044">Classifier · 10</text>
+</g>
+<text x="412" y="354" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.5" font-weight="400" fill="#223044">Rose paths carry directional attention currents. Purple paths carry modality cues and private spikes. Rᵢ and Rₐ control repair.</text>
+<text x="447" y="105" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" fill="#885778">Audio features → Image Value</text>
+<text x="452" y="254" text-anchor="middle" font-family="Times New Roman, serif" font-size="9.2" fill="#885778">To Audio Value</text>
+</svg>

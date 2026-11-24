@@ -1,6 +1,8 @@
 # 跨模态循环脉冲记忆 v17pro
 
-v17pro 默认在 MNIST 和 AudioMNIST 上运行图 A 的 `main` 配置。图像和音频各有一组 128 单元私有 LIF。512 单元共享 Index 将两路投影电流与交叉注意力电流相加。实验沿用 13 种输入布局。
+v17pro 默认在 MNIST 和 AudioMNIST 上运行双向注意力的 `main`。图像和音频各有一组 128 单元私有 LIF，512 单元共享 Index 整合两路脉冲。两路都有观测时，交叉注意力分别给图像和音频 Value 提供对侧线索。实验沿用 13 种输入布局。
+
+![v17pro 双向注意力框架](docs/figures/v17pro_main_bidirectional.svg)
 
 ## 数据与统计
 
@@ -26,7 +28,7 @@ python -u scripts/run_v17pro_suite.py --run --device cuda --audiomnist-root /pat
 
 AudioMNIST 默认位置为 `_data/AudioMNIST`，支持数据集根目录及其 `data/` 目录。首次运行计算训练集归一化并缓存 log-mel 特征。MNIST 默认位置为 `_data`，可用 `--data-root` 指定。
 
-正式套件默认三个种子及 `main` 条件，共 12 个训练作业、510 个作业轮，输出位于 `outputs/v17pro_main`。使用 `--arms dendritic dendritic_additive` 可以比较双树突重合系数 0.1 和 0 两组。输出目录随所选条件命名，也可用 `--output` 指定。 [实现指南](docs/implementation.md) · [开发日志](docs/dev_log.md)
+正式套件默认三个种子及 `main` 条件，共 12 个训练作业、510 个作业轮，输出位于 `outputs/v17pro_main_bidirectional`。使用 `--arms main main_unidirectional three_state` 可比较双向、旧单向和无注意力三组。音频局部缺失看 C/P，图像局部缺失看 P/C，两路局部缺失看 P/P。单模态条件用于检查旁路和缺席模态的类别读出。 [实现指南](docs/implementation.md) · [开发日志](docs/dev_log.md)
 
 ## 历史版本
 

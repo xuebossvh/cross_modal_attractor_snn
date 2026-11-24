@@ -25,5 +25,6 @@ v17:
     k_wta: 24
   mult:
     enabled: true
+    mode: bidirectional
     width: 64
     heads: 4

@@ -53,7 +53,8 @@ def main(argv=None):
     arms = args.arms or [verify_arm(base)]
     if len(set(arms)) != len(arms):
         parser.error("Arms must be unique")
-    root = Path(args.output or (Path("outputs") / f"v17pro_{'-'.join(arms)}")).resolve()
+    output_arms = ["main_bidirectional" if arm == "main" else arm for arm in arms]
+    root = Path(args.output or (Path("outputs") / f"v17pro_{'-'.join(output_arms)}")).resolve()
     configs, jobs = build_plan(base, root, args.seeds, args.device, args.detector_epochs,
                                args.parent_epochs, args.epochs, args.recognizer_epochs,
                                args.data_root, arms=arms, audiomnist_root=args.audiomnist_root,

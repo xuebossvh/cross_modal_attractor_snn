@@ -20075,3 +20075,9 @@ python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal
 
 - 默认选择 `main`，即双私有 LIF、共享加和 Index 与交叉注意力。显式传入 `--arms dendritic` 可选择图 B。套件按所选组命名输出，默认 `main` 使用 `outputs/v17pro_main`。
 - 99 项测试通过。默认与显式双树突两次 dry run 均生成正确的父模型、适配、导出作业及对应目录。
+
+### v17pro 图像与音频 Value 的双向交叉注意力
+
+- 默认 `main` 有两条注意力输出。图像查询音频，向图像 Value 注入读出的音频特征电流。音频查询图像，向音频 Value 注入读出的图像特征电流。原共享 Index 注入保留在 `main_unidirectional`，`three_state` 关闭注意力。README 框架图同步标明两条直达 Value 的连接。
+- 101 项测试通过。逐方向关断只改变对应 Value，单模态关断前后输出相同，全遮挡查询和键值不会贡献电流。
+- 真实 MNIST/AudioMNIST 的 CPU 流程核验使用 seed 1234，每阶段 1 轮、1 个 4 样本批次，完成检测器、识别器、父模型和恢复适配。双向 `main` 含 23,108,314 个参数，4 个测试样本通过 48 个条件的导出，13 个工件哈希匹配。结果位于本地 `outputs/v17pro_bidirectional_smoke`，正式恢复收益待对照实验测量。
