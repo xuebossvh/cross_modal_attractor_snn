@@ -16,7 +16,7 @@ from scripts.v17_protocol import ARMS, verify_arm
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/v17pro.yaml")
-    parser.add_argument("--output", default="outputs/v17pro_dendritic")
+    parser.add_argument("--output", help="Output directory (default: named for the selected arms)")
     parser.add_argument("--arms", choices=ARMS, nargs="+",
                         help="Train the selected arms (default: the configured arm)")
     parser.add_argument("--seeds", nargs="+", type=int, default=[1234, 2345, 3456])
@@ -53,7 +53,7 @@ def main(argv=None):
     arms = args.arms or [verify_arm(base)]
     if len(set(arms)) != len(arms):
         parser.error("Arms must be unique")
-    root = Path(args.output).resolve()
+    root = Path(args.output or (Path("outputs") / f"v17pro_{'-'.join(arms)}")).resolve()
     configs, jobs = build_plan(base, root, args.seeds, args.device, args.detector_epochs,
                                args.parent_epochs, args.epochs, args.recognizer_epochs,
                                args.data_root, arms=arms, audiomnist_root=args.audiomnist_root,

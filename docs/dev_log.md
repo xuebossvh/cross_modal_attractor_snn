@@ -20070,3 +20070,8 @@ python scripts/run_v13pro_suite.py --run --holdout_audio_family partial_temporal
 - 默认训练条件改为 `dendritic`，重合系数 0.1，交叉注意力作为附加胞体电流。`dendritic_additive` 将系数设为 0，两组各有 23,589,594 个参数。旧四组可从 CLI 选择。报告在两个双树突条件同时运行时汇总同种子差值。
 - 99 项测试通过。默认参数解析、四组历史条件、同权重双树突对照、单模态和双模态前向、注意力到胞体的注入均有覆盖。
 - 真实 MNIST/AudioMNIST CPU 短跑使用 seed 1234，每阶段 1 轮、1 个 4 样本批次，完成检测器、识别器、双树突父模型、恢复适配和 48 个条件的测试导出。核验 4 个独立测试样本、13 个导出工件哈希和 checkpoint 结构。证据在本地 `outputs/v17pro_dendritic_smoke`。本轮为流程测试，正式训练与性能比较尚待执行。
+
+### v17pro 恢复图 A 为默认配置
+
+- 默认选择 `main`，即双私有 LIF、共享加和 Index 与交叉注意力。显式传入 `--arms dendritic` 可选择图 B。套件按所选组命名输出，默认 `main` 使用 `outputs/v17pro_main`。
+- 99 项测试通过。默认与显式双树突两次 dry run 均生成正确的父模型、适配、导出作业及对应目录。

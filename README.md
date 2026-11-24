@@ -1,6 +1,6 @@
 # 跨模态循环脉冲记忆 v17pro
 
-v17pro 默认在 MNIST 和 AudioMNIST 上训练双树突 Index。两路树突各自积分，512 个循环胞体整合两路输入、逐元素重合和交叉注意力电流。实验沿用 13 种输入布局。
+v17pro 默认在 MNIST 和 AudioMNIST 上运行图 A 的 `main` 配置。图像和音频各有一组 128 单元私有 LIF。512 单元共享 Index 将两路投影电流与交叉注意力电流相加。实验沿用 13 种输入布局。
 
 ## 数据与统计
 
@@ -26,7 +26,7 @@ python -u scripts/run_v17pro_suite.py --run --device cuda --audiomnist-root /pat
 
 AudioMNIST 默认位置为 `_data/AudioMNIST`，支持数据集根目录及其 `data/` 目录。首次运行计算训练集归一化并缓存 log-mel 特征。MNIST 默认位置为 `_data`，可用 `--data-root` 指定。
 
-正式套件默认三个种子及 `dendritic` 条件，共 12 个训练作业、510 个作业轮。使用 `--arms dendritic dendritic_additive` 可以比较重合系数 0.1 和 0 两组。原加和相关条件可通过 `--arms shared_sum three_state mult main` 选择。默认输出位于 `outputs/v17pro_dendritic`，比较不同实验计划时可用 `--output` 指定目录。 [实现指南](docs/implementation.md) · [开发日志](docs/dev_log.md)
+正式套件默认三个种子及 `main` 条件，共 12 个训练作业、510 个作业轮，输出位于 `outputs/v17pro_main`。使用 `--arms dendritic dendritic_additive` 可以比较双树突重合系数 0.1 和 0 两组。输出目录随所选条件命名，也可用 `--output` 指定。 [实现指南](docs/implementation.md) · [开发日志](docs/dev_log.md)
 
 ## 历史版本
 

@@ -7,15 +7,15 @@
 
 ### v17pro（2026-11-24）
 
-#### 默认双树突 Index
+#### 双树突 Index
 
 `models/dendritic_index.py` 提供 `DendriticIndexLayer`。默认 512 个胞体，每个单元有图像树突膜电位、音频树突膜电位与胞体膜电位。模块接收两路 Key 序列 `[T,B,128]`，缺席一路传入 `None`。两个 Value 各读取相应树突驱动与胞体脉冲 `[T,B,512]`。分类器读取三路时间均值的拼接 `[B,1536]`。模型输出的 `index_state` 仍为胞体发放率 `[B,512]`，用于 Index 一致性损失。交叉注意力提供额外胞体电流。
 
 树突投影采用无偏置线性层。树突膜电位以 0.8 衰减，驱动使用 `tanh(ReLU(v))`，各自取 top-48。胞体以 0.9 衰减，阈值后最多保留 96 个脉冲。重合电流为两路稀疏驱动的逐元素乘积乘固定系数 `coincidence_scale`，默认为 0.1。胞体发放后清零，同一单元的两路树突膜电位乘 0.7。树突 top-k 限制各自候选数，胞体仍按总电位竞争。用 `coincidence_scale=0` 可保留同构的加性双树突对照。
 
-入口 `python scripts/run_v17pro_suite.py` 默认只打印双树突计划。加入 `--run` 执行训练及导出，`--arms dendritic dendritic_additive` 同时运行重合与纯加和双树突，`--seeds` 选择种子。默认正式预算为检测 10 轮、每组父模型 100 轮、每组适配 30 轮和独立识别器 30 轮。配置为 `configs/v17pro.yaml`，输出写入 `outputs/v17pro_dendritic`。`--data-root` 和 `--audiomnist-root` 指向已有数据。
+入口 `python scripts/run_v17pro_suite.py` 默认打印图 A 的 `main` 计划。加入 `--run` 执行训练及导出，`--arms dendritic dendritic_additive` 同时运行重合与纯加和双树突，`--seeds` 选择种子。默认正式预算为检测 10 轮、每组父模型 100 轮、每组适配 30 轮和独立识别器 30 轮。配置为 `configs/v17pro.yaml`。默认组写入 `outputs/v17pro_main`，显式选择其他组时输出目录按组名生成。`--data-root` 和 `--audiomnist-root` 指向已有数据。
 
-选择 `--arms main` 时，两路 128 维 Key 各驱动一组 128 维私有 LIF，分别积分、以每步最多 24 个脉冲竞争并复位。共享 Index 512 维，接收当前步的两路私有脉冲并维持循环反馈。Value 神经元分别用突触矩阵接收本模态私有脉冲与共享脉冲。
+默认 `main` 的两路 128 维 Key 各驱动一组 128 维私有 LIF，分别积分、以每步最多 24 个脉冲竞争并复位。共享 Index 512 维，接收当前步的两路私有脉冲并维持循环反馈。Value 神经元分别用突触矩阵接收本模态私有脉冲与共享脉冲。
 
 MulT 式模块以 8 个 log-mel 时间片为查询，读取 16 个图像空间块。模块包含位置表示与上下文投影。只使用观测以及合法已知缺失掩码。全遮挡视觉块被屏蔽，任一模态缺席则注意力旁路静默。时间片上下文沿查询轴聚合后投影为共享 Index 的附加电流，在 SNN 仿真步复用。AudioMNIST 时间片与 MNIST 空间块仅按类别关联。
 

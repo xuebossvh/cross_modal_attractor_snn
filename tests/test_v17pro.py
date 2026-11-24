@@ -9,7 +9,7 @@ import torch
 
 from common import load_config
 from models.dendritic_index import DendriticIndexLayer
-from models.memory import CrossModalAttractorMemory, ValueLayer
+from models.memory import CrossModalAttractorMemory, RecurrentIndexLayer, ValueLayer
 from models.mult import AudioToImageAttention
 from models.network import CrossModalSNN
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -63,13 +63,21 @@ class V17Tests(unittest.TestCase):
         self.assertEqual(outputs["v_aud_from_A"].shape, (2, 768))
 
     def test_default_suite_and_dendritic_control(self):
-        self.assertEqual(verify_arm(self.cfg), "dendritic")
+        self.assertEqual(verify_arm(self.cfg), "main")
         printed = StringIO()
         with redirect_stdout(printed):
             run_v17_suite(["--seeds", "1234", "--device", "cpu"])
         self.assertIn("4 training jobs, 170 job-epochs", printed.getvalue())
-        self.assertIn("--models dendritic", printed.getvalue())
-        treatment = CrossModalSNN(self.cfg)
+        self.assertIn("--models main", printed.getvalue())
+        self.assertIn(str(Path("outputs/v17pro_main").resolve()), printed.getvalue())
+        default_model = CrossModalSNN(self.cfg)
+        self.assertIsInstance(default_model.memory.index, RecurrentIndexLayer)
+        self.assertIsNotNone(default_model.memory.private_img)
+        self.assertIsNotNone(default_model.mult)
+        self.assertEqual(default_model.classifier.net[0].in_features, 512)
+        dendritic_cfg = deepcopy(self.cfg)
+        configure_arm(dendritic_cfg, "dendritic")
+        treatment = CrossModalSNN(dendritic_cfg)
         additive_cfg = deepcopy(self.cfg)
         configure_arm(additive_cfg, "dendritic_additive")
         self.assertEqual(verify_arm(additive_cfg), "dendritic_additive")
@@ -78,7 +86,8 @@ class V17Tests(unittest.TestCase):
         self.assertEqual(treatment.memory.index.coincidence_scale, 0.1)
         self.assertEqual(control.memory.index.coincidence_scale, 0.0)
 
-    def test_default_dendrites_are_used_in_model_and_classifier(self):
+    def test_selected_dendrites_are_used_in_model_and_classifier(self):
+        configure_arm(self.cfg, "dendritic")
         model = CrossModalSNN(self.cfg).eval()
         self.assertIsInstance(model.memory.index, DendriticIndexLayer)
         self.assertEqual(model.classifier.net[0].in_features, 1536)
